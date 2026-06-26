@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lecture Animation Pipeline"
+  short_description: "Manim lecture video production workflow"
+  default_prompt: "Use $lecture-animation-pipeline to plan, build, review, and iterate a Manim-based lecture video segment."
