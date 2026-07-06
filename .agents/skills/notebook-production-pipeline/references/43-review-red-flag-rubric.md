@@ -1,0 +1,149 @@
+# Review Red Flag Rubric
+
+This rubric adapts the animation pipeline's reverse-burden review mechanism to
+course notebooks.
+
+The reviewer is not trying to prove that the notebook is acceptable. The
+reviewer is trying to find the strongest reasons it is not yet ready for the
+student, then close those reasons with repair evidence or explicit documented
+non-applicability.
+
+## Default Verdict
+
+Default to `revise`.
+
+Accept only when:
+
+- required skill references and episode feedback have been read and recorded;
+- the notebook and audit artifacts exist;
+- all abstract standards have evidence;
+- all known regressions have been checked;
+- enough candidate red flags have been collected for the risk tier;
+- every candidate flag is `fixed`, `pardoned`, or `not_applicable`;
+- every ranked notebook-quality issue is closed;
+- the final gate command reports pass.
+
+## Risk Tiers
+
+Use the strictest tier that fits the candidate.
+
+```text
+low              Tiny metadata, README, or typo-only change.
+normal           Ordinary notebook creation or repair.
+interactive      Any widget, animation-like output, callback, or rich plot.
+human-rejected   User already rejected the direction or found a serious issue.
+repeat-rejected  Same notebook or pattern has been rejected more than once.
+```
+
+Recommended minimums:
+
+```text
+low:             0 candidate flags, 1 ranked quality item
+normal:          5 candidate flags, 3 ranked quality items
+interactive:     8 candidate flags, 4 ranked quality items
+human-rejected: 12 candidate flags, 5 ranked quality items
+repeat-rejected:18 candidate flags, 7 ranked quality items
+```
+
+A reviewer may exceed the minimum. A reviewer may not lower the minimum without
+writing the downgrade reason in the review JSON and audit report.
+
+## Candidate Red Flags
+
+Each candidate flag is an objection that could block the notebook. It does not
+need to be a final confirmed bug when first recorded. It must be investigated
+and closed.
+
+Allowed statuses:
+
+- `open`: unresolved; pass is impossible.
+- `fixed`: repaired with evidence.
+- `pardoned`: accepted despite the cost, with a reason and owner.
+- `not_applicable`: checked and shown not to apply.
+
+Each flag should include:
+
+- `id`
+- `standard_key`
+- `pattern_key` when it maps to known failures
+- `severity`
+- `evidence`
+- `impact`
+- `suggested_fix`
+- `status`
+- `resolution_evidence` or `pardon_reason` when closed
+
+## Minimum Sweep Groups
+
+Reviewers must actively search these groups:
+
+- course-object alignment: does each section serve the episode's central
+  learning action?
+- problem-driven design: does the notebook test the student's ability to use
+  the video structure in problems, rather than explain or visualize more?
+- exam alignment: are standard course abilities trained without reducing the
+  notebook to ordinary homework?
+- exercise agency: does the student predict, compute, modify, or explain, not
+  merely observe?
+- feedback quality: are wrong answers diagnosed with targeted hints and
+  repair routes?
+- cell modality: is Markdown/code/widget/object lab chosen by teaching
+  function?
+- pattern-card coverage: are reusable mother structures trained through
+  disguised forms when applicable?
+- mathematical causality: are sampling, sums, limits, projections, rotations,
+  conjugation, and approximations exposed as real computational steps?
+- interaction stability: do sliders, callbacks, redraws, output height, and
+  widget state stay stable?
+- output hygiene: are warnings, glyph boxes, tracebacks, huge dumps, and
+  repeated logs absent from saved outputs?
+- presentation boundary: does student-facing prose avoid creator-intent,
+  pipeline, review-gate, draft-status, and implementation-workaround text?
+- static-reading fallback: can GitHub or a non-interactive reader still follow
+  the core lesson?
+- visual readability: are plots, legends, labels, colors, and code/prose
+  density readable?
+- source boundary: are draft, generated, validation, and production files in
+  the correct places?
+- review traceability: are audit outputs, issues, fixes, and user-pending
+  status recorded?
+
+## Ranked Notebook-Quality Sweep
+
+Every non-low-risk review must rank at least three candidates by relative harm.
+Use concrete titles, not vague adjectives.
+
+Examples:
+
+- "1. Most unstable output: Taylor slider redraws and emits font warnings."
+- "2. Weakest exercise: section 3 only asks the student to run a cell."
+- "3. Least course-aligned visual: generic 3D surface does not reinforce the
+  Hilbert-space inner-product action."
+
+These ranked items may overlap with candidate flags, but they must be visible
+as a separate ordered ledger. The purpose is to prevent a polite review from
+missing the worst local quality problems.
+
+## Abstract Standard Keys
+
+Use these keys in review reports and issue JSON:
+
+- `course_object_alignment_failure`
+- `problem_driven_design_failure`
+- `exam_alignment_failure`
+- `feedback_design_failure`
+- `cell_modality_failure`
+- `pattern_card_failure`
+- `demo_gallery_failure`
+- `mathematical_causality_failure`
+- `interaction_stability_failure`
+- `output_hygiene_failure`
+- `presentation_boundary_failure`
+- `source_boundary_failure`
+- `review_gate_bypass_failure`
+
+## Pass Wording
+
+Use `pass_for_user_review_pending` for a candidate that has passed automatic
+and agent review but still needs user direction. Do not write `final_pass`
+unless the user has explicitly approved that notebook direction.

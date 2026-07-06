@@ -15,6 +15,34 @@ failure cases below when they match. If a render violates an abstract standard
 but no existing concrete case fits, create a new `pattern_key` issue instead of
 passing it as "not covered by known failures."
 
+### `review_gate_failure`: Review Starts From Pass Instead Of Reverse Burden
+
+Failure class: the reviewer looks for known blockers and passes the scene when
+no exact rule is triggered. This creates a "疑罪从无" audit, so ambiguous,
+ugly, or novice-hostile scenes pass because the reviewer did not first list
+candidate violations.
+
+Reject when:
+
+- a formula-dense, diagram-dense, or previously human-rejected scene has no
+  red-flag ledger;
+- the audit report lists only passes and no suspected violations;
+- a reviewer says a risk is acceptable without a written novice-viewer reason;
+- subagent prompts omit concrete negative examples for recurring failures.
+
+Acceptable only when:
+
+- the audit starts from `revise`;
+- candidate flags are listed before the verdict;
+- the audit includes a ranked aesthetic/noise sweep naming at least the first,
+  second, and third ugliest/noisiest/least-clear visual candidates;
+- every candidate is `fixed`, `pardoned`, or `not_applicable` with evidence;
+- no `open` candidate remains.
+
+Concrete cases to consult: `Reverse Burden Review Not Applied`, `Human
+Feedback Not Converted To Authoring And Review Regression Tests`, `Subagent
+Review Assumes Expert Knowledge`.
+
 ### `stage_management_failure`: No Conscious Stage Dispatch
 
 Failure class: mathematical objects, formula boards, labels, captions, and
@@ -144,7 +172,8 @@ Acceptable when:
 
 Concrete cases to consult: `Panel Over Active Function Graph`, `Rigid Stage
 Zones`, `Detached Related Formula Groups`, `Overbuilt Multi-View Shot`,
-`Aesthetically Ugly But Technically Correct`.
+`Aesthetically Ugly But Technically Correct`, `Aesthetic Objection
+Under-Enumeration`.
 
 ### `visual_hierarchy_failure`: Decoration Replaces Hierarchy
 
@@ -161,7 +190,8 @@ Reject when:
 
 Concrete cases to consult: `Overdecorated Short Formulas`, `Panel State
 Collision`, `Palette Underuse Or Misuse`, `Text Or Formula Exceeds Its
-Container`, `Misplaced Symbol Highlight`.
+Container`, `Misplaced Symbol Highlight`, `Aesthetic Objection
+Under-Enumeration`.
 
 ### `pedagogical_example_failure`: Example Does Not Reveal The Target Idea
 
@@ -177,6 +207,88 @@ Reject when:
 
 Concrete cases to consult: `Weak Example Functions Hide Product Shape`,
 `Taylor Partial Sum Too Low-Order`, `Sparse To Dense Sampling Jump`.
+
+### `monolithic_scene_file_failure`: One Scene Owns Too Many Responsibilities
+
+Failure class: one Manim `Scene` file owns mathematical drivers, object
+construction, layout, beat scheduling, cleanup, review metadata, and one-off
+audit logic at the same time. Small changes require touching unrelated timing
+and layout code, so external workers and future repairs can break old stage
+ownership while trying to fix one object.
+
+Reject when:
+
+- a small visual change requires editing a large scene method with unrelated
+  timing and layout logic;
+- low-cost agents must understand the whole scene before modifying one object;
+- object identity, zone ownership, and clear intervals are implicit in code;
+- review failures cannot be mapped to a small file or contract field.
+
+Acceptable fix:
+
+- Use a scene-local package with `contract.yaml`, `drivers.py`, `objects.py`,
+  `layout.py`, `beats.py`, `composer.py`, and `audit.py`.
+- Keep the composer thin: it schedules beats from the contract instead of
+  hiding stage decisions inside ad hoc code.
+
+### `contract_bypass_failure`: Code Drifts From The Scene Contract
+
+Failure class: animation code changes object ids, timing, zones, or cleanup
+behavior without updating the scene contract. The review artifact may improve
+locally, but future agents, layout audit, QC anchors, and task handoffs still
+believe the old stage ownership.
+
+Reject when:
+
+- rendered behavior contradicts `contract.yaml`;
+- a new major object appears in code but not in `objects`;
+- a beat reuses a zone without `clear_before`, `clear_after`, or transform
+  identity;
+- QC frames cannot be traced back to beat audit frames.
+
+Acceptable fix:
+
+- Update the contract first, rerun `validate_scene_contract.py`, then render
+  and audit.
+- Treat the contract as the local source of truth for stage ownership.
+
+### `object_factory_scheduling_failure`: Component Code Performs Direction
+
+Failure class: object or component factories secretly call `self.play`,
+`self.wait`, `Scene.add`, `Scene.remove`, or direct timeline scheduling. The
+composer cannot control cleanup, review visibility, or zone reuse because time
+logic is hidden inside object construction.
+
+Reject when:
+
+- `objects.py` or component factories perform animation;
+- object creation depends on the current `Scene` time;
+- composer cannot control cleanup or audit visibility.
+
+Acceptable fix:
+
+- Object factories only create registered Mobjects.
+- Animation belongs in `beats.py`; orchestration belongs in `composer.py`.
+
+### `web_composer_drift_failure`: Browser Preview Becomes A Second Truth
+
+Failure class: a browser or external preview tool becomes the layout source of
+truth even though Manim's LaTeX boxes, camera, Mobject groups, and updater
+lifecycle are different. The preview appears clean while the rendered Manim
+review still overlaps, overflows, or loses object identity.
+
+Reject when:
+
+- a web preview is used as acceptance evidence without Manim render and QC;
+- browser layout positions are manually translated into Manim guesses;
+- the preview and final render disagree but the preview is treated as correct.
+
+Acceptable fix:
+
+- A web viewer may read or edit `contract.yaml`, show stage maps, and display
+  QC frames.
+- Acceptance must come from Manim render, layout audit, review MP4, and tracked
+  issue status.
 
 ## Sibling Worktree Production Drift
 
@@ -201,6 +313,108 @@ Fix:
 - Put QC keyframes in `exports/qc/<qc_id>/` and make the `qc_id` match the reviewed version.
 - Record raw Manim path, review path, QC path, render command, and mux command in `experiment-log.md`.
 - Do not rename legacy outputs just for tidiness; apply the contract from the next render forward.
+
+## External Worker Composition Drift
+
+Failure: an external CLI worker is asked to "design" or broadly implement a
+full lecture-animation scene from a storyboard paragraph. The worker invents
+composition, object ownership, text placement, underlines, connectors, and
+panels. The result may contain the requested labels and formulas, but it has no
+coherent stage dispatch, no math-object-driven cause, and no professional
+visual hierarchy.
+
+Fix:
+
+- The coordinator must own full-shot visual direction. External workers may
+  implement bounded local objects, mechanical Manim code, render/QC extraction,
+  or narrow repairs only after a concrete stage contract exists.
+- Before assigning a writing task to Qoder/Pi/cheap-model workers, provide the
+  exact time window, allowed files, allowed mathematical objects, forbidden
+  additions, stage ownership intervals, cleanup requirements, typography rules,
+  and a reference-frame or final-frame contract.
+- If a worker cannot determine composition from the contract, it must stop and
+  ask. It must not invent a layout.
+- If a render fails at stage ownership or math-object-driven direction, stop
+  patching that render. Redesign the shot at coordinator level, then assign
+  smaller implementation tasks.
+- During review, reject external-worker renders that look like topic maps,
+  random label piles, static slogans, arbitrary underlines, or decorative
+  branches even if the files render and the audio duration matches.
+
+Source example: episode 0000 human feedback on the first Qoder pass for G001,
+G002, G003, and G004.
+
+## Unowned Topic Pile
+
+Failure: a scene meant to criticize "tool pile" teaching or reorganize tools
+into structure becomes an actual random pile of chips, labels, panels, arrows,
+and stale objects. The final frame still reads as clutter, so the visual
+message contradicts the narration.
+
+Fix:
+
+- Clutter is allowed only as a timed, readable critique with a named owner
+  region and a cleanup interval.
+- The final structure must be designed first: which labels remain, where they
+  live, and what relations they prove.
+- Limit the number of simultaneous topic chips. If more than a few names are
+  needed, group them into compact, aligned structures or sequence them over
+  time.
+- Review the final settled frame muted. If it still looks like a pile rather
+  than a structured relation, reject it.
+
+## Static Route Slogans Without Object Driver
+
+Failure: route introductions such as `复平面里的函数` and `函数空间里的函数`
+are drawn as plain lines, labels, or slogans. The shot says there are two
+routes, but no mathematical object causes the split or gives the routes visual
+meaning.
+
+Fix:
+
+- Start from one shared object or problem that naturally branches into the
+  routes.
+- Make each route inherit a visible mathematical object: for example, a local
+  patch/vector under complex multiplication for the complex-plane route, and a
+  sampled function/vector projection for the function-space route.
+- Keep route labels secondary. A route label should name the object relation
+  already visible, not replace it.
+- Reject route maps that would be equally informative as static slide text.
+
+## Text Underline Positioning Drift
+
+Failure: text labels, title baselines, underlines, or focus strokes are placed
+by visual guesswork. Underlines float between labels, extend across unrelated
+space, or become decorative separators. The shot looks unprofessional even
+when the math labels are spelled correctly.
+
+Fix:
+
+- Reserve a title/label lane before placing text.
+- Use bare labels by default. Use an underline only as a temporary focus cue
+  attached to a specific formula or text token.
+- At most one underline should be active in a shot. It must enter, hold, and
+  exit with the object it emphasizes.
+- During QC, inspect full-size frames, not only contact sheets, for title,
+  underline, and label alignment.
+
+## Function Space Decorative Branch Map
+
+Failure: a function-space overview turns into a decorative topic map with broad
+ribbons, side labels, and branch chips. The finite-vector to sampled-function
+to product/sum/integral causality is hidden or skipped.
+
+Fix:
+
+- Begin with samples or components, then show sample values, products, sums,
+  densification, and only then the integral or mode interpretation.
+- Branch labels such as Fourier, operators, eigenvalue problems, special
+  functions, or Green functions must enter as consequences of the constructed
+  object chain, not as the main graphic.
+- Avoid broad ribbons or filled connectors. Use thin anchored links only when
+  they carry a necessary mapping relation.
+- Mute the narration and ask whether the viewer can identify the object chain
+  without reading the branch labels. If not, rebuild the shot.
 
 ## Stale Timeline Review Contract
 
@@ -244,6 +458,64 @@ Fix:
 - During group and final review, reject a QC package whose filenames cannot be
   sorted by time or whose frame set skips the clip's opening state.
 
+## Full Episode QC Missing Boundary Frames
+
+Failure: the official full-episode QC package contains only one settled or
+midpoint frame per group. Segment-level QC may pass, but the stitched episode's
+opening state, ending state, and group-to-group handoffs are not proved by the
+full review evidence.
+
+Fix:
+
+- Extract full-episode QC frames from the full review MP4, not only from
+  segment clips.
+- Include `frame_t000p00s.png`, a near-ending frame, every group midpoint, and
+  before/after frames around each group boundary.
+- Use canonical sortable `frame_tNNNpNNs.png` names and rebuild the full contact
+  sheet only from the current canonical frames.
+- During final total review, reject a full QC package that cannot prove the
+  stitched opening, ending, and transition ownership intervals.
+
+## Export Artifact AppleDouble Sidecars
+
+Failure: macOS creates AppleDouble `._*` metadata files inside generated export
+directories on `/Volumes`. These sidecars may sit next to QC frames, SRT files,
+or alignment JSON and can be mistaken for real artifacts by strict review or
+final-packaging scripts. For example, `._*.json` in `exports/subtitles/` is not
+parseable alignment JSON even though it has a JSON-looking suffix.
+
+Fix:
+
+- Run `dot_clean` on export subdirectories after generating, editing, copying,
+  or patching artifacts on external volumes.
+- Before strict review, verify `find <export-dir> -name '._*'` returns no
+  files for the relevant QC, subtitle, review, or final-output directories.
+- Artifact enumerators should ignore `._*` files, but the production package
+  should still be cleaned before user handoff.
+- Treat AppleDouble sidecars as blockers when they can break parsing, contact
+  sheet generation, subtitle packaging, final stitching, or review evidence
+  enumeration.
+
+## Review Control AppleDouble Sidecars
+
+Failure: AppleDouble `._*` metadata appears beside tracked review-control
+files such as audit Markdown reports, `review/issues/*.json`,
+`review/agent-feedback/*.md`, or `experiment-log.md`. These files are not real
+review records, but strict review scripts may enumerate them and fail JSON
+parsing or treat binary metadata as feedback.
+
+Fix:
+
+- After writing review reports, issue JSON, accepted agent feedback, or
+  experiment-log entries on `/Volumes`, run `dot_clean` on the episode
+  directory before handoff.
+- Verify `find videos/NNNN-slug -name '._*'` returns no files before strict
+  review, user handoff, staging, or commit.
+- If `git status` reports a `.git/objects/pack/._*` warning, run `dot_clean
+  .git` and recheck status before continuing.
+- Reviewers should reject a package when `review/issues/*.json` includes
+  AppleDouble sidecars that break `jq` or issue enumeration.
+
 ## Root Stage Direction Sprawl
 
 Failure: stage-direction notes are scattered as loose root files or mixed with formal storyboards. Agents cannot tell whether a note is formal vault storyboard, production storyboard, implementation choreography, or stale review scratch.
@@ -283,6 +555,201 @@ Fix:
   clean reflection motion so viewers can see identity preservation.
 - Do not accept a final red curve merely because it lies below the axis; it
   must be the actual scalar multiple.
+
+## Flat Mode Overlay False Synthesis
+
+Failure: a function-space or mode-decomposition shot shows a target function
+beside several basis/component curves, but the curves are flat overlays on the
+same coordinate plane or manually shifted into another vertical band. The
+screen appears to claim `f = sum c_n phi_n`, while the viewer cannot see that
+the displayed components actually generate the displayed target.
+
+Fix:
+
+- Expose component functions in the mathematical driver and compute the target
+  function from those same components.
+- Do not manually shift components downward and present them as if they were in
+  the same coordinate system as `f`.
+- Use separated representations when needed: depth layers, small multiples,
+  partial-sum animation, coefficient bars tied to basis functions, or an
+  oblique projection that clearly distinguishes component layers from the base
+  curve.
+- If using a depth-layer display, record the projection as a display mapping in
+  the scene contract and keep the formula `f = sum c_n phi_n` tied to the
+  same driver.
+
+## Fake Camera Rotation By Manual Projection
+
+Failure: a shot asks for a real camera view change, but the code draws objects
+in pre-skewed or manually projected coordinates while the Manim camera remains
+static. The frame may look oblique, but the audience never sees the scene as a
+true 3D mathematical object.
+
+Fix:
+
+- Use `ThreeDScene` or the appropriate camera scene when the visual contract
+  calls for camera rotation.
+- Build the mathematical object in real 3D coordinates from the start. If the
+  opening view should look flat, hide or occlude the extra layers with the
+  initial camera orientation instead of replacing the object later.
+- Use `move_camera`, `set_camera_orientation`, or a declared camera frame move
+  for the view change. Do not hand-project a 3D look into 2D coordinates.
+- If the layout must stay fixed, a declared in-place rotation of the real 3D
+  object group can replace camera motion; this is still a real 3D transform,
+  not a manually projected 2D drawing.
+- Keep screen text and formula boards fixed in frame when needed, but keep the
+  active mathematical object inside the 3D world.
+- Record the camera requirement in `contract.yaml` under
+  `visual_reference.camera_motion` and include before/during/after camera
+  frames in QC.
+
+## Camera Motion Overemphasis
+
+Failure: a camera move is technically real, but it becomes the visual spectacle
+instead of quietly revealing a mathematical relation. This often happens when a
+small 3D tilt would be enough to show depth, but the scene rotates so far that
+the object, formulas, and stage hierarchy become secondary.
+
+Fix:
+
+- Choose the minimum camera movement that reveals the hidden relation.
+- Keep the active mathematical object readable before, during, and after the
+  camera move.
+- If the teaching point is only "these objects are layered," use a small tilt,
+  not a dramatic orbit.
+- Record the intended camera amplitude in the scene contract and inspect
+  before/during/after QC frames.
+
+## Stage Recentered By Camera Reveal
+
+Failure: a local 3D reveal uses camera `frame_center`, pan, or zoom to move the
+active stage object toward screen center even though the object already has an
+assigned layout zone. The viewer reads the motion as a layout reset, not as a
+small reveal of hidden depth.
+
+Fix:
+
+- If the goal is only to reveal that a local object is layered, keep the camera
+  frame fixed and rotate or tilt the 3D object group in place around a local
+  anchor.
+- Preserve the object's assigned stage zone before, during, and after the 3D
+  reveal unless the scene contract explicitly declares a takeover or recenter.
+- When dropping elevated layers after an in-place rotation, move them along the
+  rotated local depth direction, not the screen's unrotated vertical or depth
+  axis.
+- Record this policy in `contract.yaml` under
+  `visual_reference.camera_motion` and include before/during/after QC frames.
+
+## Shared Driver But Visual Object Swap
+
+Failure: two objects are generated from the same mathematical driver, but the
+animation replaces one visible object with another in a way that viewers read
+as a new object. This is common in 2D-to-3D reveals, local zooms, and
+decomposition diagrams: the code may reuse `f(x)`, but the screen makes the
+original function, point, region, or curve feel swapped.
+
+Fix:
+
+- Preserve the actual visible Mobject across the transition whenever possible:
+  rotate, move, reparent, or restyle the original object instead of replacing
+  it with a separately constructed twin.
+- If a new Mobject is unavoidable, match coordinates, stroke, scale, and
+  identity cues exactly, and make the transform visibly identity-preserving.
+- For 2D-to-3D reveals, the initially visible base object should become the
+  base layer of the 3D stage; upper layers may enter later.
+- Add before/during/after QC frames for the transition, not just the settled
+  start and final states.
+
+## Incomplete 3D Layer Box
+
+Failure: a basis-layer or mode-decomposition shot is described as a 3D object,
+but the render only shows several skewed axes or curves. The object does not
+have a readable cuboid-like layer-stack structure: corresponding layer
+directions do not read as parallel, depth separation is missing or ambiguous,
+and viewers cannot tell which plane is the base `f(x)` and which planes carry
+the basis functions.
+
+Fix:
+
+- Build the layered object as one complete 3D stage: shared base footprint,
+  upper parallel layer cues, and a consistent depth direction.
+- Do not literalize the cuboid model as a visible enclosing border unless the
+  border itself is a named mathematical object. Usually the cuboid should be a
+  construction rule, while the visible evidence is layer separation, restrained
+  axes or layer cues, curves, and labels.
+- Opening view should show the base layer only when the narration introduces
+  `f(x)`. Hidden upper layers must not leak into the initial flat view.
+- Reveal the basis layers, then use a small in-place rotation or declared
+  orthographic view change so the audience can see the layer separation.
+- Do not draw multiple independent coordinate axes that can be mistaken for
+  non-parallel sides of a broken 3D object. If layer axes are drawn, they must
+  belong to the same cuboid geometry and preserve parallel directions. Do not
+  default to drawing grids on every layer; that is a separate clutter failure
+  unless the grid itself is the mathematical object being taught.
+- In the contract, record whether the display is a true `ThreeDScene` object
+  tilt or a declared no-perspective orthographic projection of a 3D model.
+- QC must include opening, pre-rotation, during/post-rotation, and final
+  frames. Reviewers should reject the scene if muting narration leaves the
+  layer object visually ambiguous.
+
+## Literal 3D Box Border Overcorrection
+
+Failure: after a reviewer asks for a cuboid-like or layer-box object, the
+animator draws a literal rectangular cage, outer border, or four depth edges
+around the mathematical object. The border becomes an extra visual object and
+can be read as a container, boundary condition, domain wall, or decorative
+frame, even though the lesson only needs layer geometry.
+
+Fix:
+
+- Treat the cuboid as the coordinate model or spatial organization, not
+  automatically as something to outline.
+- Prefer borderless cues: separated curves, short layer axes when needed,
+  consistent depth motion, labels attached to layers, and restrained opacity.
+- If an outer border is mathematically necessary, name its role in the stage
+  direction and keep it visually secondary.
+- Review should reject visible box borders that exist only to make the 3D
+  effect obvious.
+
+## Layer Grid Clutter In 3D Basis Object
+
+Failure: a stacked 3D basis, mode-decomposition, or layer object draws grid
+lines on every layer. The repeated low-opacity guides visually dominate the
+curves, create a noisy mesh, and make the depth relation less clear rather than
+more clear. This is a `visual_hierarchy_failure` and an
+`aesthetically_ugly_but_technically_correct` regression even if the underlying
+curves are generated from the correct driver.
+
+Fix:
+
+- Default layer-stack objects to no grid. Use the mathematical curves, labels,
+  depth separation, and at most restrained layer axes to show the structure.
+- Draw a grid only when the grid itself is the mathematical object being
+  taught, such as a coordinate transform or sampled domain. Record that role in
+  stage direction and `contract.yaml`.
+- During review, the ranked aesthetic/noise sweep must explicitly ask whether
+  helper lines, axes, or grids are the noisiest visible element. If they are,
+  remove or reduce them before pass.
+- Reject a pardon that says "it helps show 3D" without explaining why a novice
+  viewer needs the grid and why the curves remain the dominant object.
+
+## Nonclassic Residue Contour Diagram
+
+Failure: a contour-integral or residue-theorem shot invents an attractive
+curve, local loop, or punctured neighborhood that does not match the canonical
+diagram for the theorem being invoked. Viewers familiar with complex analysis
+read it as wrong, and new viewers cannot learn the standard geometry.
+
+Fix:
+
+- Choose the textbook convention for the specific theorem: for residue-theorem
+  real-integral work, use a real segment `[-R,R]`, an upper semicircle `C_R`,
+  internal poles, and counterclockwise arrows; for keyhole/branch-cut work,
+  use parallel paths above/below the cut, an outer arc, and an inner arc.
+- Record the selected convention in `contract.yaml` under
+  `visual_reference.classic_source`.
+- Keep singularity markers local and small. Do not enlarge a local loop into a
+  second main contour unless the proof explicitly uses that contour.
 
 ## Rotation Plus Scaling Not Both Visible
 
@@ -366,6 +833,21 @@ Fix:
 - Avoid overlapping dense curves that visually create a filled region.
 - Extract keyframes near the arc to check it remains a line.
 
+## Unowned Bow Shape Fill
+
+Failure: a curved arrow, arc, or stroke becomes a gray bow-shaped patch or
+filled sliver. Even when code intended a stroke, the rendered shape reads as a
+filled region and viewers may interpret it as area, sweep, or density.
+
+Fix:
+
+- For arcs, curves, and arrows, set stroke and fill separately; fill opacity
+  should be zero unless the filled region is the named mathematical object.
+- Avoid opacity changes that re-enable fill on Manim curve-like objects.
+- Add a close-up QC frame for any arc/curved arrow that passes near a formula
+  or panel.
+- Reject "it is only an arrow" if the rendered pixels look like a fill.
+
 ## Useless Connectors
 
 Failure: dotted connector lines between diagram and side panel looked awkward or arbitrary.
@@ -375,6 +857,25 @@ Fix:
 - Remove connectors unless they carry a necessary mapping relation.
 - If a connector is needed, attach it to precise anchor points and keep opacity low.
 - Prefer spatial grouping, color correspondence, or local labels over arbitrary dotted lines.
+
+## Unowned Connector Spaghetti
+
+Failure: multiple dashed or dotted connectors run from a diagram to formula
+chips or coordinate slots, cross each other, and do not have named endpoints or
+a one-to-one mathematical relation. The viewer cannot tell whether they are
+sample correspondences, projections, dependencies, or decoration.
+
+Fix:
+
+- Remove the connector cluster unless each line has a declared source object,
+  target object, and relation.
+- Prefer one visible active correspondence at a time, or replace connectors
+  with spatial grouping, color identity, or a transform from sample value to
+  coordinate.
+- In `contract.yaml`, record `connector_policy` and object-level connector
+  endpoints when any connector survives.
+- During review, mute the narration and ask what each line means. If the answer
+  is not immediate, reject the scene.
 
 ## Meaningless Warning Line Or Boundary
 
@@ -726,6 +1227,114 @@ Fix:
 - Before future storyboard, timeline, stage direction, or animation code, the animation author must read human-feedback notes and issue JSONs and write an authoring preflight checklist explaining how applicable patterns are avoided.
 - Before every future audit, the reviewer must read the same records and verify the authoring preflight was actually used. A repeated human-found pattern is an automatic `revise` or `blocked` verdict.
 
+## Reverse Burden Review Not Applied
+
+Failure: a reviewer returns `pass` after listing only successful checks, even
+though the scene is formula-dense, diagram-dense, or already contains human
+feedback risks. The audit behaves as if a scene is acceptable until proven
+wrong, so ambiguous connectors, text fallback, overboxing, formula-only slides,
+and premature clearing survive.
+
+Fix:
+
+- Start every strict review from `revise`.
+- Write a red-flag ledger before the verdict, following
+  `43-review-red-flag-rubric.md`.
+- Include concrete negative examples in subagent prompts. A subagent must be
+  told what prior bad frames looked like, not only broad philosophy.
+- Require at least six candidate red flags for formula-dense or
+  previously human-rejected scenes. Candidates may later be fixed, pardoned, or
+  marked not applicable, but zero-candidate pass reports are invalid.
+- One unpardoned candidate remains enough to reject the scene.
+
+## Script Feedback Not Converted To TTS Regression Gate
+
+Failure: the user flags narration problems such as imprecise mathematical
+wording, AI-sounding creator-intent sentences, wrong "lesson" terminology,
+overexplaining what the animation can show, or pronunciation trouble, but the
+finding remains only in chat. The next script revision or TTS pass can repeat
+the same problem, and the error becomes expensive after audio, SRT, alignment,
+and `timeline.json` are generated.
+
+Fix:
+
+- Record reusable script feedback in `review/human-feedback/` and
+  `review/issues/*.json` with `applies_to_script_authoring: true`.
+- Add `script_lint_rule` or update the episode-local `scripts/lint_tts_script.py`
+  when the wording can be detected by regex or structural checks.
+- Before TTS synthesis, run the script-authoring preflight, local lint, and TTS
+  plan pass. Do not proceed if applicable human-review script issues are still
+  unconsumed.
+- Promote recurring wording failures to `12-script-authoring-feedback-loop.md`
+  or this file so future episodes do not need to rediscover them.
+
+## Script Route-Plan Overexternalization
+
+Failure: the narration explains the producer's future course sequencing instead
+of giving the viewer a concise mathematical preview. Sentences such as
+`但不会在下个视频马上跳过去` or `先把傅里叶这条线走完整` expose internal route
+management. They sound like planning notes, not teaching.
+
+Fix:
+
+- Keep next-video previews short and mathematical.
+- Say what object or question comes next, not how the producer intends to
+  sequence the syllabus.
+- Avoid long future-video route paragraphs at the end of a script unless the
+  current concept mathematically requires the map.
+- If a route boundary is needed, compress it into one viewer-facing sentence.
+- Before TTS, reviewers must list route-plan overexternalization as a candidate
+  finding for episode endings and either fix it or pardon it with evidence.
+
+## Imprecise Mathematical Subject In Narration
+
+Failure: narration assigns explanatory responsibility to the wrong object. For
+example, an expansion is said to "answer" a coefficient question when it only
+represents the function, or a transform is said to "explain" a formula when the
+actual reason is projection, orthogonality, a basis theorem, or a boundary
+condition.
+
+Fix:
+
+- Audit core sentences by subject and verb before TTS.
+- Use representational verbs such as "writes", "shows", "is read as", or "has
+  coordinates" when the object is only a form of expression.
+- Reserve causal verbs such as "explains", "comes from", or "is why" for the
+  mathematical object that actually supplies the reason.
+- Add lint checks for known bad phrasings when they recur in an episode.
+
+## Narrated Visual Obviousness
+
+Failure: narration spends several sentences describing what the viewer can
+already see, such as partial sums looking rough, closer, or more linear, while
+the conceptual point is left thin.
+
+Fix:
+
+- Let the animation show curve shape, motion, and visual comparison.
+- Use narration for the invariant: which coefficients drive the construction,
+  what object is being reconstructed, why the inverse/synthesis step works, or
+  where the rigorous proof will live.
+- During script review, mute the draft visuals mentally: if a sentence only
+  narrates obvious frame appearance, compress or remove it.
+
+## Discrete Series Frequencies Confused With Continuous Transform Frequencies
+
+Failure: a Fourier-series example uses integer modes such as `sin nx`, then
+the narration speaks as if Fourier transform frequencies are also only a
+discrete list. Viewers miss the transition from a coefficient sequence to a
+continuous spectrum.
+
+Fix:
+
+- State the boundary: Fourier series has discrete frequency indices for
+  periodic functions; Fourier transform uses a continuous frequency variable.
+- Tie the inverse step to the same distinction: series reconstruction uses a
+  sum; transform inversion uses an integral over frequencies.
+- When mentioning pure frequencies, note that ideal pure complex exponentials
+  become delta spikes in the continuous spectrum, with real sine/cosine split
+  across positive and negative frequencies.
+
 ## Valuable Agent Feedback Not Promoted To Regression Tests
 
 Failure: a subagent or group reviewer catches a new real failure, the main
@@ -749,6 +1358,29 @@ Fix:
 - Promote the distilled rule into this file or the relevant philosophy/QC
   reference when it generalizes beyond the current shot.
 
+## Aesthetic Objection Under-Enumeration
+
+Failure: the reviewer only asks whether listed red-line failures are present.
+If no single issue is obvious enough, the review passes without naming the
+ugliest held frames, unclear visual-guidance moments, weak composition, or
+near-miss regressions. This creates a "not guilty until proven" audit style and
+lets mediocre frames reach the user.
+
+Fix:
+
+- Use `tools/review_gate.py` for every animation review. The reviewer must
+  submit the current risk tier's minimum candidate red flags and ranked
+  aesthetic/visual-guidance objections before the review can be accepted.
+- The first ranked objections should include the worst-looking frame, the
+  second worst-looking frame or transition, and the least clear visual-guidance
+  moment, even if the reviewer expects to pardon them.
+- A pardoned objection still needs evidence and a reason. "Looks acceptable"
+  is not enough; explain why it does not harm novice comprehension,
+  mathematical identity, or professional visual hierarchy.
+- After user feedback identifies an aesthetic miss, turn it into
+  `human_review` issue JSON and make future review tiers at least
+  `human-rejected` for comparable scenes until the pattern stops recurring.
+
 ## Subagent Review Assumes Expert Knowledge
 
 Failure: the subagent judges a scene as understandable because the mathematical intent is visible to someone who already knows the lesson, while a novice viewer cannot infer the visual causality, limit process, or meaning of the symbols from the animation itself.
@@ -771,9 +1403,287 @@ Fix:
 - Extract QC frames at dense rows and transition states, not only at the first settled frame.
 - Do not pass a review if any text touches or crosses its frame.
 
+## Latex Fallback Math Text
+
+Failure: mathematical labels that require subscripts, superscripts, hats, Greek
+letters, angle brackets, or fractions are rendered as plain text, such as
+`c_1` or `c_2`, instead of real mathematical typography. The frame looks
+unfinished and weakens symbol recognition.
+
+Fix:
+
+- Render concept-bearing math tokens with `MathTex` or an equivalent math
+  renderer.
+- Do not use plain `Text` for coefficient labels, basis labels, hats,
+  inner-products, or transform symbols.
+- Add a QC check for fallback underscores, caret notation, and raw ASCII math
+  in labels and chips.
+
+## Unlabeled Major Formula Stack
+
+Failure: several major formula families appear together, such as Fourier
+series, coefficient formula, Fourier transform, and inverse transform, but the
+scene does not label which formula is which. Instead, a caption or producer
+critique is placed nearby, leaving the actual mathematical roles unnamed.
+
+Fix:
+
+- Label each major formula by role with short object labels such as `级数展开`,
+  `系数`, `变换`, `逆变换`.
+- Remove captions that describe the creator's critique when they do not label
+  a mathematical object.
+- If there are more than three major formulas, group them as a comparison table
+  with role labels, not as a raw formula wall.
+
+## AI-ish Emotional Summary Slate
+
+Failure: a scene ends by writing the intended feeling or critique as a large
+summary slate, such as "after doing the problem, it is empty," instead of
+letting the existing mathematical or procedural visual state carry that
+feeling. The result reads like an author note exposed on screen rather than
+professional visual narration.
+
+Fix:
+
+- Prefer extending or lightly modulating the current mathematical/procedural
+  frame when it can already carry the emotion.
+- Remove written emotional conclusions that merely describe the intended
+  audience reaction.
+- If a final text cue is necessary, make it a label for an object or state, not
+  a sentence explaining the design intent.
+- During QC, mute the narration and ask whether the frame still feels like a
+  designed visual consequence rather than a captioned explanation.
+
+## Overexplicit Critique Title
+
+Failure: a shot starts by writing the producer's critique as a headline, such
+as "what did school teaching actually teach," before the mathematical objects
+have made the point. This makes the design intent visible as text instead of
+letting staging, timing, and object relations carry the complaint.
+
+Fix:
+
+- Prefer beginning with the objects, routines, or terms being criticized.
+- Use titles only when they label a necessary section or object state.
+- If a title only restates what the narration already says or what the visual
+  can show, remove it.
+- During QC, inspect early frames muted. If the frame reads as a captioned
+  opinion rather than a staged visual relation, revise.
+
+## Critique Stamp Dwell Too Short
+
+Failure: a short critique stamp, rhythm marker, or warning label flashes too
+quickly to read at normal playback speed. The object may be present in code,
+but the viewer misses the beat.
+
+Fix:
+
+- Give short stamps enough dwell time after entrance, especially when they
+  carry a narration beat.
+- Avoid `there_and_back` or bounce-only entrances for labels that must be read.
+- Extract a QC frame after the entrance settles and another later in the same
+  beat to prove readability.
+
+## Unowned Long Connector Line
+
+Failure: a horizontal, vertical, or diagonal line runs behind or through nodes,
+formula chips, or labels as a decorative baseline. The real relationship may
+already be expressed by arrows, but the extra line remains visible and reads as
+an accidental axis, conveyor, or artifact.
+
+Fix:
+
+- Use edge-to-edge arrows for directed relationships.
+- Split connector shafts around intervening objects or remove them entirely.
+- Do not draw a through-line unless it is a named mathematical object such as
+  an axis, number line, contour, or timeline.
+- In `contract.yaml`, mark connector-heavy objects with a connector policy,
+  such as forbidding background baselines.
+
+## Frame Overuse Formula Chips
+
+Failure: ordinary short formulas or labels are all placed in rounded boxes, so
+frames stop communicating conclusion, contrast, or derivation hierarchy. The
+scene looks like a generic UI rather than blackboard mathematics.
+
+Fix:
+
+- Default setup formulas, coordinate labels, route labels, and intermediate
+  algebra to bare `MathTex`.
+- Use frames only for conclusions, active focus, grouped derivations, contrast
+  structures, or warnings.
+- If a formula object uses a frame, record its `frame_role` in stage direction
+  or `contract.yaml`.
+- During QC, count framed formulas in each beat. If most formulas are framed
+  and no hierarchy is visible, revise.
+
+## Overboxed Formula Row Blocks Reading
+
+Failure: an algebraic row is broken into many framed chips. The boxes become
+the dominant visual object, interrupt one-line reading, and make ordinary
+terms look like UI buttons rather than algebra.
+
+Fix:
+
+- Keep ordinary terms in bare `MathTex`; use spacing, color, or temporary
+  opacity to focus active terms.
+- Frame only a true conclusion, contrast group, warning, or derivation
+  container.
+- If term grouping is needed, use subtle alignment or braces instead of one
+  rounded rectangle per term.
+- Reject rows where the frame count is higher than the number of actual
+  hierarchy roles.
+
+## Premature Derivation Clear With Space Available
+
+Failure: a derivation formula or proof step appears briefly and disappears
+while the frame still has enough unused space to keep it visible. Viewers lose
+the ability to compare numerator, denominator, assumptions, and conclusion.
+
+Fix:
+
+- Keep a derivation step visible until the dependent step has landed and the
+  viewer has had time to compare them.
+- Use the available side or lower lane for persistent derivation memory.
+- Clear formulas early only when a new active object needs the space, and
+  record that reason in stage direction.
+- Include QC frames at the moment just before clearing and after the next
+  formula lands.
+
+## Formula Only Scene Without Visual Causality
+
+Failure: an entire scene is algebraic manipulation even though the segment is
+supposed to teach a visual idea such as projection, basis expansion,
+orthogonality, coefficient extraction, reconstruction, or time/frequency
+relation. A viewer who does not already know the concept cannot infer the
+causal relation from symbols alone.
+
+Fix:
+
+- Add a visible mathematical object or process: vector projection, basis
+  direction, sampled function, component product, cancellation, coefficient
+  bar, spectrum point, or reconstruction curve.
+- If a scene is intentionally a derivation page, label it as
+  `derivation_page` in the contract and explain why no diagram is needed.
+- For novice-facing explanation, formulas must be connected by motion,
+  token-level transforms, or aligned visual evidence, not just by appearing in
+  sequence.
+
+## Missing Classic Textbook Diagram Reference
+
+Failure: a canonical mathematical object is drawn from scratch with arbitrary
+geometry when a well-known textbook convention already exists. The diagram may
+be mathematically related but fails the visual language of the subject, such as
+showing a pole neighborhood as a large smooth ellipse instead of a small
+punctured loop around the singularity.
+
+Fix:
+
+- For canonical objects, consult classic textbook diagrams before inventing a
+  composition.
+- Record the adopted convention in stage direction, `contract.yaml`, or the
+  experiment log.
+- Keep pedagogical distortion honest: if an infinitesimal loop is enlarged for
+  visibility, make it small relative to the main contour and use labels such as
+  `C_\epsilon` or `z_0` instead of vague explanatory text.
+
+## Long Unrelated Formula Text Overlap
+
+Failure: outgoing and incoming formulas or text occupy the same slot long
+enough that the frame contains two readable unrelated messages. A brief overlap
+may be acceptable during a transform, but the held transition looks broken.
+
+Fix:
+
+- For unrelated objects, clear the old object before entering the new one.
+- If a cross-fade is used, keep the overlap short and record the overlap limit
+  in stage direction or `contract.yaml`.
+- QC frames must include the transition interval, not just settled states.
+
+## Overexternalized Process Text
+
+Failure: screen text states the designer's intent, such as "sampling values
+become coordinates," instead of letting sample points, vectors, formulas, and
+motion communicate the relation.
+
+Fix:
+
+- Replace intent sentences with object labels, formulas, arrows, or actual
+  transforms.
+- If removing the text leaves the scene understandable with narration and math
+  objects, remove it.
+- Keep text that names an object or state; remove text that explains what the
+  viewer is supposed to feel or infer.
+
+## Externalized Creator Critique Caption
+
+Failure: the screen displays the producer's critique of a teaching style, such
+as saying a formula route can compute but feels like a pile of integrals. The
+line exposes the author's intention instead of making the mathematical contrast
+visible through labels, grouping, or staging.
+
+Fix:
+
+- Replace critique captions with mathematical role labels, object labels, or
+  short viewer-facing questions.
+- If the narration already says the critique, the screen should show the
+  formulas and their roles, not repeat the evaluation.
+- During QC, ask whether the caption describes the screen object or describes
+  the creator's opinion. The latter is a blocker.
+
+## Unnatural Screen Heading From Production Shorthand
+
+Failure: a screen heading uses an internal authoring label or prompt shorthand,
+such as `公式角色`, instead of natural viewer-facing Chinese. The label may be
+technically related to the layout, but it sounds like a production note rather
+than a title a teacher would write on the board.
+
+Fix:
+
+- Name the visible object or mathematical state in ordinary language, such as
+  `公式表` for a table of formulas.
+- Put precise mathematical roles in local row labels, object labels, or formula
+  annotations rather than overloading the section title.
+- During script and visual review, read every screen title aloud. If it sounds
+  like a prompt label, storyboard note, or internal design role, revise before
+  render.
+
+## Vector Column Over Active Graph
+
+Failure: a vector or matrix column is placed on top of an active function
+graph, grid, or curve. Even if there is no formal bbox overlap failure, the
+column obstructs the main mathematical object and looks like a pasted panel.
+
+Fix:
+
+- Reserve a formula/vector lane outside the protected active graph region.
+- If a vector must relate to a graph, connect it through sample points or a
+  local callout without covering the curve.
+- A bracketed vector already has a container; avoid adding an extra panel frame
+  unless the vector is a conclusion or grouped derivation.
+
+## Complex Scale Rotate Motion Missing
+
+Failure: complex multiplication is described as scaling and rotation, but the
+render shows only static before/after vectors or formula chips.
+
+Fix:
+
+- Use one driver with `z` and `w=\rho e^{i\theta}`.
+- Animate the endpoint through `\rho^\alpha e^{i\alpha\theta}z` so the viewer
+  sees rotation and stretch as one operation.
+- Keep labels, arc, and final vector synchronized to the same driver.
+
 ## Coarse Timeline Visual Alignment
 
 Failure: the review MP4 has the correct total duration, but narration and visual actions are only loosely related. Several spoken ideas are covered by one broad visual phase, so viewers cannot tell which object or operation the voice is referring to.
+
+Concrete regression: episode 0003 G007 `s013_s016_complex_exponential_fourier_coefficients`
+was rejected in user review on 2026-07-06 because the voice had already moved to
+later coefficient and inverse-basis concepts while the animation still showed
+earlier complex-exponential evidence. A review pass that only checked scene
+duration or broad SRT cues would miss this; the reviewer must compare word/token
+anchors against exact visual trigger times.
 
 Fix:
 
@@ -781,6 +1691,23 @@ Fix:
 - For each spoken concept, record the timestamp where the corresponding visual object enters, changes, or receives focus.
 - Add visual beats, pauses, highlights, or transitions until the viewer can track the explanation without rereading the script.
 - Total duration match is not an acceptance criterion by itself.
+
+## Subtitle Math Homophone Drift
+
+Failure: SRT or alignment text silently changes a concept-bearing mathematical
+phrase into a plausible homophone or near-homophone. The script and timeline may
+be correct, but the subtitle contract shown to reviewers or used for final
+packaging says a different concept, such as `普通线代里` becoming `普通现代里`.
+
+Fix:
+
+- Compare concept-bearing subtitle cues against `script.md` and `timeline.json`
+  before final handoff.
+- Search for likely ASR substitutions around course vocabulary, abbreviations,
+  person names, and mathematical terms.
+- Correct both SRT and alignment JSON when the same cue text appears in both.
+- Treat subtitle math transcription errors as review blockers even when the
+  review MP4 visuals, audio, and layout audits pass.
 
 ## Vector Ellipsis Outside Brackets
 
@@ -891,8 +1818,115 @@ Fix:
 
 Failure: a frame is mathematically computed but looks cramped, awkward, unbalanced, overboxed, poorly spaced, or visually amateurish. The reviewer passes it because no formula is false.
 
+Concrete regression: episode 0003 G008 `s017_analysis_and_synthesis` was flagged
+in user review on 2026-07-06 for weak overall layout even though the diagram's
+objects were mathematically plausible. Review must rank the ugliest or least
+clear held states and cannot pardon a compact summary scene merely because all
+labels and formulas fit.
+
 Fix:
 
 - Treat obvious ugliness as a review failure, not a preference note.
 - Check spacing, alignment, padding, rhythm, color restraint, and full-frame composition at every held state.
 - If a user has already flagged a comparable aesthetic failure, encode it as a human-review regression issue and block repeats.
+
+## Final Candidate Missing Required BGM Mix
+
+Failure: a final review or upload candidate is remuxed after TTS, subtitle, or
+timing repair and silently loses the approved BGM layer. The voice track may be
+correct, but the episode no longer matches the series audio style or an
+explicit user instruction to use the same BGM and voice/BGM configuration as a
+previous episode.
+
+Fix:
+
+- Treat BGM as part of the final output contract whenever the user has approved
+  or requested a recipe.
+- After any audio timing repair, subtitle correction, video retime, or final
+  remux, explicitly check whether the final candidate includes the required
+  BGM layer.
+- Reuse the recorded mix recipe instead of approximating it from memory. For
+  episode 0002 after user review on 2026-07-04, the required recipe is the
+  episode-1 BGM `assets/bgm/埃里克萨蒂-玄秘曲.mp4`, `base_volume=4.8`,
+  `sidechaincompress threshold=0.025 ratio=8 attack=80 release=900`, and
+  final `loudnorm I=-17.0:TP=-1.5:LRA=11.0`, unless the user updates it.
+- Validate the final upload/review MP4, not only an intermediate mixed WAV.
+  Record `ffprobe` and loudness/true-peak evidence in the experiment log.
+
+## Final Master Reuses Preview Quality
+
+Failure: a 720p or 1080p review/preview artifact is treated as the final master
+after the scene has passed user review. This is especially visible in lecture
+videos because thin formula strokes, small labels, graph grids, and chalk
+texture benefit from a higher-resolution final render.
+
+Fix:
+
+- Separate preview/review quality from final master/upload quality in the
+  output plan.
+- If the user requests high final clarity, render or stitch final source
+  segments at a higher resolution than previews. For a 4K final, use true
+  3840x2160 source renders, normally `2160p30` for this course.
+- Do not label a simple upscale of a 720p/1080p review file as a true 4K
+  master unless it is explicitly documented as an upscaled delivery workaround.
+- Verify final resolution, fps, codec, and audio streams with `ffprobe`, and
+  record the render/stitch commands in the experiment log.
+
+## Reader SRT Used As Animation Timing Contract
+
+Failure: animation timing is aligned to reader-friendly SRT cue boundaries.
+The final subtitles may be readable, but the cue granularity is too coarse for
+formula reveals, object focus, scene transitions, and speech-synchronous
+movement. Total duration can match while individual words or concepts land
+early or late.
+
+Fix:
+
+- Generate separate products from ASR/alignment: reader SRT for viewers, and
+  word/token alignment for timeline and animation.
+- Use `qwen-srt --json-output` plus `--word-srt-output` and
+  `--phrase-srt-output` when building or repairing a lecture-animation
+  timeline.
+- Drive animation timing from `aligned_tokens`, `token_gaps`, or explicit
+  phrase/word timing, not from the final reader SRT cue split.
+- Keep final SRT/VTT subtitles at readable `subtitle` granularity so viewers
+  do not have to read one word at a time.
+- During review, audit at narration-beat granularity: each spoken concept must
+  have a visible object, focus change, or transition at the same time.
+
+## Unedited TTS Breaths And Sentence Gaps
+
+Failure: a TTS track is accepted because the text is correct and the duration
+fits, but breaths, sentence gaps, or pauses sound unnatural. If the animation
+then follows this raw timing, visuals either wait through dead air or rush
+through the next concept.
+
+Fix:
+
+- Inspect the waveform together with word/token alignment before locking
+  timeline timing.
+- Use `token_gaps` or equivalent alignment evidence to find too-long,
+  too-short, or badly placed pauses.
+- Cut, shorten, extend, or resynthesize affected breath/gap windows without
+  clipping syllables.
+- Regenerate SRT/alignment after the edit; never keep a timeline built from
+  pre-edit timings.
+
+## Abrupt Scene Clear And Slow Default Fade In
+
+Failure: one storyboard or scene group disappears abruptly, then the next
+scene's objects slowly glow or fade in without a declared reason. Text and
+formula fades are allowed, but slow default entrances make ordinary objects
+look overemphasized and make the episode feel sluggish.
+
+Fix:
+
+- Give each scene boundary explicit outgoing ownership, clear-out timing,
+  incoming ownership, and transition intent in `timeline.json`, stage
+  direction, or the scene contract.
+- Use object-preserving transforms when the new shot continues the same
+  mathematical object. For unrelated shots, clear first, then enter.
+- Keep ordinary text/formula entrances brisk unless the stage direction assigns
+  a special emphasis, reveal, or suspense role.
+- Include before/during/after transition QC frames for every repaired group
+  boundary. Do not pass a full-episode review by checking only settled frames.

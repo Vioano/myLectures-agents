@@ -7,10 +7,13 @@ This file condenses the hard requirements for episode-style production. Use it f
 Before animation:
 
 - Read the route workflow.
+- For TTS routes, read `12-script-authoring-feedback-loop.md` before treating
+  `script.md` as ready for synthesis or timeline work.
 - Read source script and SRT/alignment.
 - Read `20-math-object-driven-animation.md`.
 - Read `30-visual-language-and-style.md`.
 - Read `41-production-output-contract.md`.
+- Read `43-review-red-flag-rubric.md`.
 - Check `formula-manifest.md`, `storyboard.md`, `timeline.json`, and `experiment-log.md`.
 - Read the episode's `review/human-feedback/` notes, accepted
   `review/agent-feedback/` notes, and `review/issues/*.json` entries with
@@ -19,6 +22,13 @@ Before animation:
 - Convert applicable human-found and accepted-agent-found `pattern_key` entries
   into an authoring preflight checklist before writing stage direction or
   animation code.
+- Write a design-stage red-flag ledger before coding formula-dense,
+  diagram-dense, or previously human-rejected scenes. The ledger starts from
+  likely violations, not from assumed correctness, and must say how the design
+  avoids or explicitly pardons each risk.
+- For script-stage work, also convert applicable entries into a
+  script-authoring preflight before revising `script.md`; extend the local
+  script lint when the failure is mechanically checkable.
 
 ## Formula Manifest
 
@@ -94,10 +104,16 @@ For each subshot, record:
 - formula text and stage zone;
 - diagram objects and their mathematical driver;
 - panel/frame/underline/bare-formula hierarchy;
+- connector ownership and endpoint policy for every non-axis line or arrow;
+- any classic textbook diagram convention used for canonical mathematical
+  objects that would otherwise be easy to stylize incorrectly;
+- maximum intended overlap time when unrelated objects reuse one slot;
 - entrance, exit, movement, transformation, opacity, and color changes;
 - sprite position and occlusion policy;
 - old objects that must clear before the next object enters;
 - logical continuity between related formulas, such as a product formula becoming a coordinate map, a matrix column becoming a vector, or a rotation label becoming an algebraic conclusion.
+- design-stage red flags from `43-review-red-flag-rubric.md`: expected risks,
+  planned fixes or pardons, and QC frames that will prove they are safe.
 
 If the shot would still make sense as a static PPT slide but not as a continuous derivation, the stage direction is incomplete. Lecture animation should feel closer to an expert writing and reorganizing a board than to unrelated cards appearing in one corner.
 
@@ -106,6 +122,29 @@ Named zones are aids, not cages. A zone may expand, shrink, become an inset, mer
 Do not start from blocks. Start from objects and relationships, then create temporary attention groups only when they help. A stage direction can say "no block here; the vector and formula remain connected by motion and color" if that is clearer than drawing or reserving a region.
 
 Implementation-level choreography may live directly in the Manim scene as a structured `STAGE_SCRIPT` constant or class docstring when it specifies exact object entrances, exits, transforms, and spatial claims. Keep global philosophy in this skill and narrative intent in `storyboard.md`; keep code-local stage scripts concise and object-level so they cannot drift from the implementation. Do not scatter long prose comments through animation methods.
+
+## Scene Contract For Dense Manim Scenes
+
+When a shot is formula-dense, layout-dense, or previously failed because of
+stage management, write a scene-local `contract.yaml` before final animation
+code. The contract is not a replacement for `timeline.json`.
+`timeline.json` remains the episode/audio/segment contract. `contract.yaml` is
+the internal stage contract for one large Manim scene.
+
+A valid scene contract must declare:
+
+- source timeline segments and audio window;
+- layout modes over local time;
+- named zones and protected regions;
+- mathematical drivers;
+- object ids, factories, zones, and semantic roles;
+- beats with `local_time`, `owns_zones`, `enter`, `transform`,
+  `clear_before`, and `clear_after`;
+- audit frame times.
+
+The first render for such a scene should be either a layout skeleton or a
+low-quality smoke render that verifies zone ownership, object scale, protected
+regions, and clear intervals before polishing animation timing.
 
 ## Manim
 
@@ -161,6 +200,10 @@ Write while working, not after the fact. Record:
 - media sources, transform maps, and whether each media asset is mathematical, editorial, placeholder, or final.
 - failed attempts and why they failed.
 - user feedback and fixes.
+- script-authoring preflight from human feedback: which wording,
+  pronunciation, mathematical-precision, overnarration, or sequencing patterns
+  were read; which apply; what script/lint/notebook-boundary choice avoids a
+  repeat.
 - output paths.
 - QC frame paths.
 - review MP4 path and mux/mix command.
@@ -175,6 +218,11 @@ Write while working, not after the fact. Record:
 ## QC Checklist
 
 After every segment:
+
+Default stance: `revise`. A segment does not earn `pass` by avoiding a small
+list of explicit red lines. It earns `pass` only after the reviewer has written
+a red-flag ledger, closed or pardoned every candidate violation, and explained
+why each pardon is still clear to a novice viewer.
 
 Run the audit in three layers before deciding a verdict:
 
@@ -193,6 +241,35 @@ Run the audit in three layers before deciding a verdict:
    file line, why it matters to a novice viewer, and a specific repair path. If
    a problem violates an abstract standard but has no concrete case yet, create
    a new issue JSON with a new `pattern_key` and promote it after repair.
+
+4. **Reverse-burden ledger.** For formula-dense, diagram-dense, or
+   previously human-rejected scenes, list at least six candidate red flags
+   before the verdict, using `43-review-red-flag-rubric.md`. Candidate flags
+   can be `fixed`, `pardoned`, `not_applicable`, or `open`; any `open` flag
+   blocks acceptance. A review report with zero candidate flags is invalid.
+
+5. **Ranked aesthetic/noise sweep.** Independently of the red-flag categories,
+   name the first, second, and third ugliest/noisiest/least-clear visual
+   candidates in the render. This is mandatory even when the scene is close to
+   acceptable. Close each candidate as `fixed`, `pardoned`, or
+   `not_applicable`; any `open` candidate blocks acceptance. A pardon must
+   explain why a novice viewer is still guided cleanly. In scene contracts this
+   must appear under `review_policy.ranked_aesthetic_flags`, and
+   `validate_scene_contract.py` must pass before the scene is reviewable.
+
+Use `tools/review_gate.py` as the hard machine receipt for this audit. Start a
+gate session before review, run `checklist`, and make the reviewer submit the
+audit through `submit-review`. The CLI must accept the review before the owner
+treats it as a real review result. If the review is accepted with open issues,
+the owner must repair and submit `submit-fix`; only a later accepted
+`pass_for_user_review_pending` verdict plus `status --require-pass` counts as
+the strict gate passing.
+
+The review gate deliberately enforces over-reporting. Even when the render is
+close to acceptable, the reviewer must list the current risk tier's minimum
+candidate red flags and ranked aesthetic/visual-guidance objections. These may
+be pardoned or marked not applicable with evidence, but absent objections mean
+the review package is incomplete.
 
 - Render succeeded.
 - Audio track exists and duration is checked.
@@ -222,7 +299,9 @@ Run the audit in three layers before deciding a verdict:
 - Regression records were read: `review/human-feedback/`,
   `review/agent-feedback/`, `review/issues/*.json` with `source:
   human_review`, `source: accepted_agent_feedback`, or
-  `must_check_in_future: true`, and `50-known-failures-and-fixes.md`.
+  `must_check_in_future: true`, and `50-known-failures-and-fixes.md`. In a
+  gated review, these reads must be confirmed by exact document path and
+  SHA-256 in the `review_gate.py` submission.
 - Formulas are readable and not overlapping.
 - Any text, formula, or label inside a frame, chip, bracket, or panel stays
   fully inside that container in active, dimmed, entering, and exiting states.
@@ -234,6 +313,34 @@ Run the audit in three layers before deciding a verdict:
 - Narration, timeline, and visual action are checked at fine beat level, not
   merely by matching total duration.
 - Every extra panel, inset, media element, or synchronized channel earns its space.
+- Every frame or chip around a mathematical formula has a declared hierarchy
+  role. Ordinary short formulas default to bare `MathTex`; repeated framed
+  formula chips are a visual-hierarchy failure unless the contract explains why
+  they are conclusions, grouped derivations, contrast containers, or warnings.
+- Every displayed mathematical token that needs subscripts, superscripts,
+  Greek letters, hats, or angle brackets is rendered through LaTeX/MathTex or
+  an equivalent math renderer. Plain-text fallbacks such as `c_1` are blockers.
+- Major formula stacks label the role of each formula when several families
+  appear together, for example Fourier series, coefficient extraction,
+  transform, and inverse transform. Do not replace those labels with producer
+  critique captions.
+- Formula derivations remain visible long enough to read and compare unless
+  the stage direction gives a space or pacing reason for clearing them. If
+  useful empty space remains, premature clearing is a blocker.
+- A scene whose main action is only algebra must be justified as a
+  `derivation_page` in the contract; if the lesson claim is visual intuition,
+  projection, orthogonality, reconstruction, or basis expansion, the scene must
+  include a visible mathematical object or process, not only formulas.
+- Connector lines and arrows terminate at named object boundaries or anchors.
+  Decorative baselines, pass-through shafts behind nodes, and long unowned
+  horizontal lines are blockers.
+- Canonical mathematical diagrams follow recognizable textbook conventions
+  when a custom construction is not clearly superior. If a pole, contour,
+  branch cut, punctured neighborhood, eigenmode, or Green-function source is
+  shown, the contract or experiment log must name the convention being used.
+- Unrelated text/formula objects may share a slot only through a short
+  transition. Long readable overlap is a blocker even when both objects are
+  individually in frame.
 - Example functions and teaching parameters are visually adequate for the
   lesson target. If an operation depends on a product, density, sign change, or
   oscillation, the chosen example should make that quantity visibly change.
@@ -245,6 +352,10 @@ Run the audit in three layers before deciding a verdict:
 - No warning line, connector, bracket, frame, star, underline, or highlight may
   appear unless it has a named mathematical or hierarchy role. Decorative lines
   and floating symbol markers block acceptance.
+- Dotted or dashed connector clusters require named source/target endpoints
+  and a one-to-one relation. Crossed, spaghetti-like, many-to-many connectors
+  are blockers unless the scene is explicitly showing confusion and then
+  clears them.
 - No filled area, translucent strip, or baseline-to-curve region may appear
   unless it is the exact named quantity being integrated or compared. Ambiguous
   integral-area cues block acceptance.

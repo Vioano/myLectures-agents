@@ -1,0 +1,4 @@
+interface:
+  display_name: "Notebook Production Pipeline"
+  short_description: "Problem-driven course notebook workflow and review gate"
+  default_prompt: "Use $notebook-production-pipeline to plan, create, or review a problem-driven myLectures companion notebook."

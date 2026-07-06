@@ -44,6 +44,14 @@ Usage:
 
 Do not stack color + underline + frame on every short formula. A frame is a hierarchy signal, not a default decoration.
 
+Formula frames need an explicit role. Ordinary short formulas, coordinate
+labels, route labels, and algebraic setup lines default to bare `MathTex`.
+Use a frame only when it marks one of these roles: `conclusion`,
+`active_focus`, `group_panel`, `contrast_pair`, `derivation_container`, or
+`warning`. If more than one short formula in the same beat is framed, the
+stage direction or scene contract must explain the hierarchy difference
+between them.
+
 ## Text Discipline
 
 Screen text complements narration; it does not replace it.
@@ -68,6 +76,11 @@ Self-check: if removing a line of text leaves the shot understandable through na
 
 - Do not let formulas overlap coordinate axes, panels, or old fading content.
 - Coordinate grids must be anchored to the same mathematical origin as their axes by default. The origin must be a real grid point; the horizontal and vertical axes must lie exactly on grid lines, not between adjacent grid lines. If a deliberately offset grid is ever used, state the mathematical reason in the stage direction and experiment log.
+- Grids are not default decoration. In stacked layers, 3D basis objects, or
+  mode-decomposition displays, do not repeat a grid on every layer unless the
+  grid itself is the mathematical object being taught. Prefer curves, labels,
+  depth separation, and at most restrained axes; repeated helper grids that
+  become visually louder than the mathematical curves are blockers.
 - Old panels should fully exit before new panels enter if their bounding boxes overlap.
 - Do not put every formula inside a box.
 - Do not use panel frames as default formula decoration. A panel means "this is a structured group, conclusion, contrast, or derivation container."
@@ -75,6 +88,9 @@ Self-check: if removing a line of text leaves the shot understandable through na
 - When a panel changes meaning, treat it as a state transition: remove or dim the old panel contents before new formulas enter the same slot.
 - Treat layout as temporal occupancy, not a static slide. For every formula slot, diagram region, and sprite safe zone, know which object owns it at each interval.
 - Do not cross-fade unrelated formulas in the same slot. If the new formula is not a transformation of the old one, clear the slot first, then enter the new content.
+- Short transition overlap is allowed when it reads as motion, but unrelated
+  formulas/text sharing a slot should overlap only briefly. If overlap lasts
+  long enough to be readable as two stacked messages, it is a layout failure.
 - Use the whole frame over time: a formula can move from bottom cue to side board to center reveal if its role changes. Do not keep forcing every formula into one corner.
 - Titles must live in their own reserved title band or be omitted. Never let a title line share vertical space with formula panels.
 - Avoid stale `always_redraw` objects reappearing after fadeout; remove them or stop their updaters.
@@ -86,6 +102,17 @@ Self-check: if removing a line of text leaves the shot understandable through na
   stay readable without covering the active construction, and clear when their
   local role ends. If the annotation needs a sentence or a large panel, move it
   to a side lane or local inset instead of covering the graph.
+- Connector lines must have named ownership and bounded endpoints. Prefer
+  edge-to-edge arrows over decorative baselines. A connector must terminate at
+  the node, formula token, sample point, or contour it relates; it must not run
+  through a node as a long background line unless that background axis or
+  number line is the actual mathematical object being taught.
+- When a scene needs a canonical mathematical diagram and the visual treatment
+  is uncertain, consult classic textbook conventions before inventing a shape.
+  Examples include punctured neighborhoods around singularities, branch cuts,
+  contour indentation, eigenfunction mode diagrams, and Green-function source
+  markers. Record the adopted convention in stage direction, the scene
+  contract, or the experiment log.
 
 ## Stage Direction Discipline
 

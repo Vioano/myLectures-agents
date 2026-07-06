@@ -11,6 +11,14 @@
 - 声音生产链路包含后期声音转换，目标是形成系列化、角色化的课程风格。
 - 详细课程设定和问答见 `vault/init.md`。
 
+## 成品呈现边界：不要外化制作意图
+
+所有面向学生、观众或最终用户的成品，包括视频画面、字幕、TTS 文稿、Notebook 正文、网页界面和交互控件文案，都不能把 agent 的制作意图、审查口径、工程 workaround、设计哲学或“为什么这样做”的内部说明直接写到台前。成品文字应只承担内容本身的任务：提出问题、标注数学对象、给出操作指令、展示反馈、解释概念或给出必要结论。
+
+典型禁止项包括：在画面或 Notebook 正文里写“这个 Notebook 不是……而是……”“这里不用 interact 是为了避免闪动”“这个动画想表达……”“为了符合 pipeline/skill/review gate……”“这个控件是稳定版”“下面只是反馈不是主内容”等作者意图或工程解释。学生/观众需要看到的是数学任务和对象关系，而不是制作过程的自我说明。
+
+这些内容有自己的位置：`storyboard.md`、`timeline.json`、Notebook contract、scene contract、`experiment-log.md`、review 报告、issue JSON、代码注释或技能文档。写作和审查时必须做一次“台前/后台”检查：如果一句话是在解释 agent 为什么这样设计，而不是帮助学习者完成当前数学动作，就移到后台文件或删掉。反复出现的设计意图外化必须作为 `presentation_boundary_failure` 或对应技能里的同类失败记录进 human/agent feedback 和 future regression。
+
 ## 与 learning vault 的边界和同步
 
 `/Volumes/bocchi/myLectures` 是视频课的 Git 生产仓库，负责动画代码、素材、渲染流程、项目分支和整体版本控制。`/Volumes/bocchi/myLectures/vault` 是独立的 Obsidian vault 子仓库，负责正式视频提纲、文案、分镜、Notebook 和 Obsidian 插件配置。`~/Documents/learning` 是用户的日常学习 vault，负责个人学习、读书笔记、灵感、推导、Zotero 上下文和长期能力追踪。
@@ -123,6 +131,13 @@ subagent 复审通过后，动画仍然不能直接提交。必须先把 review 
 - 不要提交 `._*`、`.DS_Store`、`.ipynb_checkpoints/`、`exports/*`、`.venv/`。
 - 如果工作树里有用户或其他工具造成的无关改动，不要回退它们，也不要混入当前提交。
 - `vault/` 是独立 Git 仓库/submodule。Obsidian Git 只在 `vault/` 内提交和推送课程笔记；外层项目 Git 只记录 `vault` 指向的 commit。需要固定“项目代码 + 文案版本”时，先在 `vault/` 内 commit/push，再在外层仓库 stage 并 commit `vault` 的 submodule 指针。
+## 外部同步（myLectures-agents）
+
+`AGENTS.md` 和 `.agents/skills/lecture-animation-pipeline/` 会同步到独立的公开 GitHub 仓库 [Vioano/myLectures-agents](https://github.com/Vioano/myLectures-agents)。同步清单在 `scripts/sync-agents-manifest.txt`，同步脚本在 `scripts/sync-agents.sh`。
+
+- agent 修改了清单中列出的文件后，应提醒用户运行 `scripts/sync-agents.sh` 同步到外部仓库。
+- agent 不要自动执行同步脚本，同步操作由用户决定。
+- 如需添加更多文件到同步范围，编辑 `scripts/sync-agents-manifest.txt` 加一行路径即可。
 
 ## macOS 外置盘清理
 

@@ -13,16 +13,22 @@ Use this skill as the project-level production protocol for myLectures video wor
 2. Choose one audio route:
    - Read `references/10-voice-conversion-workflow.md` for the original-recording + vocal separation + voice conversion route.
    - Read `references/11-tts-workflow.md` for the rewritten-script + TTS route.
-3. Before any Manim design or code, read:
+3. Before writing or revising a TTS `script.md`, read
+   `references/12-script-authoring-feedback-loop.md`.
+4. Before any Manim design or code, read:
    - `references/20-math-object-driven-animation.md`
    - `references/30-visual-language-and-style.md`
-4. For unfamiliar visualization problems, read `references/21-visualization-cases.md`.
-5. Before rendering or submitting a segment, read:
+   - For formula-dense or stage-dense scenes, also read
+     `references/42-scene-contract-and-composer.md` and create a
+     scene-local `contract.yaml` before final animation code.
+5. For unfamiliar visualization problems, read `references/21-visualization-cases.md`.
+6. Before rendering or submitting a segment, read:
    - `references/40-production-loop-and-qc.md`
    - `references/41-production-output-contract.md`
+   - `references/43-review-red-flag-rubric.md`
    - `references/50-known-failures-and-fixes.md`
-6. When planning multiple agents or subagents for scene/episode work, read `references/70-parallel-agent-development.md`.
-7. When updating this skill from project experience, read `references/60-skill-evolution-and-lessons.md`.
+7. When planning multiple agents or subagents for scene/episode work, read `references/70-parallel-agent-development.md`.
+8. When updating this skill from project experience, read `references/60-skill-evolution-and-lessons.md`.
 
 ## Core Workflow
 
@@ -30,8 +36,17 @@ Use this skill as the project-level production protocol for myLectures video wor
 1. Inspect git status and keep unrelated user changes untouched.
 2. Identify the source script, audio route, SRT/alignment, formula list, and target video directory.
 3. If starting a new production directory, initialize the actual episode skeleton first: `README.md`, `script.md`, route-specific speaking rules, `formula-manifest.md`, `storyboard.md`, a clearly marked pre-audio `timeline.json`, `experiment-log.md`, `src/theme.py`, `scripts/`, `draft/`, `exports/README.md`, `assets/`, and `references/`.
-4. Build or update `formula-manifest.md` so important formulas from the source script are not lost.
-5. Build or update `storyboard.md` and `timeline.json`; timeline is not an SRT translation, but a contract between narration, visuals, audio, character, sonification, and BGM suggestions.
+4. Before writing or revising `script.md`, compile a script-authoring preflight
+   from the episode's `review/human-feedback/`, `review/agent-feedback/`,
+   `review/issues/*.json` entries with `source: human_review`,
+   `source: accepted_agent_feedback`, `applies_to_script_authoring: true`, or
+   `must_check_in_future: true`, plus `references/50-known-failures-and-fixes.md`.
+   Record the applicable `pattern_key` entries and concrete avoidance choices
+   in `experiment-log.md`. If the episode has a local script lint tool, extend
+   it with hard regex or structural checks for reusable wording failures before
+   synthesizing audio.
+5. Build or update `formula-manifest.md` so important formulas from the source script are not lost.
+6. Build or update `storyboard.md` and `timeline.json`; timeline is not an SRT translation, but a contract between narration, visuals, audio, character, sonification, and BGM suggestions.
    `storyboard.md` is the human-reviewable explanation of scene grouping and
    visual language. `timeline.json` is the precise animation/audio contract.
    Both must account for stage direction at their own granularity.
@@ -42,17 +57,25 @@ Use this skill as the project-level production protocol for myLectures video wor
    `references/50-known-failures-and-fixes.md`. Record which `pattern_key`
    entries apply and how this shot will avoid them in `storyboard.md`,
    `timeline.json`, scene stage direction, or `experiment-log.md`.
-6. Design each shot from mathematical objects first, then choose display mappings, synchronized views, and any media textures.
-7. Implement Manim with shared project theme helpers and `uv run manim`; use `GrowArrow` for primary directed mathematical objects.
-8. Add or generate sound effects only at mathematical event times.
-9. Render per-segment review videos before any final full merge, following the paths, commands, naming, and mux rules in `41-production-output-contract.md`.
-10. Extract keyframes into the canonical QC directory and audit for math correctness, visual hierarchy, overlap, typography, color semantics, and fake-animation risk. For Manim scenes with formula/text panels, also run `tools/layout_check.py` through a scene-specific layout audit, save the JSON report under `review/audits/<scene_slug>/`, and treat overlap, out-of-frame, containment, or close-as-issue findings as blockers.
-11. Update `experiment-log.md` with operation notes, decisions, failures, fixes, outputs, and QC frames.
-12. Before any animation handoff or delivery, run the strict animation review gate below. A self-review is not enough when a subagent or independent review pass is available.
-13. For explicitly parallel scene or episode work, use the current protocol in `70-parallel-agent-development.md`: branch and file ownership first, with production files kept in this repository.
-14. Promote only distilled, reusable lessons into this skill using `60-skill-evolution-and-lessons.md`.
-15. After the strict review gate passes, hand the review MP4, QC evidence, source/control paths, audit reports, and fixed issue queue to the user for final viewing. Do not stage or commit animation work yet.
-16. Only after the user explicitly approves the review output for commit, run validation commands, clean AppleDouble metadata with `dot_clean .`, stage only relevant files, and commit the approved checkpoint.
+7. Design each shot from mathematical objects first, then choose display mappings, synchronized views, and any media textures.
+8. Implement Manim with shared project theme helpers and `uv run manim`; use `GrowArrow` for primary directed mathematical objects.
+9. Add or generate sound effects only at mathematical event times.
+10. Render per-segment review videos before any final full merge, following the paths, commands, naming, and mux rules in `41-production-output-contract.md`.
+11. Extract keyframes into the canonical QC directory and audit for math correctness, visual hierarchy, overlap, typography, color semantics, and fake-animation risk. For Manim scenes with formula/text panels, also run `tools/layout_check.py` through a scene-specific layout audit, save the JSON report under `review/audits/<scene_slug>/`, and treat overlap, out-of-frame, containment, or close-as-issue findings as blockers.
+12. Update `experiment-log.md` with operation notes, decisions, failures, fixes, outputs, and QC frames.
+13. Before any animation handoff or delivery, initialize or continue a
+    `tools/review_gate.py` session for the scene and run the strict animation
+    review gate below, using the reverse-burden red-flag ledger in
+    `43-review-red-flag-rubric.md`. A self-review is not enough when a
+    subagent or independent review pass is available. A review is not accepted
+    until `review_gate.py submit-review` succeeds.
+14. For explicitly parallel scene or episode work, use the current protocol in `70-parallel-agent-development.md`: branch and file ownership first, with production files kept in this repository.
+15. Promote only distilled, reusable lessons into this skill using `60-skill-evolution-and-lessons.md`.
+16. After `review_gate.py status --require-pass` succeeds, hand the review
+    MP4, QC evidence, source/control paths, audit reports, gate state, and
+    fixed issue queue to the user for final viewing. Do not stage or commit
+    animation work yet.
+17. Only after the user explicitly approves the review output for commit, run validation commands, clean AppleDouble metadata with `dot_clean .`, stage only relevant files, and commit the approved checkpoint.
 
 ## Strict Animation Review Gate
 
@@ -60,6 +83,38 @@ This gate applies to every animation task, including a single segment repair.
 Do not rely on memory of this skill. Reread the animation philosophy and QC
 references from top to bottom before designing, coding, rendering, or declaring
 the work ready.
+
+Use `tools/review_gate.py` as the hard receipt for review and repair state:
+
+1. The animation owner creates a session with `review_gate.py init`, selecting
+   a risk tier. Use `normal` for ordinary scenes, `dense` for formula/stage
+   dense scenes, `human-rejected` after user rejection, and `repeat-rejected`
+   after repeated user rejection of the same scene type.
+2. The reviewer runs `review_gate.py checklist` and must explicitly confirm
+   every listed document by path and SHA-256. The required list includes this
+   skill, core animation/QC references, and any episode human-feedback,
+   accepted agent-feedback, or relevant issue JSON records present at session
+   creation.
+3. The reviewer writes the Markdown audit report and submits structured JSON
+   through `review_gate.py submit-review`. The CLI rejects the submission if
+   read confirmations are missing, artifacts are missing, abstract standards
+   are not covered, regression records are not checked, or the risk-tier
+   quotas for candidate red flags and ranked aesthetic/visual-guidance
+   objections are not met.
+4. If the accepted review has open issues, the scene status is
+   `revision_required` or `blocked`. The animation owner must repair, rerender,
+   regenerate QC evidence, and submit `review_gate.py submit-fix`. Every open
+   issue must be ticked as fixed or explicitly pardoned with evidence; missing
+   issue fixes are rejected.
+5. The reviewer then performs another full review round. The loop ends only
+   when `submit-review` accepts a `pass_for_user_review_pending` verdict and
+   `review_gate.py status --require-pass` succeeds.
+
+The gate follows "suspicion first": even a polished render must produce enough
+specific objections to satisfy the current risk tier. Objections may be fixed,
+pardoned, or marked not applicable, but they must be named with evidence. This
+keeps taste and visual-guidance review active instead of relying on a reviewer
+to notice only obvious red lines.
 
 For difficult, unfamiliar, formula-dense, or visually ambiguous tasks, search
 the skill references and existing repository examples before implementation.
@@ -98,6 +153,27 @@ use concrete known failures and human issue `pattern_key` entries as evidence
 and calibration. If a render violates an abstract standard but no concrete
 case exists yet, create a new issue JSON with a new `pattern_key`; do not pass
 it just because the failure is new.
+
+The review burden is reversed. The default verdict is `revise`, not `pass`.
+For every formula-dense, diagram-dense, or previously human-rejected scene, the
+reviewer must create a red-flag ledger before deciding the verdict. The ledger
+must contain candidate violations for connector ownership, formula typography,
+creator-intent text, derivation persistence, frame/chip use, fills/area-like
+shapes, visualization adequacy, and beat alignment. A review with no candidate
+flags is invalid. Every candidate must be `fixed`, `pardoned`, or
+`not_applicable` with evidence; one unclosed candidate means `revise`.
+
+The same review must include a ranked aesthetic/noise sweep before any pass:
+`第一丑`, `第二丑`, `第三丑` or equivalent ranked candidates for the ugliest,
+noisiest, most visually confusing, or weakest visual-guidance parts of the
+render. List at least three candidates even when the render is otherwise close
+to acceptable. Each ranked candidate must be `fixed`, `pardoned`, or
+`not_applicable` with timestamp/QC/code evidence; a pardon must explain why it
+is still clear to a novice viewer, not merely why it was convenient to leave.
+For scene contracts, `tools/validate_scene_contract.py` enforces
+`review_policy.requires_ranked_aesthetic_sweep: true`,
+`minimum_ranked_aesthetic_flags`, and a closed `ranked_aesthetic_flags` list.
+A review or contract missing this ranked sweep is invalid.
 
 The reviewer must also verify that the animation owner used the same feedback
 before implementation. If there is no authoring preflight checklist, or if the
@@ -182,11 +258,14 @@ approval from subagent approval.
 - `00-overview-and-route-selection.md`: project boundaries, route choice, and required shared artifacts.
 - `10-voice-conversion-workflow.md`: original oral recording route copied and split from the existing flow exploration.
 - `11-tts-workflow.md`: TTS route copied from the TTS exploration document.
+- `12-script-authoring-feedback-loop.md`: script-stage human feedback, hard lint gates, claim responsibility checks, and notebook boundary rules before TTS synthesis.
 - `20-math-object-driven-animation.md`: mathematical-object-driven animation philosophy and anti-fabrication audit.
 - `21-visualization-cases.md`: standard solutions to visualization philosophy test cases.
 - `30-visual-language-and-style.md`: Blackboard Kessoku palette, formula hierarchy, frames/underlines/colors, and screen text rules.
 - `40-production-loop-and-qc.md`: timeline, formula manifest, rendering, audio, sonification, experiment log, and final reporting requirements.
 - `41-production-output-contract.md`: canonical video directory tree, Manim render commands, review MP4 assembly, QC frames, final stitching, naming, and git boundaries.
+- `42-scene-contract-and-composer.md`: minimal scene-local contract and Python composer structure for formula-dense or stage-dense Manim scenes.
+- `43-review-red-flag-rubric.md`: reverse-burden review protocol, candidate red-flag ledger, negative examples, and subagent prompt addendum.
 - `50-known-failures-and-fixes.md`: issues already encountered in episode 0001 and the accepted fixes.
 - `60-skill-evolution-and-lessons.md`: rules for promoting raw project logs into reusable skill knowledge without bloating the skill.
 - `70-parallel-agent-development.md`: current, revisable protocol for multi-agent scene and episode development with branch ownership, review handoffs, and production-in-repo discipline.
@@ -203,6 +282,14 @@ for full usage examples.
   showing how to register elements, assign time ranges, render a
   bounding-box debug frame, and run the checker. Use as a template when
   packing more than 4 narrative elements into a single scene.
+- `tools/validate_scene_contract.py` - MVP structural validator for
+  scene-local `contract.yaml` files used by componentized Python composer
+  scenes.
+- `tools/review_gate.py` - JSON-state CLI for suspicion-first review loops.
+  It enforces required document read confirmations, abstract-standard
+  coverage, concrete regression coverage, minimum candidate findings, ranked
+  aesthetic objections, issue-file creation, fix submission, and final
+  `pass_for_user_review_pending` status before user handoff.
 
 ## Non-Negotiables
 

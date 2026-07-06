@@ -22,6 +22,13 @@ Episode 0001 source example:
 
 Write the narration script before audio synthesis. The script is not final subtitles; it is the unit structure for synthesis and later timeline construction.
 
+Before revising or synthesizing the script, run the script-authoring feedback
+loop in `12-script-authoring-feedback-loop.md`. Human feedback about wording,
+mathematical precision, AI-sounding narration, exposition order, or TTS
+pronunciation is production data. It must be converted into tracked feedback
+notes, issue JSON, a script-authoring preflight in `experiment-log.md`, and
+episode-local lint checks when the failure can be detected mechanically.
+
 For a new episode, initialize:
 
 - `README.md` with source draft, route, voice profile, output names, and next commands.
@@ -43,6 +50,11 @@ Use:
 Each `Sxxx` segment in `script.md` is a synthesis and timeline unit. Read only segment body text for synthesis, not headings.
 
 Do not feed raw LaTeX formulas to TTS when they sound bad. Rewrite formulas into speakable Chinese/math narration according to `tts-speaking-rules.md`. Some formulas should be spoken; some should be shown visually.
+
+Do not synthesize full audio while applicable human-review script issues remain
+unconsumed. At minimum, run the local script lint and a TTS plan pass after
+script edits, and update `storyboard.md`, `timeline.json`, and
+`formula-manifest.md` when segment responsibilities or formula coverage change.
 
 ## Current Production Scheme
 

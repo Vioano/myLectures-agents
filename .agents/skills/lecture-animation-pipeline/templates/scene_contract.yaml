@@ -1,0 +1,204 @@
+scene_id: s014_s018_local_square_transform
+scene_class: S014S018LocalSquareTransform
+contract_version: 1
+
+style_constraints:
+  max_unrelated_overlap_seconds: 0.35
+  connector_policy: "edge_to_edge_arrows_only"
+  framed_formula_default: "bare_mathtex_unless_role_declared"
+
+review_policy:
+  mode: reverse_burden
+  minimum_candidate_flags: 6
+  minimum_ranked_aesthetic_flags: 3
+  requires_ranked_aesthetic_sweep: true
+  pass_requires_all_flags_closed: true
+  ranked_aesthetic_flags:
+    - rank: 1
+      id: example_first_ugliest_or_noisiest
+      standard_key: visual_hierarchy_failure
+      status: open
+      evidence: "Name the single ugliest, noisiest, or most visually confusing feature in the current render."
+      repair_target: []
+      authoring_response: "Repair it, or pardon it with a novice-viewer reason."
+    - rank: 2
+      id: example_second_ugliest_or_noisiest
+      standard_key: space_utilization_failure
+      status: open
+      evidence: "Name the second strongest aesthetic or visual-guidance concern."
+      repair_target: []
+      authoring_response: "Repair it, or pardon it with a novice-viewer reason."
+    - rank: 3
+      id: example_third_ugliest_or_noisiest
+      standard_key: ambiguous_visual_object
+      status: open
+      evidence: "Name the third strongest visual clutter, unclear guide, or weak hierarchy candidate."
+      repair_target: []
+      authoring_response: "Repair it, or pardon it with a novice-viewer reason."
+  candidate_flags:
+    - id: example_unowned_connector
+      standard_key: ambiguous_visual_object
+      status: not_applicable
+      evidence: "No connector objects are used in this template scene."
+      repair_target: []
+      authoring_response: "If a connector is added later, declare endpoints and relation here."
+    - id: example_formula_typography
+      standard_key: visual_hierarchy_failure
+      status: fixed
+      evidence: "All concept-bearing formulas are MathTex objects."
+      repair_target: []
+      authoring_response: "Use MathTex for subscripts, superscripts, hats, Greek letters, and angle brackets."
+    - id: example_frame_overuse
+      standard_key: visual_hierarchy_failure
+      status: fixed
+      evidence: "Only conclusion_formula uses a frame and declares frame_role: conclusion."
+      repair_target: []
+      authoring_response: "Keep setup formulas bare unless a frame role is declared."
+    - id: example_unowned_fill
+      standard_key: ambiguous_visual_object
+      status: fixed
+      evidence: "Square and transformed_square are outlines; no fill is used unless named."
+      repair_target: []
+      authoring_response: "Set fill opacity to zero for stroke-only mathematical objects."
+    - id: example_premature_clear
+      standard_key: timeline_visual_alignment_failure
+      status: fixed
+      evidence: "jacobian_formula clears only when conclusion_formula enters in b03."
+      repair_target: []
+      authoring_response: "Keep derivation memory visible until the dependent conclusion lands."
+    - id: example_formula_only_scene
+      standard_key: mathematical_identity_or_causality_failure
+      status: fixed
+      evidence: "The scene includes coordinate_plane, source_square, and transformed_square before formulas."
+      repair_target: []
+      authoring_response: "Show the mathematical object before using the formula as conclusion."
+
+visual_strategy:
+  requires_non_formula_visual: true
+  non_formula_visuals: ["coordinate_plane", "source_square", "transformed_square"]
+  formula_only_scene_allowed: false
+  novice_viewer_test: "Viewer can see the local square transform before reading the conclusion formula."
+
+formula_persistence:
+  min_hold_seconds: 2.0
+  premature_clear_forbidden_when_space_available: true
+
+presentation:
+  math_renderer_required: true
+  allow_plain_text_math_tokens: false
+  forbid_unowned_fills: true
+
+source:
+  timeline_segments: ["S014", "S015", "S016", "S017", "S018"]
+  audio_window: [0.0, 25.0]
+  storyboard_ref: "storyboard.md#s014-s018"
+
+layout_modes:
+  - id: split_plane_formula
+    local_time: [0.0, 12.0]
+    purpose: "connect the local square deformation to the algebraic map"
+  - id: center_reveal
+    local_time: [12.0, 25.0]
+    purpose: "give the final local-linear conclusion central space"
+
+zones:
+  title_band:
+    rect: [-6.7, 6.7, 2.8, 3.5]
+    protected: true
+  main_plane:
+    rect: [-6.6, -0.4, -2.8, 2.5]
+    protected: true
+  formula_board:
+    rect: [0.2, 6.6, -2.4, 2.5]
+    protected: false
+  bottom_lane:
+    rect: [-6.4, 6.4, -3.45, -2.65]
+    protected: false
+
+drivers:
+  - id: local_square_driver
+    type: local_linear_map
+    owner_file: drivers.py
+    controls:
+      - grid
+      - square
+      - transformed_square
+      - jacobian_formula
+    notes:
+      - "single source of truth for square vertices and formula labels"
+
+objects:
+  - id: coordinate_plane
+    factory: objects.make_coordinate_plane
+    driver: local_square_driver
+    zone: main_plane
+    role: active_diagram
+  - id: source_square
+    factory: objects.make_source_square
+    driver: local_square_driver
+    zone: main_plane
+    role: mathematical_object
+  - id: transformed_square
+    factory: objects.make_transformed_square
+    driver: local_square_driver
+    zone: main_plane
+    role: mathematical_object
+  - id: jacobian_formula
+    factory: objects.make_jacobian_formula
+    driver: local_square_driver
+    zone: formula_board
+    role: formula_board
+    presentation:
+      formula_display: bare_mathtex
+      uses_frame: false
+  - id: conclusion_formula
+    factory: objects.make_conclusion_formula
+    driver: local_square_driver
+    zone: bottom_lane
+    role: conclusion
+    presentation:
+      formula_display: framed_mathtex
+      uses_frame: true
+      frame_role: conclusion
+
+beats:
+  - id: b01_show_local_square
+    local_time: [0.0, 5.0]
+    owns_zones: ["main_plane"]
+    enter: ["coordinate_plane", "source_square"]
+    transform: []
+    clear_before: []
+    clear_after: []
+    audit_frames: [0.0, 2.5, 5.0]
+  - id: b02_apply_local_map
+    local_time: [5.0, 12.0]
+    owns_zones: ["main_plane", "formula_board"]
+    enter: ["jacobian_formula"]
+    transform:
+      - from: source_square
+        to: transformed_square
+        identity: "same local square under local linear approximation"
+    clear_before: []
+    clear_after: []
+    overlap_policy:
+      max_unrelated_overlap_seconds: 0.25
+    audit_frames: [5.0, 8.5, 12.0]
+  - id: b03_reveal_conclusion
+    local_time: [12.0, 25.0]
+    owns_zones: ["bottom_lane", "formula_board"]
+    enter: ["conclusion_formula"]
+    transform: []
+    clear_before: ["jacobian_formula"]
+    clear_after: []
+    audit_frames: [12.0, 18.0, 25.0]
+
+audit:
+  required:
+    - overlap
+    - out_of_frame
+    - containment
+    - reserved_region_intrusion
+    - stale_updater
+  protected_regions:
+    - main_plane
+  qc_frames_from_beats: true

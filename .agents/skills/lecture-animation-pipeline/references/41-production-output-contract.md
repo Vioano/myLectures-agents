@@ -17,6 +17,7 @@ videos/NNNN-slug/
     theme.py                   tracked local style bridge
     <scene_slug>.py            tracked Manim scene source
     <scene_slug>.stage.md      optional tracked stage direction
+    scenes/<scene_slug>/       optional componentized Manim scene package
   scripts/                     tracked video-local utilities
   assets/                      tracked episode-specific source/final assets when small and licensed
   references/                  tracked small references and notes; large audio/video references stay ignored
@@ -24,6 +25,7 @@ videos/NNNN-slug/
     assignments.md             tracked ownership and status table
     handoffs/                  tracked handoff notes
     audits/                    tracked strict subagent/independent audit reports
+    gate/                      tracked compact review-gate JSON state
     human-feedback/            tracked user review feedback and regression notes
     agent-feedback/            tracked coordinator-accepted agent review lessons
     issues/                    tracked actionable review issues
@@ -54,6 +56,26 @@ The production directory may contain a local `storyboard.md` only when it is a w
 - A concise `STAGE_SCRIPT` constant or class docstring inside `src/<scene_slug>.py` when the choreography must stay beside code.
 
 Do not scatter stage-direction notes in the video root. Root-level files should be the canonical shared artifacts listed above.
+
+## Componentized Manim Scene Packages
+
+For formula-dense or stage-dense Manim scenes, prefer:
+
+```text
+videos/NNNN-slug/src/scenes/<scene_slug>/
+  contract.yaml        tracked local stage contract
+  drivers.py           tracked mathematical state and shared parameters
+  objects.py           tracked Mobject factories and registration
+  layout.py            tracked zones, slots, protected regions, fitting helpers
+  beats.py             tracked enter / transform / exit animation units
+  composer.py          tracked thin Manim Scene entrypoint
+  audit.py             tracked adapter to layout_check and QC anchors
+  README.stage.md      optional tracked notes
+```
+
+The Manim render command should point to `composer.py`. Review MP4s, QC frames,
+audit reports, issues, handoffs, generated exports, and the user-review commit
+gate remain exactly as defined in this output contract.
 
 ## Assets Versus Media
 
@@ -97,7 +119,13 @@ videos/NNNN-slug/exports/manim/videos/<scene_slug>/720p30/<SceneClass>.mp4
 
 Use `-ql --fps 30` only for quick smoke checks and layout experiments. A `-ql` render is not enough for review acceptance.
 
-Use `-qh --fps 30` for final 1080p30 candidates. Use 60 fps only when the motion genuinely benefits and record that decision in `experiment-log.md`.
+Use `-qh --fps 30` for final 1080p30 candidates. When the final
+master/upload target is 4K, use `-qk --fps 30` or an explicit equivalent
+`--resolution 3840,2160 --fps 30` so the source render is truly 2160p30.
+Do not claim a 4K final from a simple upscale of 720p/1080p review files
+unless the experiment log explicitly marks it as an upscaled delivery
+workaround. Use 60 fps only when the motion genuinely benefits and record that
+decision in `experiment-log.md`.
 
 If a render variant must be preserved, set a variant media root:
 
@@ -208,6 +236,11 @@ Use `review/` for tracked coordination documents.
 - `review/assignments.md`: one row per segment range or scene, with owner, branch, source files, review output, QC output, and status.
 - `review/handoffs/<agent>-<segments>.md`: short handoff with commands, paths, QC notes, known issues, and next action.
 - `review/audits/<scene_slug>/<review_id>__<reviewer>__<branch_slug>.md`: strict subagent or independent audit report. The branch slug replaces `/` with `--`, so `codex/0002-s001` becomes `codex--0002-s001`.
+- `review/gate/<scene_slug>/<session_id>/state.json`: compact machine state
+  written by `tools/review_gate.py`. It records required-document hashes,
+  review rounds, accepted review submissions, accepted fix submissions, open
+  issues, and whether the scene has reached `pass_for_user_review_pending`.
+  Large artifacts remain in `exports/`; gate state is source/control.
 - `review/human-feedback/<date>-<scope>.md`: user review findings, screenshot or video evidence, repeated-pattern lessons, issue ids created from them, and authoring preflight expectations for future animation agents.
 - `review/agent-feedback/<date>-<scope>.md`: subagent or group-review findings that the coordinator has accepted as reusable future guidance. Do not put every transient subagent comment here; promote only findings that prevent repeated authoring or review failures.
 - `review/issues/*.json`: actionable review queue items. Check it before starting, rendering, handing off, or marking a segment done.
@@ -227,6 +260,8 @@ scene without chat context. Each report must include:
 - review MP4, voice/audio source, SRT/alignment, timeline, stage direction, formula manifest, source code, and QC frame paths;
 - overall verdict: `pass`, `revise`, or `blocked`;
 - a checklist mapping the review to this skill's requirements;
+- a ranked aesthetic/noise ledger with at least three closed entries naming
+  the first, second, and third ugliest/noisiest/least-clear visual candidates;
 - numbered findings with severity, requirement reference, evidence location, impact, recommended fix, owner, and status.
 
 When a finding is actionable, also create a JSON issue:
@@ -282,7 +317,9 @@ the current repair queue, but do not automatically become permanent regression
 tests.
 
 Do not mark `review/assignments.md` as accepted while any open audit issue for
-that scene remains.
+that scene remains. Also do not mark the scene as user-review-ready until
+`tools/review_gate.py status --require-pass` succeeds for the current review
+session.
 
 After all audit issues are resolved and the strict audit verdict is `pass`,
 the next status should be a user-review state such as `user_review_pending`.
@@ -299,6 +336,8 @@ Use:
 videos/NNNN-slug/exports/final/segments/
 videos/NNNN-slug/exports/final/<video_slug>_master_vNN_1080p30.mp4
 videos/NNNN-slug/exports/final/<video_slug>_upload_vNN_bilibili_1080p30.mp4
+videos/NNNN-slug/exports/final/<video_slug>_master_vNN_2160p30.mp4
+videos/NNNN-slug/exports/final/<video_slug>_upload_vNN_bilibili_2160p30.mp4
 ```
 
 Segment files in `exports/final/segments/` should be numbered in playback order:
@@ -334,7 +373,13 @@ ffmpeg -y \
   videos/NNNN-slug/exports/final/<video_slug>_master_vNN_1080p30.mp4
 ```
 
-Project default upload candidate is H.264 MP4, `yuv420p`, AAC audio at 48 kHz, 1080p30 unless a documented reason chooses 60 fps. Verify current Bilibili upload requirements before final publishing if the platform constraints matter.
+Preview/review files may be 720p30 or 1080p30 for iteration speed, but final
+master/upload candidates should use a higher resolution than the preview when
+the user requests final clarity. For 4K delivery, use 3840x2160, normally
+2160p30 for this course unless a documented reason chooses 60 fps. Project
+default upload candidate remains H.264 MP4, `yuv420p`, AAC audio at 48 kHz.
+Verify current Bilibili upload requirements before final publishing if the
+platform constraints matter.
 
 ## Exports Semantics
 
@@ -361,6 +406,9 @@ Before handing off a segment:
 - QC frames exist under `exports/qc/<qc_id>/`.
 - `experiment-log.md` records outputs, render settings, QC findings, and known issues.
 - `review/assignments.md` or `review/handoffs/` is updated when multiple agents are involved.
+- `review/gate/<scene_slug>/<session_id>/state.json` exists, accepted the
+  latest review/fix loop, and passes `tools/review_gate.py status
+  --require-pass`.
 - `git status --short` is checked, and only source/control files are staged.
 
 For animation source/control changes, this checklist is a handoff boundary, not
