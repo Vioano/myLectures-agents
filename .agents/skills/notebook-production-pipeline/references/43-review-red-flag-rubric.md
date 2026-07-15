@@ -15,7 +15,9 @@ Default to `revise`.
 Accept only when:
 
 - required skill references and episode feedback have been read and recorded;
-- the notebook and audit artifacts exist;
+- the notebook and audit artifacts exist, and the audit JSON reports
+  `status: "pass"` for the target notebook;
+- reviewer independence is declared with evidence;
 - all abstract standards have evidence;
 - all known regressions have been checked;
 - enough candidate red flags have been collected for the risk tier;
@@ -73,6 +75,11 @@ Each flag should include:
 - `status`
 - `resolution_evidence` or `pardon_reason` when closed
 
+For `pardoned`, the reviewer must explain why the issue is safe for a novice
+student, not merely why it is convenient to leave unchanged. For
+`not_applicable`, the reviewer must name the inspected evidence that makes it
+not applicable.
+
 ## Minimum Sweep Groups
 
 Reviewers must actively search these groups:
@@ -88,8 +95,12 @@ Reviewers must actively search these groups:
 - feedback quality: are wrong answers diagnosed with targeted hints and
   repair routes?
 - cell modality: is Markdown/code/widget/object lab chosen by teaching
-  function?
-- pattern-card coverage: are reusable mother structures trained through
+  function? Are tables reserved for comparison and classification rather than
+  used as the default shape for every exercise? Are fill-in blanks used
+  sparingly, with proof/calculation questions given enough room for students
+  to organize their own solution? If an open written area is needed, is it
+  ordinary Markdown spacing rather than custom answer-box chrome?
+- reusable-structure coverage: are reusable mother structures trained through
   disguised forms when applicable?
 - mathematical causality: are sampling, sums, limits, projections, rotations,
   conjugation, and approximations exposed as real computational steps?
@@ -98,13 +109,22 @@ Reviewers must actively search these groups:
 - output hygiene: are warnings, glyph boxes, tracebacks, huge dumps, and
   repeated logs absent from saved outputs?
 - presentation boundary: does student-facing prose avoid creator-intent,
-  pipeline, review-gate, draft-status, and implementation-workaround text?
+  pipeline, review-gate, draft-status, implementation-workaround text, and
+  visible scaffold labels or implementation slang that make the notebook feel
+  like an agent artifact?
+- humanized public prose: does the notebook avoid the hard `$humanizer`
+  failure subset: em/en dashes, generic signposting, negative-parallelism
+  slogans, inflated "core/key/deep" framing, chatbot-like English phrases, and
+  AI-ish scaffold vocabulary? Does it also avoid casual engineering metaphors
+  when a precise mathematical relation is needed?
 - static-reading fallback: can GitHub or a non-interactive reader still follow
   the core lesson?
 - visual readability: are plots, legends, labels, colors, and code/prose
   density readable?
-- source boundary: are draft, generated, validation, and production files in
-  the correct places?
+- source boundary: are public notebooks, drafts, generated files, validation
+  outputs, and review records in the correct places? Public production
+  notebooks must be `notebooks/NNNN-slug.ipynb`, not
+  `notebooks/NNNN-slug/notebook.ipynb`.
 - review traceability: are audit outputs, issues, fixes, and user-pending
   status recorded?
 
@@ -147,3 +167,25 @@ Use these keys in review reports and issue JSON:
 Use `pass_for_user_review_pending` for a candidate that has passed automatic
 and agent review but still needs user direction. Do not write `final_pass`
 unless the user has explicitly approved that notebook direction.
+
+## Reviewer Independence
+
+Every passing review includes:
+
+```json
+{
+  "reviewer_independence": {
+    "owner": "codex",
+    "reviewer": "codex-review",
+    "mode": "subagent",
+    "evidence": "Subagent session reviewed source, executed output, audit JSON, issue records, and ranked quality sweep.",
+    "subagent_session": "<session id or worker log path>",
+    "same_agent_exception_reason": ""
+  }
+}
+```
+
+Allowed modes are `subagent`, `independent_pass`, and `human_review`. For
+`human-rejected` and `repeat-rejected`, `subagent` is preferred. If the same
+main agent performs an independent pass because no subagent is available, the
+exception reason must be explicit. Do not describe it as a subagent review.

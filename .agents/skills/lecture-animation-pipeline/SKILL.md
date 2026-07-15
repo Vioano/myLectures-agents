@@ -62,20 +62,31 @@ Use this skill as the project-level production protocol for myLectures video wor
 9. Add or generate sound effects only at mathematical event times.
 10. Render per-segment review videos before any final full merge, following the paths, commands, naming, and mux rules in `41-production-output-contract.md`.
 11. Extract keyframes into the canonical QC directory and audit for math correctness, visual hierarchy, overlap, typography, color semantics, and fake-animation risk. For Manim scenes with formula/text panels, also run `tools/layout_check.py` through a scene-specific layout audit, save the JSON report under `review/audits/<scene_slug>/`, and treat overlap, out-of-frame, containment, or close-as-issue findings as blockers.
+    Contract version 4 scenes must register every coexisting major formula/value
+    row as an atomic temporal audit element. One aggregate formula `VGroup`
+    cannot prove that its children do not collide. Version 4 also requires a
+    derivation-memory comparison window and novice-comprehension checkpoints.
 12. Update `experiment-log.md` with operation notes, decisions, failures, fixes, outputs, and QC frames.
-13. Before any animation handoff or delivery, initialize or continue a
+13. Before writing final Manim code for a dense, formula-heavy, or
+    human-rejected scene, run `tools/animation_preflight_gate.py` for exactly
+    one scene slug. For human-rejected scenes use `--risk-tier human-rejected
+    --require-component-package --require-per-scene-review`. The preflight must
+    pass before render/review work continues; it rejects stale combined review
+    references, monolithic source files, missing motion ledgers, missing
+    authoring use of regression records, and formula-only visual plans.
+14. Before any animation handoff or delivery, initialize or continue a
     `tools/review_gate.py` session for the scene and run the strict animation
     review gate below, using the reverse-burden red-flag ledger in
     `43-review-red-flag-rubric.md`. A self-review is not enough when a
     subagent or independent review pass is available. A review is not accepted
     until `review_gate.py submit-review` succeeds.
-14. For explicitly parallel scene or episode work, use the current protocol in `70-parallel-agent-development.md`: branch and file ownership first, with production files kept in this repository.
-15. Promote only distilled, reusable lessons into this skill using `60-skill-evolution-and-lessons.md`.
-16. After `review_gate.py status --require-pass` succeeds, hand the review
+15. For explicitly parallel scene or episode work, use the current protocol in `70-parallel-agent-development.md`: branch and file ownership first, with production files kept in this repository.
+16. Promote only distilled, reusable lessons into this skill using `60-skill-evolution-and-lessons.md`.
+17. After `review_gate.py status --require-pass` succeeds, hand the review
     MP4, QC evidence, source/control paths, audit reports, gate state, and
     fixed issue queue to the user for final viewing. Do not stage or commit
     animation work yet.
-17. Only after the user explicitly approves the review output for commit, run validation commands, clean AppleDouble metadata with `dot_clean .`, stage only relevant files, and commit the approved checkpoint.
+18. Only after the user explicitly approves the review output for commit, run validation commands, clean AppleDouble metadata with `dot_clean .`, stage only relevant files, and commit the approved checkpoint.
 
 ## Strict Animation Review Gate
 
@@ -86,6 +97,12 @@ the work ready.
 
 Use `tools/review_gate.py` as the hard receipt for review and repair state:
 
+0. The animation owner first runs `tools/animation_preflight_gate.py` for one
+   scene slug when the scene is formula-dense, stage-dense, or previously
+   human-rejected. For a previously rejected scene, the required command shape
+   is:
+   `python3 .agents/skills/lecture-animation-pipeline/tools/animation_preflight_gate.py --repo-root . --episode videos/NNNN-slug --scene-slug <scene_slug> --risk-tier human-rejected --require-component-package --require-per-scene-review`.
+   A failed preflight means the scene is not reviewable yet.
 1. The animation owner creates a session with `review_gate.py init`, selecting
    a risk tier. Use `normal` for ordinary scenes, `dense` for formula/stage
    dense scenes, `human-rejected` after user rejection, and `repeat-rejected`
@@ -109,6 +126,25 @@ Use `tools/review_gate.py` as the hard receipt for review and repair state:
 5. The reviewer then performs another full review round. The loop ends only
    when `submit-review` accepts a `pass_for_user_review_pending` verdict and
    `review_gate.py status --require-pass` succeeds.
+
+`review_gate.py` must persist review-behavior metrics to disk, not only to
+chat context. Every accepted or rejected review/fix submission is appended to
+both the session ledger
+`review/gate/<scene_slug>/<session_id>/review_metrics.jsonl` and the episode
+ledger `review/gate/review_metrics.jsonl`. The metrics include candidate
+counts, ranked-aesthetic counts, open issue counts, accepted fix/review rounds,
+pardon counts, and pardon rate. Use `review_gate.py metrics --session ...` to
+inspect the ledger before trusting a pass.
+
+The state machine is also a hard quality gate. A `pass_for_user_review_pending`
+submission is rejected if the selected risk tier has too many pardons, an
+abnormally high pardon rate, or too few fix/rereview rounds. Human-review and
+accepted-agent regression records, plus no-pardon classes such as subtitle
+safe-zone violations, formula-in-subtitle-lane, duplicate semantic objects,
+lingering objects, slow fade ghosts, ambiguous unowned fills, stray debug
+rectangles, PPT-like formula-only derivations, and unvisualized Riemann sums,
+cannot be pardoned. They must be fixed, proven not applicable, or left open as
+`revise`/`blocked`.
 
 The gate follows "suspicion first": even a polished render must produce enough
 specific objections to satisfy the current risk tier. Objections may be fixed,

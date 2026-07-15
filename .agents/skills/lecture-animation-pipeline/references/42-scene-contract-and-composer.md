@@ -80,6 +80,12 @@ The Manim render command should point to `composer.py`.
   include a `review_policy.mode: reverse_burden` section with candidate red
   flags before final animation code. Missing red-flag policy is a design-stage
   failure, not a reviewer preference.
+- Formula-dense, diagram-dense, and previously human-rejected scenes must also
+  include `motion_ledger` and `authoring_preflight` sections. The motion ledger
+  maps every key spoken anchor to the mathematical object, shared driver,
+  visible change, and QC frame that will prove it. The authoring preflight
+  lists the human-review or accepted-agent issue files read before coding and
+  the concrete design response for each applicable `pattern_key`.
 - The same `review_policy` must include
   `requires_ranked_aesthetic_sweep: true`,
   `minimum_ranked_aesthetic_flags`, and a closed
@@ -97,10 +103,15 @@ Before final animation polish:
 
 1. Write `contract.yaml`.
 2. Run `tools/validate_scene_contract.py`.
-3. Render a layout skeleton or low-quality smoke render showing zones,
+3. For dense or human-rejected work, run
+   `tools/animation_preflight_gate.py` for the exact scene slug. After a human
+   rejection, use `--risk-tier human-rejected
+   --require-component-package --require-per-scene-review`. Do not code around
+   a failed preflight.
+4. Render a layout skeleton or low-quality smoke render showing zones,
    placeholders, protected regions, beat ids, and audit-frame times.
-4. Implement drivers, objects, layout helpers, beats, and the thin composer.
-5. Run layout audit and extract QC frames from the review MP4 before handoff.
+5. Implement drivers, objects, layout helpers, beats, and the thin composer.
+6. Run layout audit and extract QC frames from the review MP4 before handoff.
 
 The first validator is structural only. It does not judge aesthetics, Manim
 bounding boxes, math correctness, or novice-viewer clarity. Those remain
@@ -128,9 +139,26 @@ contract-level assertion over relying on prompt wording. Examples:
   becoming only symbolic algebra when the narration promises visual intuition.
 - `formula_persistence.min_hold_seconds` documents how long a derivation must
   remain visible after it lands.
+- Contract version 4 adds a derivation-memory contract for formula-dense
+  scenes: `formula_persistence.derivation_memory_required`,
+  `persistent_formula_ids`, and `comparison_window`. When usable canvas space
+  remains, the animator must add later steps progressively instead of replacing
+  the only formula slot and erasing the viewer's comparison memory.
+- Contract version 4 also requires `audit.atomic_formula_elements` and
+  `audit.formula_internal_overlap_check_required: true`. Every major formula or
+  value row that can coexist must be registered as a separate temporal layout
+  element. Wrapping several formulas in one `VGroup` is not collision evidence.
+- Contract version 4 requires
+  `visual_strategy.novice_comprehension_checkpoints`. Each checkpoint names a
+  question a first-time viewer should be able to answer from the visible
+  objects, the visible answer, and the QC frame that proves it.
 - `presentation.math_renderer_required: true` forbids plain text fallback for
   mathematical tokens with subscripts, superscripts, hats, Greek letters, or
   angle brackets.
+- `motion_ledger` prevents PPT-like narration by requiring a spoken beat to
+  name a mathematical object, a driver, a visible change, and a QC frame.
+- `authoring_preflight` prevents review-only learning by proving that the
+  animator read and consumed user feedback before stage/code work began.
 
 ## Worker Boundaries
 

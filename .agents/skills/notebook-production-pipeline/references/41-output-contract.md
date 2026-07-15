@@ -10,9 +10,10 @@ This file defines paths and source/generated boundaries for notebook work.
   pyproject.toml
   uv.lock
   notebooks/
+    NNNN-slug.ipynb                   public production candidate
+  episodes/
     NNNN-slug/
-      README.md
-      notebook.ipynb                  production candidate only
+      README.md                       episode production/control notes
       draft/                          rejected/generated/temporary notebooks
       review/
         audits/
@@ -34,7 +35,7 @@ production candidate. Draft-only attempts do not need full review scaffolding.
 Hard review receipts live under:
 
 ```text
-notebooks/NNNN-slug/review/gate/<review_id>/
+episodes/NNNN-slug/review/gate/<review_id>/
   state.json
   events.jsonl
   review.json
@@ -51,8 +52,8 @@ artifacts unless the user explicitly requests them.
 Use explicit draft directories:
 
 ```text
-draft/qoder-YYYY-MM-DD/notebook.ipynb
-draft/codex-YYYY-MM-DD-<short-purpose>/notebook.ipynb
+episodes/NNNN-slug/draft/qoder-YYYY-MM-DD/notebook.ipynb
+episodes/NNNN-slug/draft/codex-YYYY-MM-DD-<short-purpose>/notebook.ipynb
 ```
 
 If a draft is rejected because the production direction is wrong, add a short
@@ -60,8 +61,10 @@ If a draft is rejected because the production direction is wrong, add a short
 
 ## Production Notebook
 
-Only place `notebook.ipynb` at the episode root when it is the current
-production candidate. A production candidate must:
+Only place public production notebooks directly under `notebooks/` as
+`notebooks/NNNN-slug.ipynb`. Do not publish a generic
+`notebooks/NNNN-slug/notebook.ipynb`; that path hides the student-facing entry
+inside a production-control directory. A production candidate must:
 
 - follow the current user direction;
 - execute top-to-bottom;
@@ -69,6 +72,10 @@ production candidate. A production candidate must:
 - have review status recorded when it is ready for user inspection;
 - pass `scripts/review_gate.py status --require-pass` or clearly state why the
   gate is blocked.
+
+The episode directory is backstage. It can contain README, contracts, drafts,
+review receipts, issue JSON, small assets, and small data files, but it is not
+the public notebook entry.
 
 ## Generated Outputs
 

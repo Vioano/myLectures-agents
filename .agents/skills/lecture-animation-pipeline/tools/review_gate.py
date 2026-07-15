@@ -51,28 +51,60 @@ RISK_TIERS = {
         "min_candidate_flags": 6,
         "min_ranked_aesthetic": 3,
         "min_abstract_standards": len(ABSTRACT_STANDARD_KEYS),
+        "max_pardons_for_pass": 4,
+        "max_pardon_rate_for_pass": 0.25,
+        "min_fix_rounds_before_pass": 0,
     },
     "normal": {
         "min_candidate_flags": 8,
         "min_ranked_aesthetic": 4,
         "min_abstract_standards": len(ABSTRACT_STANDARD_KEYS),
+        "max_pardons_for_pass": 3,
+        "max_pardon_rate_for_pass": 0.20,
+        "min_fix_rounds_before_pass": 0,
     },
     "dense": {
         "min_candidate_flags": 12,
         "min_ranked_aesthetic": 5,
         "min_abstract_standards": len(ABSTRACT_STANDARD_KEYS),
+        "max_pardons_for_pass": 2,
+        "max_pardon_rate_for_pass": 0.12,
+        "min_fix_rounds_before_pass": 1,
     },
     "human-rejected": {
         "min_candidate_flags": 18,
         "min_ranked_aesthetic": 7,
         "min_abstract_standards": len(ABSTRACT_STANDARD_KEYS),
+        "max_pardons_for_pass": 1,
+        "max_pardon_rate_for_pass": 0.05,
+        "min_fix_rounds_before_pass": 2,
     },
     "repeat-rejected": {
         "min_candidate_flags": 24,
         "min_ranked_aesthetic": 10,
         "min_abstract_standards": len(ABSTRACT_STANDARD_KEYS),
+        "max_pardons_for_pass": 0,
+        "max_pardon_rate_for_pass": 0.0,
+        "min_fix_rounds_before_pass": 3,
     },
 }
+
+NO_PARDON_PATTERN_KEYS = {
+    "ambiguous_unowned_fill",
+    "bottom_formula_lane_collision",
+    "duplicate_delta_omega",
+    "duplicate_semantic_object",
+    "formula_in_subtitle_lane",
+    "formula_only_scene_without_visual_causality",
+    "lingering_semantic_object",
+    "ppt_like_static_derivation",
+    "riemann_sum_named_but_not_visualized",
+    "slow_fade_ghost",
+    "stray_debug_rectangle",
+    "subtitle_safe_zone_violation",
+}
+
+NO_PARDON_SOURCES = {"human_review", "accepted_agent_feedback"}
 
 INSPECTION_KEYS = [
     "watched_review_mp4",
@@ -123,6 +155,12 @@ def write_json(path: Path, data: Any) -> None:
     )
 
 
+def append_jsonl(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, ensure_ascii=False, sort_keys=True) + "\n")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -159,6 +197,33 @@ def save_state(path: Path, state: dict[str, Any], event: dict[str, Any] | None =
         event_path = path.parent / "events.jsonl"
         with event_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def append_metrics_record(state_path: Path, state: dict[str, Any], record: dict[str, Any]) -> None:
+    """Persist review/fix quality metrics outside chat context.
+
+    Each session keeps its own append-only JSONL ledger, and the episode also
+    gets an aggregate ledger so later agents can audit reviewer behavior across
+    scenes without reopening every accepted review payload.
+    """
+
+    repo_root = Path(state["repo_root"]).resolve()
+    episode_dir = (repo_root / state["episode"]).resolve()
+    payload = {
+        "at": utc_now(),
+        "schema": "lecture-animation-review-metrics-v1",
+        "session_id": state["session_id"],
+        "scene_slug": state["scene_slug"],
+        "review_id": state["review_id"],
+        "risk_tier": state["risk_tier"],
+        "round": state.get("round"),
+        **record,
+    }
+    session_metrics = state_path.parent / "review_metrics.jsonl"
+    episode_metrics = episode_dir / "review" / "gate" / "review_metrics.jsonl"
+    append_jsonl(session_metrics, payload)
+    append_jsonl(episode_metrics, payload)
+    state.setdefault("metrics_history", []).append(payload)
 
 
 def resolve_existing_path(
@@ -216,6 +281,17 @@ def issue_relevant_to_scene(issue: dict[str, Any], scene_slug: str) -> bool:
     if not scene_value:
         return True
     scene_text = str(scene_value)
+    scene_norm = scene_slug.lower()
+    issue_norm = scene_text.lower().replace("-", "_")
+    range_match = re.fullmatch(r"g(\d{3})_g(\d{3})", issue_norm)
+    scene_group = re.match(r"g(\d{3})", scene_norm)
+    if range_match and scene_group:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        current = int(scene_group.group(1))
+        return start <= current <= end
+    if re.fullmatch(r"g\d{3}", issue_norm) and scene_group:
+        return scene_norm.startswith(issue_norm)
     return scene_text == scene_slug or scene_slug in scene_text or scene_text in scene_slug
 
 
@@ -608,12 +684,35 @@ def validate_regressions(state: dict[str, Any], submission: dict[str, Any]) -> l
         by_file[issue_file] = item
         if item.get("status") not in {"checked", "repeated", "fixed", "pardoned", "not_applicable"}:
             errors.append(f"regression {issue_file}: invalid status {item.get('status')!r}")
+        if item.get("status") == "pardoned" and regression_is_no_pardon(state, issue_file):
+            errors.append(
+                f"regression {issue_file}: human/accepted regression records cannot be pardoned; "
+                "mark not_applicable with evidence or open a revise issue"
+            )
         if not item.get("evidence"):
             errors.append(f"regression {issue_file}: evidence is required")
     for issue_file in required_issue_files:
         if issue_file not in by_file:
             errors.append(f"missing regression ledger entry for {issue_file}")
     return errors
+
+
+def regression_is_no_pardon(state: dict[str, Any], issue_file: str) -> bool:
+    repo_root = Path(state["repo_root"]).resolve()
+    path = repo_root / issue_file
+    if not path.exists():
+        return True
+    try:
+        issue = read_json(path)
+    except GateError:
+        return True
+    if not isinstance(issue, dict):
+        return True
+    return (
+        issue.get("source") in NO_PARDON_SOURCES
+        or issue.get("must_check_in_future") is True
+        or str(issue.get("pattern_key") or issue.get("id") or "") in NO_PARDON_PATTERN_KEYS
+    )
 
 
 def finding_id(item: dict[str, Any], prefix: str, index: int) -> str:
@@ -706,6 +805,113 @@ def normalize_issue_entries(submission: dict[str, Any]) -> tuple[list[str], list
         copied["id"] = issue_id
         normalized.append(copied)
     return errors, normalized
+
+
+def finding_pattern_key(item: dict[str, Any]) -> str:
+    raw = item.get("pattern_key") or item.get("id") or item.get("requirement") or ""
+    return safe_slug(str(raw)).lower()
+
+
+def is_no_pardon_finding(item: dict[str, Any]) -> bool:
+    return (
+        finding_pattern_key(item) in NO_PARDON_PATTERN_KEYS
+        or item.get("source") in NO_PARDON_SOURCES
+        or item.get("must_check_in_future") is True
+    )
+
+
+def compute_status_counts(items: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in sorted(ALL_FINDING_STATUSES)}
+    counts["missing"] = 0
+    for item in items:
+        status = item.get("status")
+        if status in counts:
+            counts[status] += 1
+        else:
+            counts["missing"] += 1
+    return counts
+
+
+def compute_review_metrics(
+    state: dict[str, Any],
+    submission: dict[str, Any],
+    candidate_flags: list[dict[str, Any]],
+    ranked_aesthetic: list[dict[str, Any]],
+    explicit_issues: list[dict[str, Any]],
+    open_issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    findings = [*candidate_flags, *ranked_aesthetic, *explicit_issues]
+    counts = compute_status_counts(findings)
+    total_findings = len(findings)
+    pardon_count = counts.get("pardoned", 0)
+    return {
+        "record_type": "review",
+        "accepted": False,
+        "reviewer": submission.get("reviewer") or state.get("reviewer"),
+        "verdict": submission.get("verdict"),
+        "candidate_flag_count": len(candidate_flags),
+        "ranked_aesthetic_count": len(ranked_aesthetic),
+        "explicit_issue_count": len(explicit_issues),
+        "total_finding_count": total_findings,
+        "open_issue_count": len(open_issues),
+        "status_counts": counts,
+        "pardon_count": pardon_count,
+        "pardon_rate": (pardon_count / total_findings) if total_findings else 0.0,
+        "accepted_fix_rounds_before_review": len(state.get("accepted_fixes", [])),
+        "accepted_review_rounds_before_review": len(state.get("accepted_reviews", [])),
+    }
+
+
+def validate_review_metrics_policy(
+    state: dict[str, Any],
+    submission: dict[str, Any],
+    candidate_flags: list[dict[str, Any]],
+    ranked_aesthetic: list[dict[str, Any]],
+    explicit_issues: list[dict[str, Any]],
+    metrics: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    findings = [*candidate_flags, *ranked_aesthetic, *explicit_issues]
+    for item in findings:
+        if item.get("status") == "pardoned" and is_no_pardon_finding(item):
+            errors.append(
+                f"{finding_id(item, 'finding', 0)}: no-pardon finding {finding_pattern_key(item)!r} "
+                "cannot be pardoned; mark fixed/not_applicable with evidence or leave it open"
+            )
+
+    verdict = submission.get("verdict")
+    if verdict == "pass":
+        verdict = "pass_for_user_review_pending"
+    if verdict != "pass_for_user_review_pending":
+        return errors
+
+    thresholds = state.get("thresholds", {})
+    max_pardons = int(thresholds.get("max_pardons_for_pass", 0))
+    max_rate = float(thresholds.get("max_pardon_rate_for_pass", 0.0))
+    min_fix_rounds = int(thresholds.get("min_fix_rounds_before_pass", 0))
+    pardon_count = int(metrics["pardon_count"])
+    pardon_rate = float(metrics["pardon_rate"])
+    accepted_fix_rounds = int(metrics["accepted_fix_rounds_before_review"])
+
+    if pardon_count > max_pardons:
+        errors.append(
+            "abnormal review pattern: pardon_count "
+            f"{pardon_count} exceeds {state['risk_tier']} limit {max_pardons}; "
+            "re-review and convert weak pardons to fixed/not_applicable/open findings"
+        )
+    if pardon_rate > max_rate:
+        errors.append(
+            "abnormal review pattern: pardon_rate "
+            f"{pardon_rate:.3f} exceeds {state['risk_tier']} limit {max_rate:.3f}; "
+            "re-review instead of passing with broad pardons"
+        )
+    if accepted_fix_rounds < min_fix_rounds:
+        errors.append(
+            "abnormal review pattern: pass requested after "
+            f"{accepted_fix_rounds} accepted fix rounds; {state['risk_tier']} requires "
+            f"at least {min_fix_rounds} fix/rereview loops before pass"
+        )
+    return errors
 
 
 def collect_open_review_issues(
@@ -816,12 +1022,46 @@ def submit_review(args: argparse.Namespace) -> int:
         ranked_aesthetic,
         explicit_issues,
     )
+    metrics = compute_review_metrics(
+        state,
+        submission,
+        candidate_flags,
+        ranked_aesthetic,
+        explicit_issues,
+        open_issues,
+    )
+    errors.extend(
+        validate_review_metrics_policy(
+            state,
+            submission,
+            candidate_flags,
+            ranked_aesthetic,
+            explicit_issues,
+            metrics,
+        )
+    )
     if verdict == "pass_for_user_review_pending" and open_issues:
         errors.append("pass verdict cannot include open/revise/blocked findings")
     if verdict in {"revise", "blocked"} and not open_issues:
         errors.append(f"{verdict} verdict must include at least one open issue")
 
     if errors:
+        metrics["accepted"] = False
+        metrics["error_count"] = len(errors)
+        metrics["errors"] = errors
+        append_metrics_record(state_path, state, metrics)
+        save_state(
+            state_path,
+            state,
+            {
+                "at": utc_now(),
+                "type": "review_submission_rejected",
+                "verdict": verdict,
+                "error_count": len(errors),
+                "pardon_count": metrics.get("pardon_count"),
+                "pardon_rate": metrics.get("pardon_rate"),
+            },
+        )
         raise GateError("review submission rejected:\n- " + "\n- ".join(errors))
 
     accepted_path = state_path.parent / f"accepted_review_round_{int(state.get('round', 1)):02d}.json"
@@ -838,11 +1078,17 @@ def submit_review(args: argparse.Namespace) -> int:
     state["open_issues"] = written_open_issues
     state["fixed_pending_rereview"] = []
     state.setdefault("accepted_reviews", []).append(state["last_review_submission"])
+    metrics["accepted"] = True
+    metrics["submission"] = state["last_review_submission"]
+    metrics["written_open_issue_count"] = len(written_open_issues)
+    append_metrics_record(state_path, state, metrics)
     event = {
         "at": utc_now(),
         "type": "review_submission_accepted",
         "verdict": verdict,
         "open_issue_count": len(written_open_issues),
+        "pardon_count": metrics.get("pardon_count"),
+        "pardon_rate": metrics.get("pardon_rate"),
         "submission": state["last_review_submission"],
     }
     save_state(state_path, state, event)
@@ -870,6 +1116,7 @@ def validate_fix_submission(
         return errors, []
     by_issue = {issue["id"]: issue for issue in open_issues}
     submitted: dict[str, dict[str, Any]] = {}
+    pardon_count = 0
     for index, fix in enumerate(fixes):
         if not isinstance(fix, dict):
             errors.append(f"fixes[{index}] must be an object")
@@ -886,6 +1133,11 @@ def validate_fix_submission(
             errors.append(f"fix {issue_id}: status must be fixed or pardoned")
         if not fix.get("after_evidence"):
             errors.append(f"fix {issue_id}: after_evidence is required")
+        if status == "pardoned":
+            pardon_count += 1
+            source_issue = by_issue.get(str(issue_id), {})
+            if is_no_pardon_finding(source_issue):
+                errors.append(f"fix {issue_id}: no-pardon issue cannot be pardoned")
         if status == "fixed":
             if not fix.get("fix_notes"):
                 errors.append(f"fix {issue_id}: fix_notes are required")
@@ -900,6 +1152,12 @@ def validate_fix_submission(
                         errors.append(f"fix {issue_id}: changed_files[{file_index}] path does not exist")
         if status == "pardoned" and not fix.get("pardon_reason"):
             errors.append(f"fix {issue_id}: pardon_reason is required")
+    max_fix_pardons = int(state.get("thresholds", {}).get("max_pardons_for_pass", 0))
+    if pardon_count > max_fix_pardons:
+        errors.append(
+            "abnormal fix pattern: pardon_count "
+            f"{pardon_count} exceeds {state['risk_tier']} per-round limit {max_fix_pardons}"
+        )
     missing = sorted(set(by_issue) - set(submitted))
     if missing:
         errors.append(f"missing fixes for open issues: {missing}")
@@ -909,6 +1167,32 @@ def validate_fix_submission(
 
     errors.extend(validate_artifacts(state, submission, state_path, for_fix=True))
     return errors, [submitted[issue_id] for issue_id in sorted(submitted)]
+
+
+def compute_fix_metrics(
+    state: dict[str, Any],
+    submission: dict[str, Any],
+    normalized_fixes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    status_counts: dict[str, int] = {"fixed": 0, "pardoned": 0, "other": 0}
+    raw_fixes = submission.get("fixes")
+    total_submitted = len(raw_fixes) if isinstance(raw_fixes, list) else 0
+    for fix in normalized_fixes:
+        status = fix.get("status")
+        if status in status_counts:
+            status_counts[status] += 1
+        else:
+            status_counts["other"] += 1
+    return {
+        "record_type": "fix",
+        "accepted": False,
+        "fixer": submission.get("fixer") or state.get("owner"),
+        "submitted_fix_count": total_submitted,
+        "normalized_fix_count": len(normalized_fixes),
+        "status_counts": status_counts,
+        "pardon_count": status_counts["pardoned"],
+        "pardon_rate": (status_counts["pardoned"] / len(normalized_fixes)) if normalized_fixes else 0.0,
+    }
 
 
 def update_issue_file_from_fix(
@@ -940,7 +1224,23 @@ def submit_fix(args: argparse.Namespace) -> int:
     state_path, state = load_state(args.session)
     submission = read_json(Path(args.input))
     errors, normalized_fixes = validate_fix_submission(state, submission, state_path)
+    metrics = compute_fix_metrics(state, submission, normalized_fixes)
     if errors:
+        metrics["accepted"] = False
+        metrics["error_count"] = len(errors)
+        metrics["errors"] = errors
+        append_metrics_record(state_path, state, metrics)
+        save_state(
+            state_path,
+            state,
+            {
+                "at": utc_now(),
+                "type": "fix_submission_rejected",
+                "error_count": len(errors),
+                "pardon_count": metrics.get("pardon_count"),
+                "pardon_rate": metrics.get("pardon_rate"),
+            },
+        )
         raise GateError("fix submission rejected:\n- " + "\n- ".join(errors))
 
     open_by_id = {issue["id"]: issue for issue in state.get("open_issues", [])}
@@ -955,10 +1255,15 @@ def submit_fix(args: argparse.Namespace) -> int:
     state["round"] = int(state.get("round", 1)) + 1
     state["last_fix_submission"] = relative_to_repo(accepted_path, Path(state["repo_root"]).resolve())
     state.setdefault("accepted_fixes", []).append(state["last_fix_submission"])
+    metrics["accepted"] = True
+    metrics["submission"] = state["last_fix_submission"]
+    append_metrics_record(state_path, state, metrics)
     event = {
         "at": utc_now(),
         "type": "fix_submission_accepted",
         "fixed_issue_count": len(normalized_fixes),
+        "pardon_count": metrics.get("pardon_count"),
+        "pardon_rate": metrics.get("pardon_rate"),
         "submission": state["last_fix_submission"],
     }
     save_state(state_path, state, event)
@@ -982,13 +1287,138 @@ def status(args: argparse.Namespace) -> int:
         print(f"required_documents: {len(state.get('required_documents', []))}")
         print(f"open_issues: {len(state.get('open_issues', []))}")
         print(f"fixed_pending_rereview: {len(state.get('fixed_pending_rereview', []))}")
+        print(f"session_metrics: {state_path.parent / 'review_metrics.jsonl'}")
+        print(
+            "episode_metrics: "
+            f"{Path(state['repo_root']).resolve() / state['episode'] / 'review' / 'gate' / 'review_metrics.jsonl'}"
+        )
         if state.get("last_verdict"):
             print(f"last_verdict: {state['last_verdict']}")
+        history = state.get("metrics_history") or []
+        if history:
+            last = history[-1]
+            print(
+                "last_metrics: "
+                f"type={last.get('record_type')} accepted={last.get('accepted')} "
+                f"pardon_count={last.get('pardon_count')} "
+                f"pardon_rate={float(last.get('pardon_rate') or 0):.3f}"
+            )
     if args.require_pass and state.get("status") != "pass_for_user_review_pending":
         raise GateError(
             "gate has not passed; expected status pass_for_user_review_pending, "
             f"got {state.get('status')}"
         )
+    return 0
+
+
+def print_metrics(args: argparse.Namespace) -> int:
+    state_path, state = load_state(args.session)
+    metrics_path = state_path.parent / "review_metrics.jsonl"
+    records: list[dict[str, Any]] = []
+    if metrics_path.exists():
+        for line in metrics_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                records.append(json.loads(line))
+    if args.json:
+        json.dump(records, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+        print()
+        return 0
+
+    print(f"session: {state['session_id']}")
+    print(f"metrics_file: {metrics_path}")
+    print(f"records: {len(records)}")
+    review_records = [item for item in records if str(item.get("record_type", "")).endswith("review")]
+    fix_records = [item for item in records if str(item.get("record_type", "")).endswith("fix")]
+    rejected = [item for item in records if item.get("accepted") is False]
+    print(f"review_records: {len(review_records)}")
+    print(f"fix_records: {len(fix_records)}")
+    print(f"rejected_records: {len(rejected)}")
+    for item in records:
+        print(
+            f"- round={item.get('round')} type={item.get('record_type')} "
+            f"accepted={item.get('accepted')} verdict={item.get('verdict', '')} "
+            f"findings={item.get('total_finding_count', item.get('normalized_fix_count', ''))} "
+            f"open={item.get('open_issue_count', '')} "
+            f"pardons={item.get('pardon_count')} "
+            f"rate={float(item.get('pardon_rate') or 0):.3f}"
+        )
+        for error in item.get("errors") or []:
+            print(f"  reject_reason: {error}")
+    return 0
+
+
+def backfill_metrics(args: argparse.Namespace) -> int:
+    state_path, state = load_state(args.session)
+    metrics_path = state_path.parent / "review_metrics.jsonl"
+    if metrics_path.exists() and metrics_path.stat().st_size > 0 and not args.force:
+        raise GateError(f"metrics file already exists; use --force to append backfill records: {metrics_path}")
+
+    repo_root = Path(state["repo_root"]).resolve()
+    records_written = 0
+    for review_ref in state.get("accepted_reviews", []):
+        path = repo_root / review_ref
+        if not path.exists():
+            continue
+        submission = read_json(path)
+        ledgers = submission.get("ledgers") if isinstance(submission.get("ledgers"), dict) else {}
+        _, candidate_flags = validate_finding_list(
+            ledgers.get("candidate_flags", []),
+            "ledgers.candidate_flags",
+            0,
+        )
+        _, ranked_aesthetic = validate_finding_list(
+            ledgers.get("ranked_aesthetic", []),
+            "ledgers.ranked_aesthetic",
+            0,
+            ranked=True,
+        )
+        _, explicit_issues = normalize_issue_entries(submission)
+        open_issues = collect_open_review_issues(
+            state,
+            submission,
+            candidate_flags,
+            ranked_aesthetic,
+            explicit_issues,
+        )
+        metrics = compute_review_metrics(
+            state,
+            submission,
+            candidate_flags,
+            ranked_aesthetic,
+            explicit_issues,
+            open_issues,
+        )
+        metrics["record_type"] = "backfill_review"
+        metrics["accepted"] = True
+        metrics["submission"] = review_ref
+        append_metrics_record(state_path, state, metrics)
+        records_written += 1
+
+    for fix_ref in state.get("accepted_fixes", []):
+        path = repo_root / fix_ref
+        if not path.exists():
+            continue
+        submission = read_json(path)
+        fixes = submission.get("fixes") if isinstance(submission.get("fixes"), list) else []
+        normalized = [fix for fix in fixes if isinstance(fix, dict)]
+        metrics = compute_fix_metrics(state, submission, normalized)
+        metrics["record_type"] = "backfill_fix"
+        metrics["accepted"] = True
+        metrics["submission"] = fix_ref
+        append_metrics_record(state_path, state, metrics)
+        records_written += 1
+
+    save_state(
+        state_path,
+        state,
+        {
+            "at": utc_now(),
+            "type": "metrics_backfilled",
+            "records_written": records_written,
+        },
+    )
+    print(f"records_written: {records_written}")
+    print(f"metrics_file: {metrics_path}")
     return 0
 
 
@@ -1043,6 +1473,16 @@ def build_parser() -> argparse.ArgumentParser:
     status_cmd.add_argument("--json", action="store_true")
     status_cmd.add_argument("--require-pass", action="store_true")
     status_cmd.set_defaults(func=status)
+
+    metrics_cmd = sub.add_parser("metrics", help="print persisted review/fix quality metrics")
+    metrics_cmd.add_argument("--session", required=True)
+    metrics_cmd.add_argument("--json", action="store_true")
+    metrics_cmd.set_defaults(func=print_metrics)
+
+    backfill_cmd = sub.add_parser("backfill-metrics", help="append metrics records for prior accepted reviews/fixes")
+    backfill_cmd.add_argument("--session", required=True)
+    backfill_cmd.add_argument("--force", action="store_true")
+    backfill_cmd.set_defaults(func=backfill_metrics)
 
     return parser
 

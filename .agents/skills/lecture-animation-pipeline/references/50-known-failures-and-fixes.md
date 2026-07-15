@@ -252,6 +252,34 @@ Acceptable fix:
   and audit.
 - Treat the contract as the local source of truth for stage ownership.
 
+### `animation_preflight_bypass_failure`: Render Starts Before Source/Review Gate
+
+Failure class: after human rejection or a dense-scene failure, the animator
+starts patching Manim code or rendering again before proving that the source
+structure, review scope, feedback consumption, and motion plan have been
+repaired. This lets the same PPT-like or monolithic failure reappear under a
+new version number.
+
+Reject when:
+
+- a human-rejected scene has no passing `animation_preflight_gate.py` result;
+- `timeline.json` or `review/assignments.md` still points to a discarded
+  combined source or combined review package;
+- the scene lacks a component package even though the failure involved stage
+  management, formula walls, or unclear mathematical causality;
+- `contract.yaml` omits `motion_ledger` or `authoring_preflight`;
+- the authoring preflight names a human issue but gives no concrete design
+  response or QC proof target.
+
+Acceptable fix:
+
+- Run `tools/animation_preflight_gate.py` for one scene slug before final code
+  and again before review handoff.
+- Require `--risk-tier human-rejected --require-component-package
+  --require-per-scene-review` after user rejection.
+- Keep the review artifact one-scene-primary until the user approves that
+  scene; combined clips may only be secondary context.
+
 ### `object_factory_scheduling_failure`: Component Code Performs Direction
 
 Failure class: object or component factories secretly call `self.play`,
@@ -1550,6 +1578,49 @@ Fix:
 - Include QC frames at the moment just before clearing and after the next
   formula lands.
 
+## Single Slot Formula Replacement Loses Derivation Memory
+
+Failure: a derivation uses one formula slot and repeatedly replaces the entire
+line, even though the frame has enough room to retain earlier steps. Each
+individual formula is readable, but the viewer cannot compare definitions,
+substitutions, and conclusions.
+
+Concrete regression: episode 0004 G002B v06 replaced the projection coefficient,
+the definition of `F(omega_n)`, the `1/L` relation, and the `Delta omega/(2pi)`
+relation in one upper-right slot.
+
+Fix:
+
+- Build a progressive formula shelf: add dependent lines and retain predecessors
+  at lower emphasis until the comparison is complete.
+- Use token color or a short indication for the active substitution instead of
+  deleting the derivation memory.
+- Record persistent formula ids and a comparison window in contract version 4.
+- Keep the mathematical process primary; persistence is not permission to fill
+  the whole screen with formulas.
+
+## Complex Accumulator Without Vector Semantics
+
+Failure: a complex projection or oscillatory sum is drawn as a cumulative path,
+but the viewer cannot see the individual complex contributions, head-to-tail
+addition, real/imaginary directions, traversal order, or endpoint meaning. The
+path is computed correctly yet reads as decorative motion.
+
+Concrete regression: episode 0004 G002B v06 showed a pink scalloped cumulative
+path under `sum_j f(x_j)e^{-i omega_n x_j} Delta x`; human review could not tell
+what the path meant.
+
+Fix:
+
+- Show several contribution vectors as arrows added head-to-tail, driven by the
+  same sample computation as the projection sum.
+- Label the real and imaginary directions and identify the active sample.
+- Carry the final endpoint into the spectrum marker and label it
+  `F(omega_n)`.
+- Use a novice-comprehension checkpoint: with narration muted, the viewer must
+  be able to identify one contribution, the running sum, and the endpoint's
+  mathematical role.
+
 ## Formula Only Scene Without Visual Causality
 
 Failure: an entire scene is algebraic manipulation even though the segment is
@@ -1568,6 +1639,80 @@ Fix:
 - For novice-facing explanation, formulas must be connected by motion,
   token-level transforms, or aligned visual evidence, not just by appearing in
   sequence.
+
+## PPT-Like Static Derivation Without Visual Causality
+
+Failure: a lecture-animation scene contains correct formulas, a graph, and
+timed formula reveals, but the mathematical work is still done almost entirely
+by narration. The held frames look like slides: objects do not change enough,
+the viewer cannot see why a coefficient, limit, or reconstruction step follows,
+and the formula board becomes the lesson instead of evidence for the lesson.
+
+Concrete regression: episode 0004 G001-G005 first review was rejected by human
+review on 2026-07-09 because it felt like "PPT": the voice explained Fourier
+transform while the screen mostly held formulas and static curves. The prior
+subagent pass missed the novice-viewer standard.
+
+Fix:
+
+- Treat this as a blocker, not a taste note.
+- For every spoken operation, name the visible mathematical object that changes
+  at that beat: sample value, coefficient bar, basis direction, frequency bin,
+  product density, cancellation, delta proxy, or reconstruction curve.
+- Reduce formulas to labels, consequences, or short active anchors. A large
+  formula wall cannot be the main visual driver for projection, limiting sums,
+  or reconstruction.
+- Mute the narration and inspect the scene. If a novice cannot infer the
+  operation from motion and object relationships, redesign before polishing.
+- After a human rejection of this pattern, use a `human-rejected` or stricter
+  review tier and require the reviewer to explicitly audit
+  `visualization_adequacy` and `novice_viewer_causality`.
+
+## Riemann Sum Named But Not Visualized
+
+Failure: narration says that a sum becomes an integral or refers to a Riemann
+sum, but the screen only shows the symbolic sum and integral. The frequency
+points, bin widths, weighted terms, rectangles/bars, or densification process
+are not visible.
+
+Concrete regression: episode 0004 G002 was rejected by human review on
+2026-07-09 because the around-three-minute Riemann-sum beat was not visualized;
+the frame showed the formula stack instead of a discrete-to-continuous
+construction.
+
+Fix:
+
+- Use the same driver for frequency samples and `Delta omega`.
+- Show sparse frequency samples first, then bins or bars of width
+  `Delta omega`.
+- Attach each bar or term to the quantity being summed, such as
+  `(Delta omega / 2pi) F(omega_n) e^{i omega_n x}`.
+- Increase sample density monotonically and visibly. Include at least one
+  intermediate density before the integral appears.
+- Let the integral sign enter as the consequence of the refined bars/area or
+  density envelope, not as a disconnected formula reveal.
+- QC frames must include sparse bins, intermediate bins, dense bins, and the
+  final integral state.
+
+## Batched Multi-Scene Review Masks Scene Failures
+
+Failure: several scene groups are concatenated into one primary review clip,
+and the user is asked to approve the batch. This hides scene-level failures,
+especially when one scene has a layout or visualization blocker that requires
+frame-by-frame critique.
+
+Concrete regression: episode 0004 G001-G005 was handed off as one combined
+review package and rejected by human review on 2026-07-09. The user asked to
+review the scenes one by one instead.
+
+Fix:
+
+- The primary review artifact should be one scene/scene group at a time.
+- Combined review clips are allowed only as a secondary continuity check after
+  individual scenes pass.
+- `review/assignments.md` and `timeline.json` should keep per-scene status.
+- After a user rejects a batch, reset affected scene statuses to
+  `human_rejected_revision_required` and reopen individual review gates.
 
 ## Missing Classic Textbook Diagram Reference
 
@@ -1599,6 +1744,27 @@ Fix:
 - If a cross-fade is used, keep the overlap short and record the overlap limit
   in stage direction or `contract.yaml`.
 - QC frames must include the transition interval, not just settled states.
+
+## Aggregate Formula Lane Hides Internal Collision
+
+Failure: a scene-specific layout audit registers several formulas or live value
+rows as one `VGroup`. The checker sees only the outer group bounds, so children
+can overlap one another while the audit reports `pass`.
+
+Concrete regression: episode 0004 G002A and G002C v06 passed their layout audit,
+but human review found overlapping live values in G002A and overlapping
+forward/inverse integral limits in G002C.
+
+Fix:
+
+- Register every major formula or value row that can coexist as a separate
+  temporal audit element.
+- Give each element its real visibility range; do not use one broad formula-lane
+  range as a substitute.
+- Contract version 4 scenes must declare `audit.atomic_formula_elements` and
+  pass the same ids to the scene audit adapter.
+- Reject any audit JSON that lacks the atomic formula ids or reports overlap or
+  close findings among them.
 
 ## Overexternalized Process Text
 
@@ -1930,3 +2096,40 @@ Fix:
   a special emphasis, reveal, or suspense role.
 - Include before/during/after transition QC frames for every repaired group
   boundary. Do not pass a full-episode review by checking only settled frames.
+
+## Novice Support Replaced By Explanatory Screen Text
+
+Failure: a scene is rejected as hard for beginners, so the repair adds headings,
+prose labels, and verbal conclusions already present in narration. The screen
+becomes a written explanation instead of making the mathematical cause visible.
+This also changes the approved predecessor's text density while pretending the
+change is only a motion repair.
+
+Fix:
+
+- Treat novice causal ledgers as backend review evidence, never as screen copy.
+- Freeze the predecessor's exact on-screen text inventory before repair and
+  require an exact machine comparison before review can be frozen.
+- Improve the learner's path with object identity, motion, recomputation,
+  comparison, settling time, and attention transfer rather than prose growth.
+- Automatically audit descendant text objects; manual atom registration cannot
+  be the only way a collision becomes visible to the gate.
+## Detached dependent label
+
+- `pattern_key`: `detached_label_not_bound_to_carrier`
+- Failure: a point, marker, or graph moves while its identifying label remains at an old or decorative location.
+- Hard prevention: bind both objects through a shared updater and export sampled carrier-dependent distances; any sample beyond the scene threshold blocks authoring QC.
+- Review test: scrub the complete motion and verify that the label never appears to name empty space or a different object.
+
+## Animation compressed instead of editing narration timing
+
+- `pattern_key`: `animation_compressed_instead_of_audio_pacing_edit`
+- Failure: several necessary mathematical states are forced into a short clause even though the audio can be cut at phrase boundaries.
+- Hard prevention: insert pauses in the production full audio, shift reader/word/phrase subtitles and alignment JSON, rebuild `timeline.json`, and propagate downstream scene offsets before rendering.
+- Review test: with audio muted, the operation, intermediate evidence, and result must each have a stable pointing frame.
+## Group center used for a point target
+
+- `pattern_key`: `group_center_used_for_point_target`
+- Failure: after a label or brace is added to a group, moving the group center to a mathematical coordinate leaves the actual point offset from the axis or target value.
+- Hard prevention: animate the mathematical point itself, let dependents follow through identity bindings, and export coordinate-map error checks for every claimed endpoint.
+- Review test: inspect the point center numerically and visually at initial, equality, and mismatch states; group proximity is not evidence of coordinate correctness.

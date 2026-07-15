@@ -1,3 +1,7 @@
+The following two instructions apply only when the acting model is GPT 5.5:
+Spend time on thinking; you do not need to use the commentary channel to report progress to me.
+DO NOT send optional commentary
+
 # 项目协作约定
 
 本文件给 Codex、Claude Code 和其他 agent 使用。`CLAUDE.md` 可以视为同一套规则的 Claude 版本；两边涉及项目结构、Git、清理和多 agent 协作的规则应保持同步。

@@ -45,7 +45,8 @@ teaching function:
 
 - pure Markdown concept prompts;
 - collapsible hints and reference answers;
-- stepwise derivation fill-ins;
+- open calculation/proof spaces;
+- occasional stepwise fill-ins when one missing step is the point;
 - short code checks for numeric or symbolic answers;
 - randomized variants;
 - a few high-value object-level experiments;
@@ -79,7 +80,7 @@ episode:
 The layers should not become a long worksheet. Use fewer, sharper exercises
 that reveal the course structure.
 
-## Pattern Cards
+## Reusable Structures
 
 Some concepts are important enough to train as reusable recognition patterns.
 A pattern deserves a card when:
@@ -100,7 +101,7 @@ structure across several disguises. For the early course, key patterns include:
 - orthogonality kills cross-terms, so coefficients are projections.
 
 Keep only patterns that serve the current episode. Do not turn every concept
-into a pattern card.
+into a reusable structure.
 
 ## Interaction Standard
 

@@ -3,6 +3,31 @@
 Reusable helpers for catching element overlap before rendering a full scene,
 plus the strict review gate used before user handoff.
 
+## `animation_preflight_gate.py` — Design-stage source/control gate
+
+Run this before final Manim code or review for formula-dense, diagram-dense, or
+previously human-rejected scenes. It rejects the failure class where a scene
+renders but still uses a monolithic source file, stale combined review paths,
+no component package, no motion ledger, or no authoring preflight from user
+feedback.
+
+Required command shape after a human rejection:
+
+```bash
+python3 .agents/skills/lecture-animation-pipeline/tools/animation_preflight_gate.py \
+  --repo-root /Volumes/bocchi/myLectures \
+  --episode videos/NNNN-slug \
+  --scene-slug s001_example \
+  --risk-tier human-rejected \
+  --require-component-package \
+  --require-per-scene-review
+```
+
+The gate also runs `validate_scene_contract.py`, checks the scene-local package
+contains `contract.yaml`, `drivers.py`, `objects.py`, `layout.py`, `beats.py`,
+`composer.py`, and `audit.py`, verifies the composer has exactly one Manim
+Scene class, and makes sure `objects.py` does not hide time scheduling.
+
 ## `review_gate.py` — Suspicion-first review state machine
 
 Use this CLI for every animation review loop. It stores compact JSON state
@@ -63,6 +88,33 @@ python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
   --require-pass
 ```
 
+Inspect the persisted review-behavior ledger:
+
+```bash
+python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+  metrics --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json
+```
+
+When a session predates the metrics ledger, backfill summary records from the
+already accepted review/fix payloads:
+
+```bash
+python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+  backfill-metrics --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json
+```
+
+Every accepted or rejected review/fix submission appends one JSON line to:
+
+```text
+videos/NNNN-slug/review/gate/<scene_slug>/<session_id>/review_metrics.jsonl
+videos/NNNN-slug/review/gate/review_metrics.jsonl
+```
+
+The ledger records candidate count, ranked-aesthetic count, open issue count,
+fix/review round history, pardon count, pardon rate, whether the submission was
+accepted, and rejection reasons. This file is the durable source for detecting
+reviewer behavior drift; do not rely on chat memory for those statistics.
+
 Submission success requires:
 
 - exact read confirmations for every required document and SHA-256 printed by
@@ -78,6 +130,13 @@ Submission success requires:
   for the selected risk tier;
 - all open findings represented as issue JSON under `review/issues/`;
 - a fix submission that covers every open issue before rereview.
+- pardon counts and pardon rates under the selected risk-tier limits;
+- no pardons for human-review regressions, accepted-agent regressions, or
+  no-pardon classes such as subtitle safe-zone violations, formula-in-subtitle
+  lane, duplicate semantic objects, lingering objects, slow fade ghosts,
+  ambiguous unowned fills, stray debug rectangles, PPT-like formula-only
+  derivations, and unvisualized Riemann sums;
+- the selected risk tier's minimum fix/rereview loop count before a pass.
 
 Risk tiers are intentionally strict:
 
@@ -91,6 +150,16 @@ Risk tiers are intentionally strict:
   ranked aesthetic objections.
 - `repeat-rejected`: repeated failure pattern, at least 24 candidate flags and
   10 ranked aesthetic objections.
+
+Additional pass limits:
+
+- `low`: at most 4 pardons, pardon rate at most 25%, no minimum fix round.
+- `normal`: at most 3 pardons, pardon rate at most 20%, no minimum fix round.
+- `dense`: at most 2 pardons, pardon rate at most 12%, at least 1 fix/rereview
+  loop before pass.
+- `human-rejected`: at most 1 pardon, pardon rate at most 5%, at least 2
+  fix/rereview loops before pass.
+- `repeat-rejected`: no pardons, at least 3 fix/rereview loops before pass.
 
 Do not add a separate policy YAML until the hardcoded thresholds and required
 documents become hard to maintain. For now, taste and review standards live in

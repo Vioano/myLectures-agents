@@ -153,7 +153,7 @@ Do not recreate a Fourier animation. Train projection reflex.
 When creating a new notebook case:
 
 1. state the main problem action;
-2. list the pattern cards;
+2. list the reusable structures;
 3. list exam abilities;
 4. choose interaction levels;
 5. list error diagnoses;

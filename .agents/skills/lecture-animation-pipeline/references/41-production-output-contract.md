@@ -77,6 +77,13 @@ The Manim render command should point to `composer.py`. Review MP4s, QC frames,
 audit reports, issues, handoffs, generated exports, and the user-review commit
 gate remain exactly as defined in this output contract.
 
+For dense, formula-heavy, or previously human-rejected scenes, this package is
+not merely preferred. The scene must pass
+`tools/animation_preflight_gate.py --require-component-package` before final
+render/review. A single Python file that combines drivers, object factories,
+layout, beat scheduling, audit metadata, and several scene groups is a failed
+source/control artifact even if it renders.
+
 ## Assets Versus Media
 
 - `assets/`: human-curated or source assets for this episode. These may be tracked when they are small, licensed, and needed to reproduce the video.
@@ -400,6 +407,9 @@ Both `exports/` and `draft/` are ignored by default. The distinction is producti
 Before handing off a segment:
 
 - `timeline.json` points to the scene and audio sources used.
+- For dense or human-rejected scenes, `tools/animation_preflight_gate.py` has
+  passed for the exact `scene_slug`; the source path points to
+  `src/scenes/<scene_slug>/composer.py`, not a combined multi-scene file.
 - `formula-manifest.md` marks implemented formulas, and only marks `verified` after review.
 - Manim render command is recorded.
 - Review MP4 exists under `exports/reviews/<scene_slug>/`.

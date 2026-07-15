@@ -23,7 +23,7 @@ Small README or typo repairs do not need a full contract.
 Preferred path:
 
 ```text
-notebooks/NNNN-slug/review/notebook-contract.md
+episodes/NNNN-slug/review/notebook-contract.md
 ```
 
 Draft attempts may keep a temporary contract inside their draft directory, but
@@ -45,7 +45,7 @@ Use this compact structure:
 ## Main Ability
 - one sentence beginning with "Student can..."
 
-## Pattern Cards
+## Reusable Structures
 - name:
   - why this episode needs it:
   - disguised forms to test:
@@ -81,7 +81,7 @@ Use this compact structure:
 - Every visualization must say whether it is pre-problem intuition,
   post-calculation check, or optional lab.
 - Every exam drill must say what structure it trains.
-- Every pattern card must include disguised variants.
+- Every reusable structure must include disguised variants.
 - Every error diagnosis must name the wrong mental model.
 - Every production candidate must have a review-gate risk tier.
 

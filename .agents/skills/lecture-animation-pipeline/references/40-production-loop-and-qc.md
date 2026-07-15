@@ -26,6 +26,12 @@ Before animation:
   diagram-dense, or previously human-rejected scenes. The ledger starts from
   likely violations, not from assumed correctness, and must say how the design
   avoids or explicitly pardons each risk.
+- For dense or previously human-rejected Manim scenes, run
+  `tools/animation_preflight_gate.py` before final code/render work. Use
+  `--risk-tier human-rejected --require-component-package
+  --require-per-scene-review` after a user rejection. The gate must pass for
+  the exact scene slug; a combined multi-scene artifact is not a valid primary
+  review target.
 - For script-stage work, also convert applicable entries into a
   script-authoring preflight before revising `script.md`; extend the local
   script lint when the failure is mechanically checkable.
@@ -141,6 +147,11 @@ A valid scene contract must declare:
 - beats with `local_time`, `owns_zones`, `enter`, `transform`,
   `clear_before`, and `clear_after`;
 - audit frame times.
+- a `motion_ledger` mapping spoken anchors to mathematical objects, shared
+  drivers, visible changes, and required QC frames;
+- an `authoring_preflight` section listing every relevant human-review or
+  accepted-agent regression issue and the concrete avoidance plan used before
+  coding.
 
 The first render for such a scene should be either a layout skeleton or a
 low-quality smoke render that verifies zone ownership, object scale, protected
@@ -265,6 +276,12 @@ the owner must repair and submit `submit-fix`; only a later accepted
 `pass_for_user_review_pending` verdict plus `status --require-pass` counts as
 the strict gate passing.
 
+For dense or human-rejected scenes, `tools/animation_preflight_gate.py` must
+also pass before the first review submission. If it fails because the scene
+still references a discarded combined source, lacks a component package, omits
+the motion ledger, or has no authoring preflight from user feedback, the review
+cannot proceed even if a render exists.
+
 The review gate deliberately enforces over-reporting. Even when the render is
 close to acceptable, the reviewer must list the current risk tier's minimum
 candidate red flags and ranked aesthetic/visual-guidance objections. These may
@@ -286,6 +303,11 @@ the review package is incomplete.
   to fail on overlap, out-of-frame objects, container overflow, and close
   warnings when objects visually press together. If the tool is not applicable,
   record why in `experiment-log.md` and compensate with explicit frame evidence.
+- Major formulas and live value rows that can coexist must be separate temporal
+  audit elements. Do not register an entire formula shelf as one `VGroup` and
+  call its outer bounding box clean; that hides collisions among its children.
+  Contract version 4 scenes must pass the atomic formula ids to the scene audit,
+  and the resulting JSON must list those ids and their visibility ranges.
 - When a graph, coordinate plane, sampled function, or other active diagram
   shares the frame with a formula panel or operation board, the layout audit
   must include protected diagram regions. A transparent panel or formula over
@@ -327,6 +349,14 @@ the review package is incomplete.
 - Formula derivations remain visible long enough to read and compare unless
   the stage direction gives a space or pacing reason for clearing them. If
   useful empty space remains, premature clearing is a blocker.
+- For a multi-step derivation, QC must include a comparison frame where the
+  predecessor and dependent result are both visible. A sequence of one-slot
+  replacements is not derivation continuity when the frame has room for a
+  progressive formula shelf.
+- A novice-comprehension checkpoint must ask what visible object answers the
+  current conceptual question. Motion count alone is not evidence: an
+  unlabeled complex path, decorative curve, or unexplained accumulator can be
+  busy while adding almost no understanding.
 - A scene whose main action is only algebra must be justified as a
   `derivation_page` in the contract; if the lesson claim is visual intuition,
   projection, orthogonality, reconstruction, or basis expansion, the scene must

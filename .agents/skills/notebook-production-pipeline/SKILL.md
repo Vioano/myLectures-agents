@@ -24,7 +24,7 @@ review mechanism is distilled from user feedback or real notebook production.
    - `references/41-output-contract.md`
    - `references/42-notebook-contract-and-composer.md`
    - `references/50-known-failures-and-fixes.md`
-4. For episodes 0001-0003, or when designing reusable pattern cards, read
+4. For episodes 0001-0003, or when designing reusable problem structures, read
    `references/24-notebook-case-library.md`.
 5. Before handoff or approval, read `references/40-qc-and-review-gate.md` and
    `references/43-review-red-flag-rubric.md`, run
@@ -41,12 +41,15 @@ review mechanism is distilled from user feedback or real notebook production.
 1. Inspect Git status in both the outer repo and the notebook repo. Keep
    unrelated user changes untouched.
 2. Identify the target episode, source video script/storyboard, course goal,
-   intended reader, and target notebook path.
+   intended reader, and target notebook path. Public production notebooks use
+   `数学物理方法PowerPack-Notebooks/notebooks/NNNN-slug.ipynb`; episode
+   contracts, drafts, reviews, and issue queues live under
+   `数学物理方法PowerPack-Notebooks/episodes/NNNN-slug/`.
 3. Move unsuitable generated attempts into an episode `draft/` directory rather
    than treating them as production notebooks.
 4. Build a notebook contract before code when the work is a new production
    candidate or a rejected-direction repair. The contract must name the main
-   student ability, pattern cards, section plan, exercise layers, cell
+   student ability, reusable structures, section plan, exercise layers, cell
    modality, interaction budget, feedback design, exam alignment, red flags,
    and validation route.
 5. Before authoring, compile an authoring preflight checklist from:
@@ -74,7 +77,7 @@ review mechanism is distilled from user feedback or real notebook production.
     sweep, and regression list.
 12. Run an independent review pass. The reviewer must inspect the notebook
     contract, source, executed outputs, interaction stability, exercise
-    quality, feedback design, exam alignment, pattern cards, and
+    quality, feedback design, exam alignment, reusable structures, and
     known-regression checklist. The review must also check the presentation
     boundary: student-facing text must not expose production intent, skill
     compliance, review rationale, or widget-engineering workarounds. The
@@ -105,11 +108,27 @@ The gate has two layers:
   artifact existence, abstract standards, regression checks, candidate red
   flags, ranked notebook-quality sweep, repair evidence, and final pass status.
 
+The automatic audit is not decorative. A passing review must point to an audit
+JSON whose top-level status is `pass`, whose results include the target
+notebook, and whose notebook SHA-256 matches the current file. A stale,
+missing, or failing audit JSON blocks the review.
+
 The review stance is suspicion-first. A clean-looking notebook is not accepted
 because the reviewer saw no obvious issue. The reviewer must actively collect
 enough candidate flags for the risk tier and close each one by fix, explicit
 pardon, or not-applicable evidence. A zero-flag review is valid only for very
 small low-risk changes and must say why the threshold was lowered.
+
+For `human-rejected` and `repeat-rejected` risk tiers, the review JSON must
+include `reviewer_independence`: owner, reviewer, review mode, and evidence.
+Use `subagent` when an actual subagent was opened. If only an independent pass
+inside the same main agent is possible, say so explicitly and provide the
+exception reason; do not let that masquerade as a subagent review.
+
+The reviewer cannot lower the risk tier by choice. If the episode already has
+human feedback or future-regression issues, `review_gate.py init` raises the
+minimum tier to `human-rejected`; repeat/reopened/blocked issue states raise it
+to `repeat-rejected`.
 
 The reviewer must build a regression checklist from human feedback, accepted
 agent feedback, open/closed issue JSON, and `50-known-failures-and-fixes.md`.
@@ -128,10 +147,15 @@ then actionable findings:
 - output hygiene and interaction stability;
 - visual/readability consistency with the course style;
 - source/generated/draft boundary correctness;
+- public path correctness: student-facing notebooks are shallow files under
+  `notebooks/`, not `notebooks/NNNN-slug/notebook.ipynb`;
 - hard-gate compliance and issue repair traceability;
 - user-facing polish and novice-reader clarity.
 - presentation boundary: no creator-intent, review-gate, pipeline, or
   implementation-workaround prose in student-facing notebook cells.
+- humanized course prose: no AI-ish scaffold wording, inflated meta-language,
+  generic signposting, em/en dashes, negative-parallelism slogans, or
+  chatbot-like phrasing in student-facing cells.
 
 Every finding must include `standard_key`, `pattern_key` when applicable,
 requirement reference, evidence location, impact, suggested fix, and status.
@@ -163,7 +187,7 @@ rules to revise this v0 scaffold.
 - `23-feedback-hint-and-solution-design.md`: answer checks, hint ladders,
   solutions, and cell modality.
 - `24-notebook-case-library.md`: design anchors for episodes 0001-0003 and
-  reusable pattern cards.
+  reusable problem structures.
 - `30-interaction-and-style.md`: widget, output, typography, plot, and style
   rules.
 - `40-qc-and-review-gate.md`: automatic audit, independent review, issue queue,

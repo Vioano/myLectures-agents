@@ -96,6 +96,16 @@ Reject or rewrite when:
 - a plot appears before the student has predicted or computed;
 - code solves the problem before the student does;
 - the answer is shown without diagnosing common wrong paths;
+- every calculation is turned into a fill-in table;
+- a one-line derivation or short hand calculation is formatted as a table when
+  numbered prompts or equation blanks would be clearer;
+- every calculation is turned into a fill-in blank sequence;
+- a standard calculation or proof question is over-scaffolded when it should
+  give students room to organize the solution themselves;
+- an ordinary written solution area is rendered as a custom framed HTML box
+  instead of simple Markdown spacing;
+- three adjacent exercises have the same surface form without a mathematical
+  reason;
 - every problem is visual and none is exam-like;
 - every problem is exam-like and none checks concept structure;
 - a question has no feedback or transfer variant;
@@ -118,3 +128,6 @@ Use these `pattern_key` values when relevant:
 - `projection_denominator_hidden`
 - `inner_product_context_missing`
 - `partial_sum_as_main_dish`
+- `prompt_table_overuse_for_derivation`
+- `mechanical_fill_blank_overuse`
+- `single_question_form_overuse`

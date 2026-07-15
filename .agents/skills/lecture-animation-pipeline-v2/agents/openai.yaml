@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lecture Animation Pipeline V2"
+  short_description: "Evidence-bound single or parallel lecture animation"
+  default_prompt: "Use $lecture-animation-pipeline-v2 to choose main-producer or parallel-batch mode, lock main-agent overview and handoff contracts, and enforce every CLI authoring and independent-review gate."

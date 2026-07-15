@@ -62,6 +62,26 @@ Use a balanced set of categories. Not every episode needs all of them.
 - Error diagnosis: locate and repair a wrong solution.
 - Transfer: solve the same pattern after changing representation or domain.
 
+## Question Form Fit
+
+Choose the question shape from the knowledge being tested:
+
+- concept discrimination: short answer, true/false with reason, choice, or
+  matching;
+- standard calculation: open calculation space or a code answer checker, not a
+  chain of tiny blanks unless the point is one missing normalization;
+- derivation/proof: a larger blank working area plus a collapsed reference
+  solution;
+- structure recognition across many cases: table or matching prompt;
+- error diagnosis: show a wrong solution and ask the student to locate and
+  repair the first bad step;
+- transfer: a nearby variant with fewer hints than the main example;
+- parameter intuition: prediction first, then widget/plot check.
+
+Do not let one form dominate the notebook. If three adjacent exercises have
+the same surface shape, review whether the question type is being chosen
+mechanically instead of by the mathematical action.
+
 ## Early Course Anchors
 
 ### Episode 0001

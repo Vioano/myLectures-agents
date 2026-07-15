@@ -14,6 +14,12 @@ Choose the cell type by teaching function:
 
 - pure Markdown for concept restatement and qualitative diagnosis;
 - collapsible Markdown for hints, standard answers, and common wrong answers;
+- one or two equation blanks when a single missing normalization, sign, or
+  structural quantity is the target;
+- open calculation space for standard computations, derivations, and proof-like
+  questions where the student should choose the order of steps;
+- tables only when the student is comparing multiple cases, matching
+  structures, or classifying a family of objects;
 - short code checks for numerical, symbolic, choice, or matrix answers;
 - widgets only for structural parameter variation;
 - object-level labs only for high-value transformations that paper cannot show
@@ -21,6 +27,17 @@ Choose the cell type by teaching function:
 
 Static questions are not inferior. Some of the strongest concept checks should
 be Markdown-only.
+
+Do not repair an exposed answer by turning every exercise into a blank table or
+a fill-in-blank worksheet. That replaces one mechanical surface with another.
+If the task is "derive this coefficient" or "compute this projection", usually
+give the problem statement, a few requirements, and a blank working area. Use
+blanks only for the one step you want to isolate. Use a table only when rows
+and columns help the student see a comparison that would be harder to see in
+prose. A blank working area should be ordinary Markdown spacing: write the
+prompt, leave several blank lines, then put the reference solution under
+`<details>`. Do not add a custom bordered HTML box for ordinary handwritten
+work.
 
 ## Hint Ladder
 

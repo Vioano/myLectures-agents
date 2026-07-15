@@ -23,6 +23,17 @@ Acceptance rule:
 - `open` candidate count must be `0`.
 - Every `pardoned` candidate must explain why the apparent violation is safe
   for a novice viewer and not merely convenient for the animator.
+- A pardon is a limited exception, not a normal closure path. Human-review
+  regressions, accepted-agent regressions, and no-pardon classes must be
+  `fixed`, `not_applicable` with evidence, or left open. No-pardon classes
+  include subtitle safe-zone violations, formulas placed in the subtitle lane,
+  duplicate semantic objects, lingering old objects, slow fade ghosts,
+  ambiguous unowned fills, stray/debug rectangles, PPT-like formula-only
+  derivations, and Riemann sums named without visualization.
+- `review_gate.py` rejects pass submissions whose pardon count, pardon rate,
+  or fix/rereview loop count violates the selected risk tier. It also writes
+  accepted and rejected review/fix metrics to `review_metrics.jsonl` so reviewer
+  behavior can be audited across rounds and scenes.
 - A review with no candidate flags is invalid for formula-dense, diagram-dense,
   or previously human-rejected work. It means the reviewer did not look hard
   enough.
@@ -56,6 +67,10 @@ For each scene, the reviewer must actively try to find issues in these groups:
    - proof steps flashing faster than a viewer can read;
    - a derived formula appearing without its predecessor still visible or
      transformed into it.
+   - a multi-line derivation compressed into repeated replacements of one slot
+     while enough unused canvas remains to preserve the previous steps.
+   - a layout audit that checks only the outer bounds of a formula `VGroup`
+     instead of the coexisting formula children.
 5. **Frames, chips, and panels**
    - frames around ordinary terms or every short formula;
    - frames that compress one-line formulas and reduce legibility;
@@ -70,6 +85,9 @@ For each scene, the reviewer must actively try to find issues in these groups:
      projection, orthogonality, or coefficient extraction;
    - missing diagram, sample, vector, basis, component, cancellation, or
      reconstruction visual for a novice viewer.
+   - motion that is mathematically generated but not semantically readable,
+     such as a complex cumulative path with no contribution vectors, axis
+     meaning, accumulation order, or endpoint label.
 8. **Timeline beat alignment**
    - each spoken operation must have a visible cause, change, or consequence
      at the same beat;
@@ -131,6 +149,13 @@ the stage direction or `contract.yaml`:
 If this design-stage ledger is missing, do not start Manim code. If a subagent
 is asked to design or review a scene, include the negative examples above in
 the prompt and require a red-flag ledger in its report.
+
+For dense or previously human-rejected scenes, this is now machine-checked by
+`tools/animation_preflight_gate.py` in addition to `validate_scene_contract.py`.
+Do not treat a successful render as a substitute for this preflight. The scene
+is not reviewable until the preflight proves that the exact scene slug has a
+component package, motion ledger, authoring preflight from regression records,
+and no stale combined-review paths.
 
 ## Contract Fields
 

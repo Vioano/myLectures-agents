@@ -567,6 +567,7 @@ def validate_contract(contract: Any) -> list[str]:
             errors.append(f"{key} must be a string")
     if "contract_version" in root and not isinstance(root["contract_version"], int):
         errors.append("contract_version must be an integer")
+    contract_version = root.get("contract_version")
 
     check_style_constraints(root.get("style_constraints"), "style_constraints", errors)
     check_review_policy(root.get("review_policy"), "review_policy", errors)
@@ -685,6 +686,95 @@ def validate_contract(contract: Any) -> list[str]:
     audit = as_mapping(root.get("audit", {}), "audit", errors)
     protected_regions = audit.get("protected_regions", [])
     check_refs(protected_regions, zone_ids, "audit.protected_regions", errors)
+
+    if isinstance(contract_version, int) and contract_version >= 4:
+        atomic_formula_elements = as_list(
+            audit.get("atomic_formula_elements", []),
+            "audit.atomic_formula_elements",
+            errors,
+        )
+        if len(atomic_formula_elements) < 2:
+            errors.append(
+                "contract_version >= 4 requires at least two "
+                "audit.atomic_formula_elements"
+            )
+        for index, element_id in enumerate(atomic_formula_elements):
+            if not isinstance(element_id, str) or not element_id:
+                errors.append(
+                    f"audit.atomic_formula_elements[{index}] must be a non-empty string"
+                )
+        if len(set(atomic_formula_elements)) != len(atomic_formula_elements):
+            errors.append("audit.atomic_formula_elements must be unique")
+        if audit.get("formula_internal_overlap_check_required") is not True:
+            errors.append(
+                "contract_version >= 4 requires "
+                "audit.formula_internal_overlap_check_required: true"
+            )
+
+        visual_strategy = as_mapping(
+            root.get("visual_strategy", {}), "visual_strategy", errors
+        )
+        checkpoints = as_list(
+            visual_strategy.get("novice_comprehension_checkpoints", []),
+            "visual_strategy.novice_comprehension_checkpoints",
+            errors,
+        )
+        if not checkpoints:
+            errors.append(
+                "contract_version >= 4 requires at least one "
+                "visual_strategy.novice_comprehension_checkpoints entry"
+            )
+        for index, checkpoint in enumerate(checkpoints):
+            if not isinstance(checkpoint, dict):
+                errors.append(
+                    f"visual_strategy.novice_comprehension_checkpoints[{index}] "
+                    "must be a mapping"
+                )
+                continue
+            if not is_number(checkpoint.get("at")):
+                errors.append(
+                    f"visual_strategy.novice_comprehension_checkpoints[{index}].at "
+                    "must be a number"
+                )
+            for field in ["viewer_question", "visible_answer", "evidence_frame"]:
+                if not isinstance(checkpoint.get(field), str) or not checkpoint.get(field):
+                    errors.append(
+                        f"visual_strategy.novice_comprehension_checkpoints[{index}].{field} "
+                        "must be a non-empty string"
+                    )
+
+        formula_persistence = as_mapping(
+            root.get("formula_persistence", {}), "formula_persistence", errors
+        )
+        memory_required = formula_persistence.get("derivation_memory_required")
+        if not isinstance(memory_required, bool):
+            errors.append(
+                "contract_version >= 4 requires "
+                "formula_persistence.derivation_memory_required to be a boolean"
+            )
+        persistent_ids = as_list(
+            formula_persistence.get("persistent_formula_ids", []),
+            "formula_persistence.persistent_formula_ids",
+            errors,
+        )
+        if memory_required and len(persistent_ids) < 2:
+            errors.append(
+                "derivation_memory_required scenes need at least two "
+                "formula_persistence.persistent_formula_ids"
+            )
+        for index, formula_id in enumerate(persistent_ids):
+            if not isinstance(formula_id, str) or not formula_id:
+                errors.append(
+                    f"formula_persistence.persistent_formula_ids[{index}] "
+                    "must be a non-empty string"
+                )
+        comparison_window = formula_persistence.get("comparison_window")
+        if memory_required:
+            check_time_pair(
+                comparison_window,
+                "formula_persistence.comparison_window",
+                errors,
+            )
     return errors
 
 
