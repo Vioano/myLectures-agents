@@ -312,7 +312,7 @@ Any source, plan, timeline, audio, subtitle, audit, QC, or MP4 change invalidate
 
 ## Seal Author Self-Review Before Independent Review
 
-After freezing, do not let telemetry certify itself. First generate `self_review_probe.json`. For every hard-gate layer, the author must state the expected state, report the decoded state, actively try to falsify it, attach a real hashed frame inside the frozen QC artifact, bind it to the exact review-MP4 hash, and independently recompute or measure the claimed relation. The CLI opens the frame, recomputes its SHA-256, verifies containment in the manifest artifact, and numerically checks `abs(actual_value - expected_value) <= tolerance_value`; a self-filled `passed: true` cannot override that result. Human-rejected and repeat-rejected scenes require two ranked adversarial probes per layer. A generic pass, a telemetry-only claim, a nonexistent frame, a fabricated hash, or a missing coordinate/value recomputation is rejected before independent review.
+After freezing, do not let telemetry certify itself. First generate `self_review_probe.json`. For every hard-gate layer, the author must state the expected state, report the decoded state, actively try to falsify it, attach a real hashed frame inside the frozen QC artifact, bind it to the exact review-MP4 hash, and independently recompute or measure the claimed relation. The CLI selects probe ids and timestamps from the frozen plan; the author cannot move them, reuse one decoded frame for multiple probes, or copy the same numeric claim across layers. The CLI opens the frame, recomputes its SHA-256, verifies containment in the manifest artifact, and numerically checks `abs(actual_value - expected_value) <= tolerance_value`; a self-filled `passed: true` cannot override that result. Human-rejected and repeat-rejected scenes require two ranked adversarial probes per layer. A generic pass, a telemetry-only claim, a nonexistent frame, a fabricated hash, or a missing coordinate/value recomputation is rejected before independent review.
 
 ```bash
 python3 "$SKILL/scripts/pipeline_v2.py" prepare-self-review-probe \
@@ -340,7 +340,7 @@ python3 "$SKILL/scripts/pipeline_v2.py" seal-author-self-review \
   --output path/to/author_self_review.json
 ```
 
-After an independent `revise`, do not start editing from `suggested_fix` prose. The reviewer must first generate and seal `review_exhaustion.json`. It groups every symptom under exactly one `root_issue_id` and forces inspection of the full affected interval, source symbols, upstream causes, downstream symptoms, dependent artifacts, sibling paths, preservation requirements, predicted repair regressions, and all four hard-gate layers. The CLI rejects partial issue lists, duplicate root clusters, and findings left outside a cluster.
+After an independent `revise`, do not start editing from `suggested_fix` prose. The accepted attempt creates `pending_repairs[scene_slug]` in the persistent session. A later pass is impossible unless the author self-review binds the exact revise-review hash and supplies the sealed repair contract, response, and gate. The reviewer must first generate and seal `review_exhaustion.json`. It groups every symptom under exactly one `root_issue_id` and forces inspection of the full affected interval, source symbols, upstream causes, downstream symptoms, dependent artifacts, sibling paths, preservation requirements, predicted repair regressions, and all four hard-gate layers. The CLI rejects partial issue lists, duplicate root clusters, and findings left outside a cluster.
 
 ```bash
 python3 "$SKILL/scripts/pipeline_v2.py" prepare-review-exhaustion \
@@ -382,7 +382,7 @@ python3 "$SKILL/scripts/pipeline_v2.py" verify-repair-response \
   --output path/to/repair_gate.json
 ```
 
-The response must resolve every finding once, name changed code symbols and artifacts, pass every acceptance and preservation check, and probe every contracted new risk. Only then may `prepare-author-self-review` and `seal-author-self-review` run with `--previous-review`, `--repair-contract`, `--repair-response`, and `--repair-gate`. Missing or stale repair evidence blocks independent review. Repair attempts are appended to `repair_attempts.jsonl`; independent attempts record lineage counts and the repair hashes, so later reports can distinguish missed old defects, repair-induced regressions, and incomplete fixes.
+The response must resolve every finding once, name changed code symbols and artifacts, pass every acceptance and preservation check, and probe every contracted new risk. Only then may `prepare-author-self-review` and `seal-author-self-review` run with `--previous-review`, `--repair-contract`, `--repair-response`, and `--repair-gate`. Missing or stale repair evidence blocks independent review. If phase timing is recorded, `phase-start --phase repair` also requires `--previous-review` and `--repair-contract`; a completed repair phase requires `phase-end --repair-response ... --repair-gate ... --current-manifest ...`. Repair attempts are appended to `repair_attempts.jsonl`; independent attempts record lineage counts and the repair hashes, so later reports can distinguish missed old defects, repair-induced regressions, and incomplete fixes.
 
 ## Review With One Persistent Independent Agent
 
@@ -394,6 +394,9 @@ A frontier reviewer needs no admission benchmark. A light reviewer is allowed on
 
 ```bash
 python3 "$SKILL/scripts/pipeline_v2.py" begin-review-batch \
+  --repo-root . \
+  --episode-spine "$EPISODE/episode_visual_spine.json" \
+  --review-role acceptance \
   --batch-id fourier-g003-g005 \
   --owner ANIMATION_AGENT \
   --author-agent-id ANIMATION_AGENT_SESSION_ID \
@@ -405,6 +408,8 @@ python3 "$SKILL/scripts/pipeline_v2.py" begin-review-batch \
   --reviewer-agent-id SUBAGENT_SESSION_ID \
   --output "$EPISODE/review/v2/review_session.json"
 ```
+
+Review-session contract v5 derives authority from the episode spine. In `parallel_batches` mode, only `main_agent_governance.owner` may hold `review-role acceptance` and grant `pass_for_user_review_pending`. Other independent reviewers must use `diagnostic_support`; they may report defects but cannot grant final acceptance. The session stores and rechecks the spine hash on every candidate.
 
 ### Phase A: Blind Novice Pass
 
@@ -451,7 +456,7 @@ python3 "$SKILL/scripts/pipeline_v2.py" verify-review \
   --blind-receipt path/to/blind_review_receipt.json
 ```
 
-The gate rejects stale artifacts, author-reviewer identity reuse at both the human label and immutable agent-session level, missing rules, generic evidence, copied observations, unsupported exemptions, unresolved findings, an altered post-blind novice report, and an anomalous reviewer pass. A review batch binds both `author_agent_id` and `reviewer_agent_id`; equality or a stale pre-v4 session blocks review. Autopilot reviews must submit four complete coverage sweeps: layout, mathematical-object truth, timing/attention, and novice causality. The CLI derives required timestamps from stage states, transitions, invariant checkpoints, clause locks, and beats. Re-running verification on the same submission is deduplicated and does not inflate attempt counts. `pass_for_user_review_pending` means only that the candidate may be shown to the user.
+The gate rejects stale artifacts, author-reviewer identity reuse at both the human label and immutable agent-session level, missing rules, generic evidence, copied observations, unsupported exemptions, unresolved findings, an altered post-blind novice report, and an anomalous reviewer pass. It also blocks author handoff and reviewer pass while an applicable live-policy issue remains open at blocker, critical, major, or high severity. Repair it, change the issue to an explicit resolved-pending-review state, and recompile/refreeze the policy/profile/manifest. A review batch binds both `author_agent_id` and `reviewer_agent_id`; equality or a stale pre-v5 session blocks review. Autopilot reviews must submit four complete coverage sweeps: layout, mathematical-object truth, timing/attention, and novice causality. The CLI derives required timestamps from stage states, transitions, invariant checkpoints, clause locks, and beats. Re-running verification on the same submission is deduplicated and does not inflate attempt counts. `pass_for_user_review_pending` means only that the candidate may be shown to the user.
 
 Derive the current state from evidence instead of editing a status field by hand:
 
@@ -549,6 +554,8 @@ Measure work phases rather than estimating total minutes from memory. Wrap desig
 - `scripts/pipeline_v2_lib/core.py`: dependency-free hashes, timestamps, errors, and canonical serialization.
 - `scripts/pipeline_v2_lib/storage.py`: process locks, atomic JSON replacement, locked JSONL append/deduplication, and read-modify-write primitives.
 - `scripts/pipeline_v2_lib/review_state.py`: persistent review-session and attempt transactions.
+- `scripts/pipeline_v2_lib/governance.py`: main-agent review authority, live-policy blocker, and pending-repair gates.
+- `scripts/state_store_stress.py`: multi-process contention and crash-safety diagnostic for the file state backend.
 - `references/authoring-philosophy.md`: novice-centered layered cognitive staging, dynamic stage topology, and executable M/D/A visual grammar.
 - `references/rules.json`: single machine-readable rule registry.
 - `references/contracts.md`: scene-plan, manifest, and review submission contracts.

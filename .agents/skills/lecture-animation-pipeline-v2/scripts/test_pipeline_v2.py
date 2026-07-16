@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -1095,6 +1096,7 @@ class PipelineV2Tests(unittest.TestCase):
         precedent_path = self.episode / "review" / "v2" / "precedents.json"
         telemetry_path = self.episode / "review" / "v2" / "telemetry.json"
         authoring_qc_path = self.episode / "review" / "v2" / "authoring_qc.json"
+        episode_spine_path = self.episode / "review" / "v2" / "review_episode_spine.json"
         self.write_json(profile_path, profile)
         self.write_json(plan_path, plan)
         self.write_json(challenge_path, challenge)
@@ -1106,6 +1108,13 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertTrue(authoring_qc["valid"], authoring_qc["issues"])
         self.write_json(telemetry_path, telemetry)
         self.write_json(authoring_qc_path, authoring_qc)
+        episode_spine = {
+            "schema": "lecture-animation-episode-visual-spine-v2",
+            "episode": pipeline.relative_or_absolute(self.episode, self.root),
+            "production_mode": "main_producer",
+        }
+        episode_spine["spine_hash"] = pipeline.object_hash(episode_spine)
+        self.write_json(episode_spine_path, episode_spine)
 
         source = self.episode / "src" / "scenes" / "g002c_riemann_sum_limit"
         source.mkdir(parents=True)
@@ -1145,6 +1154,7 @@ class PipelineV2Tests(unittest.TestCase):
             "design_gate": design_gate_path,
             "precedent_packet": precedent_path,
             "plan": plan_path,
+            "episode_spine": episode_spine_path,
             "source": source,
             "timeline": self.episode / "timeline.json",
             "telemetry": telemetry_path,
@@ -1203,8 +1213,8 @@ class PipelineV2Tests(unittest.TestCase):
                 "actual": "The independently measured width agrees with the computed value at this timestamp.",
                 "tolerance": "0.5 screen pixels",
                 "check_type": "numeric",
-                "expected_value": 10.0,
-                "actual_value": 10.2,
+                "expected_value": 10.0 + index,
+                "actual_value": 10.2 + index,
                 "tolerance_value": 0.5,
                 "passed": True,
             }
@@ -1216,6 +1226,32 @@ class PipelineV2Tests(unittest.TestCase):
                 falsification_probe, manifest, profile, plan, repo_root=self.root
             ),
             [],
+        )
+        duplicate_frame_probe = json.loads(json.dumps(falsification_probe))
+        duplicate_frame_probe["probes"][1]["evidence"] = json.loads(
+            json.dumps(duplicate_frame_probe["probes"][0]["evidence"])
+        )
+        duplicate_frame_probe.pop("probe_hash")
+        duplicate_frame_probe["probe_hash"] = pipeline.object_hash(duplicate_frame_probe)
+        self.assertTrue(
+            any(
+                "distinct decoded frame" in error
+                for error in pipeline.validate_self_review_probe_data(
+                    duplicate_frame_probe, manifest, profile, plan, repo_root=self.root
+                )
+            )
+        )
+        moved_challenge_probe = json.loads(json.dumps(falsification_probe))
+        moved_challenge_probe["probes"][0]["timestamp_seconds"] += 0.25
+        moved_challenge_probe.pop("probe_hash")
+        moved_challenge_probe["probe_hash"] = pipeline.object_hash(moved_challenge_probe)
+        self.assertTrue(
+            any(
+                "CLI selected" in error
+                for error in pipeline.validate_self_review_probe_data(
+                    moved_challenge_probe, manifest, profile, plan, repo_root=self.root
+                )
+            )
         )
         missing_frame_probe = json.loads(json.dumps(falsification_probe))
         missing_frame_probe["probes"][0]["evidence"]["frame_path"] = "missing/probe.png"
@@ -1464,6 +1500,11 @@ class PipelineV2Tests(unittest.TestCase):
             "owner": "animation-author",
             "author_agent_id": "agent-author-001",
             "contract_version": pipeline.REVIEW_SESSION_CONTRACT_VERSION,
+            "production_mode": "main_producer",
+            "main_agent_id": "",
+            "review_role": "acceptance",
+            "episode_spine_hash": episode_spine["spine_hash"],
+            "episode_spine_path": pipeline.relative_or_absolute(episode_spine_path, self.root),
             "rules_registry_hash": pipeline.object_hash(pipeline.load_rules()),
             "status": "active",
             "scenes": [],
@@ -1472,6 +1513,7 @@ class PipelineV2Tests(unittest.TestCase):
             "reviewer_switches": 0,
             "calibration_scene_interval": 5,
             "calibration_due": False,
+            "pending_repairs": {},
         }
         pipeline.save_review_session(session_path, session)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -1600,6 +1642,15 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertEqual(health["zero_finding_pass_rate"], 1.0)
 
     def test_light_reviewer_requires_hash_bound_certification(self) -> None:
+        episode_spine_path = self.episode / "review" / "v2" / "review_episode_spine.json"
+        episode_spine = {
+            "schema": "lecture-animation-episode-visual-spine-v2",
+            "episode": pipeline.relative_or_absolute(self.episode, self.root),
+            "production_mode": "parallel_batches",
+            "main_agent_governance": {"owner": "review-agent-light-1"},
+        }
+        episode_spine["spine_hash"] = pipeline.object_hash(episode_spine)
+        self.write_json(episode_spine_path, episode_spine)
         benchmark = {
             "schema": "lecture-animation-reviewer-benchmark-v2",
             "benchmark_id": "review-admission-v1",
@@ -1658,6 +1709,9 @@ class PipelineV2Tests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             result = pipeline.command_begin_review_batch(
                 SimpleNamespace(
+                    repo_root=str(self.root),
+                    episode_spine=str(episode_spine_path),
+                    review_role="acceptance",
                     batch_id="light-review-batch",
                     owner="animation-author",
                     author_agent_id="agent-author-001",
@@ -1681,6 +1735,9 @@ class PipelineV2Tests(unittest.TestCase):
         with self.assertRaises(pipeline.PipelineError):
             pipeline.command_begin_review_batch(
                 SimpleNamespace(
+                    repo_root=str(self.root),
+                    episode_spine=str(episode_spine_path),
+                    review_role="acceptance",
                     batch_id="invalid-same-agent",
                     owner="animation-author",
                     author_agent_id="shared-agent-001",
@@ -2011,6 +2068,35 @@ class PipelineV2Tests(unittest.TestCase):
         gate = pipeline.repair_gate_data(response, contract, current_manifest)
         self.assertTrue(gate["valid"])
         self.assertEqual(pipeline.validate_repair_gate_data(gate, response, contract, current_manifest), [])
+        parser = pipeline.build_parser()
+        capsule_args = parser.parse_args(
+            [
+                "prepare-review-capsule",
+                "--manifest", "manifest.json",
+                "--author-self-review", "self-review.json",
+                "--previous-review", "previous-review.json",
+                "--repair-contract", "repair-contract.json",
+                "--repair-response", "repair-response.json",
+                "--repair-gate", "repair-gate.json",
+                "--review-session", "session.json",
+                "--output", "capsule.json",
+            ]
+        )
+        self.assertEqual(capsule_args.previous_review, "previous-review.json")
+        review_args = parser.parse_args(
+            [
+                "verify-review",
+                "--manifest", "manifest.json",
+                "--review", "review.json",
+                "--author-self-review", "self-review.json",
+                "--previous-review", "previous-review.json",
+                "--repair-contract", "repair-contract.json",
+                "--repair-response", "repair-response.json",
+                "--repair-gate", "repair-gate.json",
+                "--review-session", "session.json",
+            ]
+        )
+        self.assertEqual(review_args.repair_gate, "repair-gate.json")
 
         broken = json.loads(json.dumps(response))
         broken["resolutions"][0]["new_risk_checks"][0]["evidence"] = ""
@@ -2159,6 +2245,12 @@ class PipelineV2Tests(unittest.TestCase):
                 0,
             )
         sealed_narration_qc = pipeline.load_json(narration_qc)
+        self.assertEqual(
+            pipeline.validate_narration_qc_data(sealed_narration_qc, self.root, "g002c_riemann_sum_limit"),
+            [],
+        )
+        original_mtime = reader_srt.stat().st_mtime_ns
+        os.utime(reader_srt, ns=(original_mtime + 1_000_000_000, original_mtime + 1_000_000_000))
         self.assertEqual(
             pipeline.validate_narration_qc_data(sealed_narration_qc, self.root, "g002c_riemann_sum_limit"),
             [],

@@ -113,6 +113,7 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def append_jsonl_unlocked(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    existed = path.exists()
     payload = (json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
     try:
@@ -122,6 +123,12 @@ def append_jsonl_unlocked(path: Path, value: dict[str, Any]) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    if not existed:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
 
 def append_jsonl(path: Path, value: dict[str, Any]) -> None:

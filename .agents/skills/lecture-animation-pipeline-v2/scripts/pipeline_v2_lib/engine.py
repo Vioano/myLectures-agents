@@ -19,6 +19,13 @@ from typing import Any, Iterable
 import wave
 
 from .core import PipelineError, canonical_json, object_hash, read_text, utc_now
+from .governance import (
+    review_session_governance,
+    unresolved_policy_blockers,
+    validate_pass_policy,
+    validate_pending_repair_binding,
+    validate_session_governance,
+)
 from .review_state import commit_review_attempt, create_review_session, record_human_false_pass
 from .storage import (
     append_jsonl,
@@ -35,7 +42,7 @@ from .storage import (
 SKILL_ROOT = Path(__file__).resolve().parents[2]
 RULES_PATH = SKILL_ROOT / "references" / "rules.json"
 AUTOPILOT_CONTRACT_VERSION = 5
-REVIEW_SESSION_CONTRACT_VERSION = 4
+REVIEW_SESSION_CONTRACT_VERSION = 5
 HARD_GATE_LAYERS = ("layout", "math_object", "timing_attention", "novice_causality")
 PROGRESSIVE_PLANNING_ARTIFACTS = {"episode_spine", "batch_plan"}
 LIVE_POLICY_SOURCES = {"human_review", "accepted_agent_feedback"}
@@ -815,6 +822,14 @@ def validate_live_policy_hash(policy: dict[str, Any]) -> bool:
         and bool(expected)
         and expected == object_hash(payload)
     )
+
+
+def manifest_live_policy(manifest: dict[str, Any], repo_root: Path) -> dict[str, Any] | None:
+    descriptor = manifest.get("artifacts", {}).get("live_policy", {})
+    raw_path = str(descriptor.get("path", "")).strip()
+    if not raw_path:
+        return None
+    return load_json(resolve_stored_path(raw_path, repo_root))
 
 
 def attach_autopilot_contract(
@@ -3547,6 +3562,19 @@ def narration_qc_data(
     return result
 
 
+def restore_sealed_artifact_mtime(
+    current: dict[str, Any], sealed: Any
+) -> dict[str, Any]:
+    """Keep legacy QC hashes portable when only filesystem mtimes changed."""
+    if not isinstance(sealed, dict):
+        return current
+    identity_fields = ("path", "kind", "sha256", "size", "file_count")
+    if all(current.get(field) == sealed.get(field) for field in identity_fields):
+        current = dict(current)
+        current["mtime_ns"] = sealed.get("mtime_ns")
+    return current
+
+
 def validate_narration_qc_data(value: dict[str, Any], repo_root: Path, scene_slug: str) -> list[str]:
     errors: list[str] = []
     if value.get("schema") != "lecture-animation-scene-narration-qc-v2":
@@ -3586,6 +3614,17 @@ def validate_narration_qc_data(value: dict[str, Any], repo_root: Path, scene_slu
                     "timeline_alignment_review": value.get("timeline_alignment_review", {}),
                 },
             )
+            expected["episode_spine"] = restore_sealed_artifact_mtime(
+                expected.get("episode_spine", {}), spine_entry
+            )
+            expected["artifacts"] = {
+                key: restore_sealed_artifact_mtime(
+                    descriptor, value.get("artifacts", {}).get(key)
+                )
+                for key, descriptor in expected.get("artifacts", {}).items()
+            }
+            expected.pop("narration_qc_hash", None)
+            expected["narration_qc_hash"] = object_hash(expected)
             if expected.get("narration_qc_hash") != value.get("narration_qc_hash"):
                 errors.append("narration_qc measurements or artifact bindings are stale")
         except (PipelineError, OSError, ValueError) as exc:
@@ -4542,6 +4581,10 @@ def load_review_session(path: Path) -> dict[str, Any]:
         raise PipelineError("review session is missing author_agent_id")
     if str(session.get("author_agent_id", "")).strip() == str(session.get("reviewer_agent_id", "")).strip():
         raise PipelineError("review session author_agent_id and reviewer_agent_id must differ")
+    if session.get("review_role") not in {"acceptance", "diagnostic_support"}:
+        raise PipelineError("review session is missing a valid review_role")
+    if not str(session.get("episode_spine_hash", "")).strip():
+        raise PipelineError("review session is missing episode_spine_hash")
     if session.get("rules_registry_hash") and session.get("rules_registry_hash") != object_hash(load_rules()):
         raise PipelineError("review session is stale for the current rules registry")
     return session
@@ -5401,6 +5444,12 @@ def validate_self_review_probe_data(
     allowed_objects = set(planned_object_ids(plan))
     by_layer: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     probe_ids: list[str] = []
+    evidence_hashes: list[str] = []
+    numeric_claims: list[tuple[str, str, str]] = []
+    expected_probe_rows = {
+        str(item.get("probe_id")): item
+        for item in self_review_probe_draft_data(manifest, profile, plan).get("probes", [])
+    }
     for item in probe.get("probes", []):
         if not isinstance(item, dict):
             errors.append("self-review probes must be structured objects")
@@ -5417,6 +5466,12 @@ def validate_self_review_probe_data(
                 raise ValueError
         except (TypeError, ValueError):
             errors.append(f"{probe_id or layer}: timestamp is outside the scene")
+            timestamp = -1.0
+        expected_probe = expected_probe_rows.get(probe_id)
+        if expected_probe is None:
+            errors.append(f"{probe_id or layer}: probe was not selected by the CLI challenge")
+        elif abs(timestamp - float(expected_probe.get("timestamp_seconds", -999.0))) > 0.001:
+            errors.append(f"{probe_id or layer}: timestamp was changed after the CLI selected it")
         object_ids = item.get("object_ids", [])
         if not isinstance(object_ids, list) or not object_ids:
             errors.append(f"{probe_id or layer}: object_ids cannot be empty")
@@ -5434,6 +5489,7 @@ def validate_self_review_probe_data(
         if artifact_key in {"telemetry", "authoring_qc"}:
             errors.append(f"{probe_id or layer}: telemetry cannot prove its own correctness")
         if isinstance(evidence, dict):
+            evidence_hashes.append(str(evidence.get("frame_sha256", "")))
             errors.extend(
                 validate_bound_frame_evidence(
                     evidence, manifest, (repo_root or Path.cwd()).resolve(), probe_id or layer
@@ -5452,6 +5508,13 @@ def validate_self_review_probe_data(
             if check_type != "numeric":
                 errors.append(f"{probe_id or layer}: independent_check.check_type must be numeric")
             else:
+                numeric_claims.append(
+                    (
+                        normalize_search_text(str(independent.get("method", ""))),
+                        str(independent.get("expected_value", "")),
+                        str(independent.get("actual_value", "")),
+                    )
+                )
                 try:
                     expected_value = float(independent.get("expected_value"))
                     actual_value = float(independent.get("actual_value"))
@@ -5471,6 +5534,10 @@ def validate_self_review_probe_data(
             errors.append(f"{probe_id or layer}: strict scenes require adversarial probes")
     if len(probe_ids) != len(set(probe_ids)) or any(not value for value in probe_ids):
         errors.append("self-review probe IDs must be unique and non-empty")
+    if len(evidence_hashes) != len(set(evidence_hashes)) or any(not value for value in evidence_hashes):
+        errors.append("every self-review probe must use a distinct decoded frame")
+    if len(numeric_claims) >= 4 and len(set(numeric_claims)) / len(numeric_claims) < 0.75:
+        errors.append("self-review numeric checks are excessively duplicated across hard-gate layers")
     for layer in HARD_GATE_LAYERS:
         if len(by_layer.get(layer, [])) < minimum:
             errors.append(f"self-review probe layer {layer} requires at least {minimum} probes")
@@ -5800,6 +5867,13 @@ def validate_author_self_review_data(
     if self_review.get("verdict") != "ready_for_independent_review":
         errors.append("author self-review verdict must be ready_for_independent_review")
 
+    try:
+        policy = manifest_live_policy(manifest, (repo_root or Path.cwd()).resolve())
+        if policy is not None:
+            errors.extend(validate_pass_policy(policy))
+    except PipelineError as exc:
+        errors.append(f"cannot validate live-policy blockers during author self-review: {exc}")
+
     repair_context = self_review.get("repair_context", {})
     if previous_review is not None:
         if previous_review.get("schema") != "lecture-animation-review-v2" or previous_review.get("verdict") != "revise":
@@ -6113,6 +6187,12 @@ def verify_review_data(
         ]
         if failed_sweeps:
             errors.append("pass verdict contains failed coverage sweeps: " + ", ".join(failed_sweeps))
+        try:
+            policy = manifest_live_policy(manifest, repo_root)
+            if policy is not None:
+                errors.extend(validate_pass_policy(policy))
+        except PipelineError as exc:
+            errors.append(f"cannot validate live-policy blockers: {exc}")
     elif verdict == "revise" and not failed_checks and not open_findings:
         errors.append("revise verdict requires at least one failed check or open finding")
 
@@ -6973,8 +7053,21 @@ def command_prepare_review_capsule(args: argparse.Namespace) -> int:
         resolve_stored_path(str(manifest.get("artifacts", {}).get("plan", {}).get("path", "")), repo_root)
     )
     self_review = load_json(Path(args.author_self_review))
+    previous_review_path = getattr(args, "previous_review", None)
+    previous_review = load_json(Path(previous_review_path)) if previous_review_path else None
+    repair_contract, repair_response, repair_gate = load_repair_bundle_for_self_review(
+        args, previous_review, manifest
+    )
     self_review_errors = validate_author_self_review_data(
-        self_review, manifest, profile, plan, repo_root=repo_root
+        self_review,
+        manifest,
+        profile,
+        plan,
+        previous_review=previous_review,
+        repair_contract=repair_contract,
+        repair_response=repair_response,
+        repair_gate=repair_gate,
+        repo_root=repo_root,
     )
     if self_review_errors:
         raise PipelineError("independent review is blocked by author self-review: " + " | ".join(self_review_errors))
@@ -7141,6 +7234,11 @@ def command_verify_review(args: argparse.Namespace) -> int:
         resolve_stored_path(str(manifest.get("artifacts", {}).get("plan", {}).get("path", "")), repo_root)
     )
     author_self_review = load_json(Path(args.author_self_review))
+    previous_review_path = getattr(args, "previous_review", None)
+    previous_review = load_json(Path(previous_review_path)) if previous_review_path else None
+    repair_contract, repair_response, repair_gate = load_repair_bundle_for_self_review(
+        args, previous_review, manifest
+    )
     episode = resolve_stored_path(str(manifest.get("episode", "")), repo_root)
     session_path = Path(args.review_session)
     session = load_review_session(session_path)
@@ -7148,7 +7246,15 @@ def command_verify_review(args: argparse.Namespace) -> int:
     errors, health = verify_review_data(review, manifest, profile, repo_root, event_log)
     errors.extend(
         validate_author_self_review_data(
-            author_self_review, manifest, profile, plan, repo_root=repo_root
+            author_self_review,
+            manifest,
+            profile,
+            plan,
+            previous_review=previous_review,
+            repair_contract=repair_contract,
+            repair_response=repair_response,
+            repair_gate=repair_gate,
+            repo_root=repo_root,
         )
     )
     if normalize_search_text(str(author_self_review.get("owner", ""))) != normalize_search_text(str(review.get("owner", ""))):
@@ -7160,6 +7266,22 @@ def command_verify_review(args: argparse.Namespace) -> int:
     if author_agent_id and author_agent_id == reviewer_agent_id:
         errors.append("reviewer_agent_id must differ from the sealed author_agent_id")
     errors.extend(validate_session_reviewer(session, review))
+    errors.extend(
+        validate_session_governance(
+            session,
+            manifest,
+            repo_root,
+            str(review.get("verdict", "")),
+        )
+    )
+    errors.extend(
+        validate_pending_repair_binding(
+            session,
+            str(manifest.get("scene_slug", "")),
+            author_self_review,
+            str(review.get("verdict", "")),
+        )
+    )
     if session.get("capsule_required"):
         capsule_path = getattr(args, "review_capsule", None)
         receipt_path = getattr(args, "blind_receipt", None)
@@ -7252,6 +7374,19 @@ def command_verify_review(args: argparse.Namespace) -> int:
 
 def command_begin_review_batch(args: argparse.Namespace) -> int:
     rules = load_rules()
+    repo_root = Path(getattr(args, "repo_root", ".")).resolve()
+    spine_path = resolve_stored_path(str(args.episode_spine), repo_root)
+    spine = load_json(spine_path)
+    if spine.get("schema") != "lecture-animation-episode-visual-spine-v2" or not validate_hashed_record(spine, "spine_hash"):
+        raise PipelineError("begin-review-batch requires a valid hash-bound episode spine")
+    governance_facts, governance_errors = review_session_governance(
+        spine,
+        reviewer_agent_id=str(args.reviewer_agent_id).strip(),
+        author_agent_id=str(args.author_agent_id).strip(),
+        review_role=str(args.review_role),
+    )
+    if governance_errors:
+        raise PipelineError("review governance failed: " + " | ".join(governance_errors))
     reviewer_tier = getattr(args, "reviewer_tier", "frontier")
     reasoning_effort = getattr(args, "reasoning_effort", "medium")
     certification_hash = None
@@ -7280,6 +7415,8 @@ def command_begin_review_batch(args: argparse.Namespace) -> int:
         "reviewer_agent_id": args.reviewer_agent_id,
         "owner": args.owner,
         "author_agent_id": args.author_agent_id,
+        "episode_spine_path": relative_or_absolute(spine_path, repo_root),
+        **governance_facts,
         "rules_registry_hash": object_hash(rules),
         "status": "active",
         "scenes": [],
@@ -7292,6 +7429,7 @@ def command_begin_review_batch(args: argparse.Namespace) -> int:
         "contract_version": REVIEW_SESSION_CONTRACT_VERSION,
         "revision": 0,
         "applied_review_attempt_ids": [],
+        "pending_repairs": {},
     }
     if normalize_search_text(args.reviewer) == normalize_search_text(args.owner):
         raise PipelineError("reviewer must be independent from owner")
@@ -7562,6 +7700,22 @@ def command_gate_status(args: argparse.Namespace) -> int:
                 else:
                     session = load_review_session(Path(args.review_session))
                     review_errors.extend(validate_session_reviewer(session, review))
+                    review_errors.extend(
+                        validate_session_governance(
+                            session,
+                            manifest,
+                            repo_root,
+                            str(review.get("verdict", "")),
+                        )
+                    )
+                    review_errors.extend(
+                        validate_pending_repair_binding(
+                            session,
+                            str(manifest.get("scene_slug", "")),
+                            author_self_review,
+                            str(review.get("verdict", "")),
+                        )
+                    )
                     if session.get("capsule_required"):
                         capsule_path = getattr(args, "review_capsule", None)
                         receipt_path = getattr(args, "blind_receipt", None)
@@ -7791,6 +7945,31 @@ def phase_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def command_phase_start(args: argparse.Namespace) -> int:
     if args.phase not in PHASES:
         raise PipelineError(f"unknown phase: {args.phase}")
+    repair_binding: dict[str, Any] = {}
+    if args.phase == "repair":
+        contract_path = getattr(args, "repair_contract", None)
+        review_path = getattr(args, "previous_review", None)
+        if not contract_path or not review_path:
+            raise PipelineError("repair phase requires --previous-review and --repair-contract")
+        review = load_json(Path(review_path))
+        contract = load_json(Path(contract_path))
+        if review.get("verdict") != "revise":
+            raise PipelineError("repair phase previous review must have verdict=revise")
+        if contract.get("schema") != "lecture-animation-repair-contract-v2" or not validate_hashed_record(contract, "contract_hash"):
+            raise PipelineError("repair phase requires a valid sealed repair contract")
+        if contract.get("review_hash") != object_hash(review):
+            raise PipelineError("repair contract is bound to another revise review")
+        repair_binding = {
+            "previous_review_path": str(Path(review_path).resolve()),
+            "previous_review_hash": object_hash(review),
+            "repair_contract_path": str(Path(contract_path).resolve()),
+            "repair_contract_hash": contract.get("contract_hash"),
+            "required_finding_ids": [
+                str(item.get("finding_id"))
+                for item in contract.get("findings", [])
+                if isinstance(item, dict)
+            ],
+        }
     state_path = Path(args.state)
     with locked_paths([state_path]):
         if state_path.exists():
@@ -7817,6 +7996,7 @@ def command_phase_start(args: argparse.Namespace) -> int:
             "token_usage_baseline": usage_baseline,
             "started_at": utc_now(),
             "status": "active",
+            **repair_binding,
         }
         state["timer_hash"] = object_hash(state)
         atomic_write_json_unlocked(state_path, state)
@@ -7833,6 +8013,29 @@ def command_phase_end(args: argparse.Namespace) -> int:
             raise PipelineError("phase timer is invalid or was edited")
         if state.get("status") != "active":
             raise PipelineError("phase timer is not active")
+        repair_completion: dict[str, Any] = {}
+        if state.get("phase") == "repair" and args.result == "completed":
+            response_path = getattr(args, "repair_response", None)
+            gate_path = getattr(args, "repair_gate", None)
+            manifest_path = getattr(args, "current_manifest", None)
+            if not response_path or not gate_path or not manifest_path:
+                raise PipelineError(
+                    "completed repair phase requires --repair-response, --repair-gate, and --current-manifest"
+                )
+            contract = load_json(Path(str(state.get("repair_contract_path", ""))))
+            response = load_json(Path(response_path))
+            gate = load_json(Path(gate_path))
+            manifest = load_json(Path(manifest_path))
+            repair_errors = validate_repair_response_data(response, contract, manifest)
+            repair_errors.extend(validate_repair_gate_data(gate, response, contract, manifest))
+            if repair_errors:
+                raise PipelineError("repair phase cannot complete: " + " | ".join(repair_errors))
+            repair_completion = {
+                "repair_response_hash": object_hash(response),
+                "repair_gate_hash": gate.get("gate_hash"),
+                "repaired_manifest_hash": manifest.get("manifest_hash"),
+                "findings_resolved": gate.get("findings_resolved"),
+            }
         started = datetime.fromisoformat(str(state["started_at"]))
         ended = datetime.now(timezone.utc)
         duration = max(0.0, (ended - started).total_seconds())
@@ -7857,6 +8060,7 @@ def command_phase_end(args: argparse.Namespace) -> int:
         "duration_seconds": round(duration, 3),
         "manifest_hash": args.manifest_hash or "",
         "result": args.result,
+        **repair_completion,
         }
         explicit_values = {field: getattr(args, field, None) for field in TOKEN_FIELDS}
         if any(value is not None for value in explicit_values.values()):
@@ -8017,20 +8221,89 @@ def command_batch_status(args: argparse.Namespace) -> int:
     def belongs_to_batch(row: dict[str, Any]) -> bool:
         if str(row.get("scene_slug", "")) not in scenes:
             return False
+        if str(row.get("run_id", "")) == str(contract.get("batch_id", "")):
+            return True
+        if str(row.get("batch_id", "")) == str(contract.get("batch_id", "")):
+            return True
         raw_time = row.get("created_at") or row.get("started_at")
         try:
             return datetime.fromisoformat(str(raw_time)) >= started
         except (TypeError, ValueError):
             return False
 
-    phases = [
-        row for row in event_rows(episode / "review" / "evolution" / "production_phases.jsonl")
-        if belongs_to_batch(row)
-    ]
-    attempts = [
-        row for row in canonical_review_attempt_rows(episode / "review" / "evolution" / "review_attempts.jsonl")
-        if belongs_to_batch(row)
-    ]
+    batch_root = Path(args.batch).resolve().parent
+
+    def merged_rows(paths: list[Path], loader: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for path in paths:
+            for row in loader(path):
+                identity = str(
+                    row.get("attempt_id")
+                    or row.get("event_id")
+                    or row.get("phase_instance_id")
+                    or object_hash(row)
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                rows.append(row)
+        return rows
+
+    def deduplicated(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            identity = str(
+                row.get("attempt_id")
+                or row.get("event_id")
+                or row.get("phase_instance_id")
+                or object_hash(row)
+            )
+            if identity not in seen:
+                seen.add(identity)
+                result.append(row)
+        return result
+
+    phases = deduplicated(
+        [
+            row
+            for row in merged_rows(
+                [episode / "review" / "evolution" / "production_phases.jsonl"],
+                event_rows,
+            )
+            if belongs_to_batch(row)
+        ]
+        + [
+            row
+            for row in merged_rows(
+                [batch_root / "production_phases.jsonl", batch_root / "phase_log.jsonl"],
+                event_rows,
+            )
+            if str(row.get("scene_slug", "")) in scenes
+        ]
+    )
+    attempts = deduplicated(
+        [
+            row
+            for row in merged_rows(
+                [episode / "review" / "evolution" / "review_attempts.jsonl"],
+                canonical_review_attempt_rows,
+            )
+            if belongs_to_batch(row)
+        ]
+        + [
+            row
+            for row in merged_rows(
+                [
+                    episode / "review" / "v2" / scene / "review_attempts.jsonl"
+                    for scene in scenes
+                ],
+                canonical_review_attempt_rows,
+            )
+            if str(row.get("scene_slug", "")) in scenes
+        ]
+    )
     author_self_reviews = [
         row for row in event_rows(episode / "review" / "evolution" / "author_self_review_attempts.jsonl")
         if belongs_to_batch(row)
@@ -8074,17 +8347,32 @@ def command_batch_status(args: argparse.Namespace) -> int:
     newest_feedback = max((path.stat().st_mtime_ns for path in feedback_root.glob("*.md")), default=0) if feedback_root.exists() else 0
     if newest_feedback and (not events_path.exists() or newest_feedback > events_path.stat().st_mtime_ns):
         alerts.append("HUMAN_OUTCOME_LOG_STALE")
+    scene_states = {
+        str(row.get("scene_slug")): row.get("state")
+        for row in production.get("scenes", [])
+        if isinstance(row, dict) and str(row.get("scene_slug")) in scenes
+    }
+    for scene in scenes:
+        scene_production_path = episode / "review" / "v2" / scene / "scene_production.json"
+        if not scene_production_path.is_file():
+            continue
+        scene_production = load_json(scene_production_path)
+        candidate_state = str(scene_production.get("state", ""))
+        current_state = str(scene_states.get(scene, ""))
+        if (
+            scene_production.get("scene_slug") == scene
+            and PROGRESSIVE_SCENE_STATES.get(candidate_state, -1)
+            > PROGRESSIVE_SCENE_STATES.get(current_state, -1)
+        ):
+            scene_states[scene] = candidate_state
+
     result: dict[str, Any] = {
         "schema": "lecture-animation-production-batch-status-v2",
         "batch_id": contract.get("batch_id"),
         "scenes": sorted(scenes),
         "production_hash_at_start": contract.get("production_hash_at_start"),
         "current_production_hash": production.get("production_hash"),
-        "scene_production_states": {
-            str(row.get("scene_slug")): row.get("state")
-            for row in production.get("scenes", [])
-            if isinstance(row, dict) and str(row.get("scene_slug")) in scenes
-        },
+        "scene_production_states": scene_states,
         "wall_seconds": round(wall_seconds, 3),
         "measured_active_seconds": round(active_seconds, 3),
         "aggregate_agent_seconds": round(aggregate_agent_seconds, 3),
@@ -8783,6 +9071,10 @@ def build_parser() -> argparse.ArgumentParser:
     capsule_parser.add_argument("--repo-root", default=".")
     capsule_parser.add_argument("--manifest", required=True)
     capsule_parser.add_argument("--author-self-review", required=True)
+    capsule_parser.add_argument("--previous-review")
+    capsule_parser.add_argument("--repair-contract")
+    capsule_parser.add_argument("--repair-response")
+    capsule_parser.add_argument("--repair-gate")
     capsule_parser.add_argument("--review-session", required=True)
     capsule_parser.add_argument("--output", required=True)
     capsule_parser.set_defaults(func=command_prepare_review_capsule)
@@ -8802,6 +9094,10 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--manifest", required=True)
     review_parser.add_argument("--review", required=True)
     review_parser.add_argument("--author-self-review", required=True)
+    review_parser.add_argument("--previous-review")
+    review_parser.add_argument("--repair-contract")
+    review_parser.add_argument("--repair-response")
+    review_parser.add_argument("--repair-gate")
     review_parser.add_argument("--review-session", required=True, help="persistent reviewer batch session")
     review_parser.add_argument("--review-capsule")
     review_parser.add_argument("--blind-receipt")
@@ -8832,6 +9128,14 @@ def build_parser() -> argparse.ArgumentParser:
     exhaustion_seal_parser.set_defaults(func=command_seal_review_exhaustion)
 
     batch_parser = subparsers.add_parser("begin-review-batch", help="bind one independent reviewer session to a scene batch")
+    batch_parser.add_argument("--repo-root", default=".")
+    batch_parser.add_argument("--episode-spine", required=True)
+    batch_parser.add_argument(
+        "--review-role",
+        choices=["acceptance", "diagnostic_support"],
+        default="acceptance",
+        help="only acceptance review may grant pass_for_user_review_pending",
+    )
     batch_parser.add_argument("--batch-id", required=True)
     batch_parser.add_argument("--owner", required=True)
     batch_parser.add_argument("--author-agent-id", required=True)
@@ -8978,6 +9282,8 @@ def build_parser() -> argparse.ArgumentParser:
     phase_start_parser.add_argument("--artifact-input-bytes", type=int, default=0)
     phase_start_parser.add_argument("--files-read", type=int, default=0)
     phase_start_parser.add_argument("--usage-file", help="cumulative usage JSON/JSONL; Codex rollout is auto-discovered when omitted")
+    phase_start_parser.add_argument("--previous-review", help="required when --phase repair")
+    phase_start_parser.add_argument("--repair-contract", help="required when --phase repair")
     phase_start_parser.add_argument("--state", required=True)
     phase_start_parser.set_defaults(func=command_phase_start)
 
@@ -8987,6 +9293,9 @@ def build_parser() -> argparse.ArgumentParser:
     phase_end_parser.add_argument("--result", choices=["completed", "blocked", "abandoned"], default="completed")
     phase_end_parser.add_argument("--manifest-hash", default="")
     phase_end_parser.add_argument("--usage-file", help="override the usage source captured at phase-start")
+    phase_end_parser.add_argument("--repair-response", help="required to complete a repair phase")
+    phase_end_parser.add_argument("--repair-gate", help="required to complete a repair phase")
+    phase_end_parser.add_argument("--current-manifest", help="required to complete a repair phase")
     for token_field in TOKEN_FIELDS:
         phase_end_parser.add_argument(f"--{token_field.replace('_', '-')}", type=int)
     phase_end_parser.set_defaults(func=command_phase_end)

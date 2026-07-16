@@ -80,6 +80,25 @@ def commit_review_attempt(
                 else reviewer_anomalous
                 or len(scenes) >= int(session.get("calibration_scene_interval", 5) or 5)
             )
+            pending_repairs = dict(session.get("pending_repairs", {}))
+            if (
+                review_mode != "diagnostic"
+                and stored.get("gate_accepted") is True
+                and stored.get("verdict") == "revise"
+            ):
+                pending_repairs[scene_slug] = {
+                    "review_hash": stored.get("submission_hash"),
+                    "review_attempt_id": stored_attempt_id,
+                    "findings_count": int(stored.get("findings_count", 0) or 0),
+                    "manifest_hash": manifest_hash,
+                }
+            elif (
+                review_mode != "diagnostic"
+                and stored.get("gate_accepted") is True
+                and stored.get("verdict") == "pass_for_user_review_pending"
+            ):
+                pending_repairs.pop(scene_slug, None)
+            session["pending_repairs"] = pending_repairs
             session["revision"] = int(session.get("revision", 0) or 0) + 1
             session = _rehash_session(session)
             atomic_write_json_unlocked(session_path, session)
@@ -105,6 +124,7 @@ def create_review_session(
             payload["replacement_reason"] = replace_reason
         payload.setdefault("revision", 0)
         payload.setdefault("applied_review_attempt_ids", [])
+        payload.setdefault("pending_repairs", {})
         payload = _rehash_session(payload)
         atomic_write_json_unlocked(path, payload)
         return payload

@@ -86,6 +86,12 @@ Do not cap full reviews at an arbitrary number. Use `choose-review-mode` to rout
 
 Do not target a fixed rejection count. A healthy pipeline may pass a strong scene on the first attempt. Treat an agent as anomalous when it repeatedly passes with no findings while humans still reject, or when its false-pass rate exceeds the configured threshold after enough samples. The review CLI must then demand a recorded calibration recheck.
 
+Author self-review is a prefilter, not independent certification. Measure its escape rate: later independent or human findings whose layer and timestamp were declared clean by the author probe. CLI-selected anchors, distinct hash-bound frames, non-duplicated numeric claims, and open-blocker conflict checks reduce self-confirmation, but the episode acceptance reviewer remains mandatory.
+
+Review metrics are valid only when reviewer authority is valid. Contract v5 records `acceptance` versus `diagnostic_support`, binds the episode-spine main agent, and records per-scene pending repairs after accepted revise attempts. Report wrong-authority attempts, unresolved-policy passes, stale concurrent writers, and missing repair bindings as separate CLI rejection classes.
+
+Keep the file state backend while the process-safety stress test passes on the production host and state writes remain low volume. Reconsider SQLite/WAL when coordination becomes a shared multi-worktree queue or one logical transition must atomically update more than the review-attempt/session pair.
+
 ## Compaction
 
 During production, keep exactly one canonical `review/v2/<scene>/current/` workspace for derived MP4s, QC frames, diagnostic frames, and review JSON. Replace these files after each candidate freeze. Preserve attempt history in `review_attempts.jsonl`, `author_self_review_attempts.jsonl`, manifests referenced by approved human outcomes, and issue records, not in dozens of `vNN` media directories. `prepare-review-workspace` creates this layout, and progressive `freeze-review` rejects noncanonical manifest destinations.

@@ -11,7 +11,7 @@ import unittest
 
 from pipeline_v2_lib.core import object_hash
 from pipeline_v2_lib.review_state import commit_review_attempt
-from pipeline_v2_lib.storage import append_unique_jsonl, load_json, read_jsonl, write_json
+from pipeline_v2_lib.storage import append_jsonl, append_unique_jsonl, load_json, read_jsonl, write_json
 
 
 def append_worker(path: str, index: int) -> None:
@@ -170,6 +170,107 @@ class StorageConcurrencyTests(unittest.TestCase):
             current = load_json(session_path)
             self.assertEqual(current["full_reviews"], 2)
             self.assertEqual(len(read_jsonl(attempt_log)), 2)
+
+    def test_crash_retry_repairs_session_without_duplicate_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_path = root / "session.json"
+            attempt_log = root / "attempts.jsonl"
+            session = {
+                "schema": "lecture-animation-review-session-v2",
+                "session_id": "session-crash-repair",
+                "scenes": [],
+                "full_reviews": 0,
+                "calibration_scene_interval": 5,
+                "calibration_due": False,
+                "revision": 0,
+                "applied_review_attempt_ids": [],
+                "pending_repairs": {},
+            }
+            session["session_hash"] = object_hash(session)
+            write_json(session_path, session)
+            attempt = {
+                "attempt_id": "attempt-crashed-after-append",
+                "verification_key": "crash-key",
+                "gate_accepted": True,
+                "verdict": "revise",
+                "submission_hash": "review-hash",
+                "findings_count": 2,
+            }
+            # Simulate power/process loss after the durable JSONL append but
+            # before the session JSON replacement.
+            append_jsonl(attempt_log, attempt)
+            _, appended, repaired = commit_review_attempt(
+                session_path=session_path,
+                attempt_log=attempt_log,
+                expected_session_hash=session["session_hash"],
+                attempt=attempt,
+                scene_slug="g001",
+                manifest_hash="manifest-1",
+                calibration_performed=False,
+                reviewer_anomalous=False,
+            )
+            self.assertFalse(appended)
+            self.assertEqual(len(read_jsonl(attempt_log)), 1)
+            self.assertEqual(repaired["full_reviews"], 1)
+            self.assertEqual(repaired["pending_repairs"]["g001"]["review_hash"], "review-hash")
+
+    def test_accepted_revise_creates_pending_repair_and_pass_clears_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_path = root / "session.json"
+            attempt_log = root / "attempts.jsonl"
+            session = {
+                "schema": "lecture-animation-review-session-v2",
+                "session_id": "session-repair-state",
+                "scenes": [],
+                "full_reviews": 0,
+                "calibration_scene_interval": 5,
+                "calibration_due": False,
+                "revision": 0,
+                "applied_review_attempt_ids": [],
+                "pending_repairs": {},
+            }
+            session["session_hash"] = object_hash(session)
+            write_json(session_path, session)
+            revise = {
+                "attempt_id": "revise-1",
+                "verification_key": "revise-key",
+                "gate_accepted": True,
+                "verdict": "revise",
+                "submission_hash": "review-revise-hash",
+                "findings_count": 3,
+            }
+            _, _, current = commit_review_attempt(
+                session_path=session_path,
+                attempt_log=attempt_log,
+                expected_session_hash=session["session_hash"],
+                attempt=revise,
+                scene_slug="g001",
+                manifest_hash="manifest-1",
+                calibration_performed=False,
+                reviewer_anomalous=False,
+            )
+            self.assertEqual(current["pending_repairs"]["g001"]["findings_count"], 3)
+            passed = {
+                "attempt_id": "pass-1",
+                "verification_key": "pass-key",
+                "gate_accepted": True,
+                "verdict": "pass_for_user_review_pending",
+                "submission_hash": "review-pass-hash",
+                "findings_count": 0,
+            }
+            _, _, current = commit_review_attempt(
+                session_path=session_path,
+                attempt_log=attempt_log,
+                expected_session_hash=current["session_hash"],
+                attempt=passed,
+                scene_slug="g001",
+                manifest_hash="manifest-2",
+                calibration_performed=False,
+                reviewer_anomalous=False,
+            )
+            self.assertNotIn("g001", current["pending_repairs"])
 
 
 if __name__ == "__main__":

@@ -211,7 +211,7 @@ Contract version 5 requires a separate `lecture-animation-self-review-probe-v2` 
 - an independent numeric measurement or coordinate recomputation with `expected_value`, `actual_value`, and `tolerance_value`; the CLI recomputes the pass result instead of trusting the submitted boolean;
 - `falsification_not_found` only after that independent check passes.
 
-Telemetry and `authoring_qc` cannot prove themselves. Human-rejected and repeat-rejected scenes require two ranked adversarial probes per layer. The sealed probe is embedded in and hash-bound by `author_self_review.json`, so replacing either the candidate or the probe invalidates handoff.
+Telemetry and `authoring_qc` cannot prove themselves. Probe ids and timestamps are selected from frozen plan anchors; moving them invalidates sealing. Every probe must use a distinct decoded frame, and copied numeric claims across layers are rejected. Human-rejected and repeat-rejected scenes require two ranked adversarial probes per layer. Applicable open blocker/critical/major/high live-policy issues also block author handoff. The sealed probe is embedded in and hash-bound by `author_self_review.json`, so replacing either the candidate or the probe invalidates handoff.
 
 ## Author Self-Review Receipt
 
@@ -442,6 +442,8 @@ Before a `revise` submission can verify, `prepare-review-exhaustion` and `seal-r
 
 All mutable state transitions go through `pipeline_v2_lib.storage`. JSON files use a process lock plus same-directory temporary file, `fsync`, and atomic replacement. JSONL attempts use a process lock, one complete append, and a content-derived unique key. Review-attempt commit locks the attempt log and session together, stores applied attempt IDs for crash recovery, increments a session revision, and rejects a new submission whose expected session hash is stale. Retrying an already committed verification key is idempotent.
 
+The current backend is intentionally `fcntl` plus atomic JSON and locked JSONL. Run `scripts/state_store_stress.py` to exercise real process contention, stale-writer rejection, and pending-repair durability. SQLite/WAL is not required for the present single-Mac, low-write-rate CLI workload. Migrate when the system needs a shared cross-worktree scheduler or lease, atomic transactions across several unrelated state families, sustained concurrent readers and writers, or indexed querying large enough that JSONL scans become material. WAL does not replace evidence, role, or repair contracts.
+
 ## Review Attempt Log And Derived State
 
 `verify-review` appends one `lecture-animation-review-attempt-v2` row per unique submission and gate result to `review/evolution/review_attempts.jsonl`. Re-running the same verification produces the same `verification_key` and is deduplicated. Failed CLI gates are recorded as well as accepted reviews.
@@ -460,7 +462,9 @@ Never advance a state by assertion. Independent review is permitted only from `a
 
 ## Persistent Review Session
 
-`begin-review-batch` writes `lecture-animation-review-session-v2` contract version 4. It requires both `author_agent_id` and `reviewer_agent_id`, rejects equality, and binds the author self-review to the same author session before any capsule or review can verify. Pre-v4 sessions must be recreated. A full or diagnostic review must repeat the same `reviewer`, `reviewer_model`, `reasoning_effort`, and `reviewer_agent_id`. `reviewer_tier: light` additionally requires an eligible `lecture-animation-reviewer-certification-v2` bound to the exact model, effort, benchmark hash, and current rules hash. A human false pass suspends light certification. Replacing an active reviewer requires `--replace --replace-reason`.
+`begin-review-batch` writes `lecture-animation-review-session-v2` contract version 5. It requires both `author_agent_id` and `reviewer_agent_id`, rejects equality, and binds the author self-review to the same author session before any capsule or review can verify. It also binds `episode_spine_hash`, `production_mode`, `main_agent_id`, and `review_role`. In parallel production, only the spine's main agent may own `acceptance`; `diagnostic_support` can find defects but cannot grant a user-review pass. Pre-v5 sessions must be recreated. A full or diagnostic review must repeat the same `reviewer`, `reviewer_model`, `reasoning_effort`, and `reviewer_agent_id`. `reviewer_tier: light` additionally requires an eligible `lecture-animation-reviewer-certification-v2` bound to the exact model, effort, benchmark hash, and current rules hash. A human false pass suspends light certification. Replacing an active reviewer requires `--replace --replace-reason`.
+
+Every accepted full `revise` attempt creates a persistent `pending_repairs[scene_slug]` record containing the exact review hash, attempt id, manifest hash, and finding count. The next full pass must bind that exact review and provide valid repair-contract, repair-response, and repair-gate hashes. Omitting `--previous-review` cannot reset the scene to an initial-review path.
 
 Review submissions therefore include:
 
