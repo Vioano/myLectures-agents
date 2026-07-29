@@ -14,7 +14,7 @@ feedback.
 Required command shape after a human rejection:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/animation_preflight_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/animation_preflight_gate.py \
   --repo-root /Volumes/bocchi/myLectures \
   --episode videos/NNNN-slug \
   --scene-slug s001_example \
@@ -37,7 +37,7 @@ default and rejects incomplete review or fix submissions.
 Create a session:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   --repo-root /Volumes/bocchi/myLectures \
   init \
   --episode videos/NNNN-slug \
@@ -51,18 +51,18 @@ python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
 Reviewer workflow:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   checklist --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json
 
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   confirm-read --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json \
   --reviewer subagent-review
 
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   template-review --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json \
   > /tmp/review-submission.json
 
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   submit-review --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json \
   --input /tmp/review-submission.json
 ```
@@ -71,11 +71,11 @@ Animation-owner repair workflow after an accepted `revise` or `blocked`
 review:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   template-fix --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json \
   > /tmp/fix-submission.json
 
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   submit-fix --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json \
   --input /tmp/fix-submission.json
 ```
@@ -83,7 +83,7 @@ python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
 The final machine gate before user handoff is:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   status --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json \
   --require-pass
 ```
@@ -91,7 +91,7 @@ python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
 Inspect the persisted review-behavior ledger:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   metrics --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json
 ```
 
@@ -99,7 +99,7 @@ When a session predates the metrics ledger, backfill summary records from the
 already accepted review/fix payloads:
 
 ```bash
-python3 .agents/skills/lecture-animation-pipeline/tools/review_gate.py \
+python3 .agents/skills/lecture-animation-pipeline-legacy/tools/review_gate.py \
   backfill-metrics --session videos/NNNN-slug/review/gate/s001_example/<session_id>/state.json
 ```
 

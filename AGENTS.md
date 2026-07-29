@@ -71,7 +71,7 @@ scripts/          仓库级脚本，例如新建视频、批量渲染、发布�
 
 ## 动画制作强制审查机制
 
-每次做 Manim、Remotion 或其他课程动画，都必须先完整阅读 `.agents/skills/lecture-animation-pipeline/SKILL.md`，并从头到尾阅读其中关于动画制作哲学和 QC 的核心引用，至少包括 `references/20-math-object-driven-animation.md`、`references/30-visual-language-and-style.md`、`references/40-production-loop-and-qc.md`、`references/41-production-output-contract.md` 和 `references/50-known-failures-and-fixes.md`。不得只凭记忆、摘要或旧经验开工。
+每次做 Manim、Remotion 或其他课程动画，都必须先完整阅读规范入口 `.agents/skills/lecture-animation-pipeline/SKILL.md`，并从头到尾阅读它要求的动画制作哲学和 QC 核心引用。迁移前的详细参考资料完整保留在 `.agents/skills/lecture-animation-pipeline-legacy/references/`，至少包括 `20-math-object-driven-animation.md`、`30-visual-language-and-style.md`、`40-production-loop-and-qc.md`、`41-production-output-contract.md` 和 `50-known-failures-and-fixes.md`；旧版 Skill 只作为备份和引用库，不再是正常入口。不得只凭记忆、摘要或旧经验开工。
 
 遇到难的、新的、公式密集的、视觉语言不确定的任务时，还要继续查找技能中指向的参考案例和仓库里已有的同类代码、分镜、review 输出，例如用 `rg` 搜索相似 scene、stage direction、experiment log 和 handoff。先理解既有做法，再决定是否复用、改造或明确偏离。
 
@@ -85,9 +85,9 @@ scripts/          仓库级脚本，例如新建视频、批量渲染、发布�
 
 subagent 审查要达到挑剔审片标准：明确指出不符合 skill 哪一条要求、发生在第几秒或哪个文件位置；检查是否存在数学对象不真实、假动画、公式或文字重叠、画面挤在角落、空间利用不足、视觉语言不清晰、无意义颜色填充、多余线段或框、陈旧对象残留、updater 残影、字幕/音频/时间轴不对齐、review 视频缺声音、输出路径不合规、与前后段风格或转场冲突等问题。
 
-subagent 审查必须按“抽象标准 -> 具体回归案例 -> 具体修复建议”的顺序组织。先根据 `.agents/skills/lecture-animation-pipeline/references/50-known-failures-and-fixes.md` 中的抽象标准逐条判断，例如舞台调度失败、意义不明或误导观众的视觉元素、数学对象身份/因果不真实、时间轴逐拍不对齐、空间利用效率低、视觉层级混乱、例子不服务教学目标等；再查本集 human-feedback、issue JSON 和 known failures 中的具体 `pattern_key` 作为依据；最后在报告中同时写出抽象 `standard_key`、具体 `pattern_key`、证据位置和修复路径。没有完全同款旧案例，也必须能根据抽象标准独立判断，不能因为“以前没列过”就放过。
+subagent 审查必须按“抽象标准 -> 具体回归案例 -> 具体修复建议”的顺序组织。先根据 `.agents/skills/lecture-animation-pipeline-legacy/references/50-known-failures-and-fixes.md` 中的抽象标准逐条判断，例如舞台调度失败、意义不明或误导观众的视觉元素、数学对象身份/因果不真实、时间轴逐拍不对齐、空间利用效率低、视觉层级混乱、例子不服务教学目标等；再查本集 human-feedback、issue JSON 和 known failures 中的具体 `pattern_key` 作为依据；最后在报告中同时写出抽象 `standard_key`、具体 `pattern_key`、证据位置和修复路径。没有完全同款旧案例，也必须能根据抽象标准独立判断，不能因为“以前没列过”就放过。
 
-公式、文字、面板、chip 或括号密集的 Manim 段，交给 subagent 前必须运行 `.agents/skills/lecture-animation-pipeline/tools/layout_check.py` 或等效的 scene-specific layout audit，并把 JSON 报告写到本集 `review/audits/<scene_slug>/`。检查必须覆盖 overlap、out-of-frame、container overflow 和 close-as-issue；任何一项失败都必须先修复、重渲、重新抽帧。若工具不适用，必须在 `experiment-log.md` 说明原因，并用明确 QC 帧补偿检查。
+公式、文字、面板、chip 或括号密集的 Manim 段，交给 subagent 前必须运行 `.agents/skills/lecture-animation-pipeline-legacy/tools/layout_check.py` 或等效的 scene-specific layout audit，并把 JSON 报告写到本集 `review/audits/<scene_slug>/`。检查必须覆盖 overlap、out-of-frame、container overflow 和 close-as-issue；任何一项失败都必须先修复、重渲、重新抽帧。若工具不适用，必须在 `experiment-log.md` 说明原因，并用明确 QC 帧补偿检查。
 
 当函数图、坐标平面、采样点阵等主动数学对象与右侧运算板、公式板或说明文字同时出现时，必须先做舞台空间预留：图像区域要按需要左移、缩窄或让位，面板区域单独占位。layout audit 必须包含主动图像的 protected region；透明面板、公式或文字如果让活动函数图、采样点、坐标轴或局部构造难以读取，或把主数学对象降格成背景纹理，就算遮挡，不能通过。例子函数也必须为教学目标服务：讲函数乘积积分时，`f`、`g` 和乘积密度要有足够可见变化；任何面积、填充、条带必须明确对应被积分或比较的数学量，不能是意义不明的视觉装饰。
 
@@ -95,9 +95,9 @@ subagent 审查必须按“抽象标准 -> 具体回归案例 -> 具体修复建
 
 subagent 的反馈必须写进本集 `review/audits/<scene_slug>/` 下的 Markdown 审查报告，报告文件名包含 review id、reviewer 和被审分支；需要拆成可修复队列的问题，同时写入 `review/issues/*.json`。每条反馈都要有严重度、skill 条款或引用、证据位置、影响、建议修复路径和当前状态，方便动画 agent 快速定位修改，也方便用户直接查看。
 
-人工审片反馈会成为自动审查机制的一部分。用户每次指出的错误都必须写入本集 `review/human-feedback/` 的记录，并拆成 `review/issues/*.json`，带有 `source: human_review`、`pattern_key`、`must_check_in_future`、证据位置、影响、建议修复路径和当前状态；可复用的问题还必须同步到 `.agents/skills/lecture-animation-pipeline/references/50-known-failures-and-fixes.md` 或对应引用。之后任何 subagent 审查都必须先读取本集未关闭和已关闭的人审 issue、human-feedback 记录和 known failures，把它们当作回归测试；重复出现用户已经指出过的问题，一律判 `revise` 或 `blocked`，不能因为“整体能看懂”而放过。
+人工审片反馈会成为自动审查机制的一部分。用户每次指出的错误都必须写入本集 `review/human-feedback/` 的记录，并拆成 `review/issues/*.json`，带有 `source: human_review`、`pattern_key`、`must_check_in_future`、证据位置、影响、建议修复路径和当前状态；可复用的问题还必须同步到规范 Skill 的规则/引用，或在需要补充详细旧案例时同步到 `.agents/skills/lecture-animation-pipeline-legacy/references/50-known-failures-and-fixes.md`。之后任何 subagent 审查都必须先读取本集未关闭和已关闭的人审 issue、human-feedback 记录和 known failures，把它们当作回归测试；重复出现用户已经指出过的问题，一律判 `revise` 或 `blocked`，不能因为“整体能看懂”而放过。
 
-subagent 或小组复审发现的新错误，如果主 agent 判断不是一次性小修、而是能防止后续复发的经验，也必须像人工反馈一样沉淀。记录位置为本集 `review/agent-feedback/`，并拆成 `review/issues/*.json`，建议使用 `source: accepted_agent_feedback`、`origin_source: subagent_review`、`accepted_by: <agent>`、`pattern_key`、`must_check_in_future: true`、`applies_to_authoring`、证据位置、影响和修复建议。可复用的抽象失败或具体案例还要同步到 `.agents/skills/lecture-animation-pipeline/references/50-known-failures-and-fixes.md` 或对应引用。未来制作和审查 agent 必须读取这些已接受的 agent 反馈；重复出现同一 `pattern_key` 时，按人工反馈同等标准打回。
+subagent 或小组复审发现的新错误，如果主 agent 判断不是一次性小修、而是能防止后续复发的经验，也必须像人工反馈一样沉淀。记录位置为本集 `review/agent-feedback/`，并拆成 `review/issues/*.json`，建议使用 `source: accepted_agent_feedback`、`origin_source: subagent_review`、`accepted_by: <agent>`、`pattern_key`、`must_check_in_future: true`、`applies_to_authoring`、证据位置、影响和修复建议。可复用的抽象失败或具体案例还要同步到规范 Skill 的规则/引用，或在需要补充详细旧案例时同步到 `.agents/skills/lecture-animation-pipeline-legacy/references/50-known-failures-and-fixes.md`。未来制作和审查 agent 必须读取这些已接受的 agent 反馈；重复出现同一 `pattern_key` 时，按人工反馈同等标准打回。
 
 同一套人工反馈也必须给制作动画的 agent 看。任何动画 agent 在写 storyboard、timeline、stage direction 或代码前，都必须先读取本集 `review/human-feedback/`、`review/issues/*.json` 中 `source: human_review` 或 `must_check_in_future: true` 的记录，以及 `50-known-failures-and-fixes.md`，整理成本次分镜的制作前规避清单。清单要写进 stage direction 或 `experiment-log.md`，逐条说明哪些 `pattern_key` 适用、采用什么构图/时间轴/代码保护来避免复现。没有制作前规避清单，不得开写动画代码；subagent 审查时也必须检查制作 agent 是否真的消费了这些反馈。
 
@@ -137,7 +137,7 @@ subagent 复审通过后，动画仍然不能直接提交。必须先把 review 
 - `vault/` 是独立 Git 仓库/submodule。Obsidian Git 只在 `vault/` 内提交和推送课程笔记；外层项目 Git 只记录 `vault` 指向的 commit。需要固定“项目代码 + 文案版本”时，先在 `vault/` 内 commit/push，再在外层仓库 stage 并 commit `vault` 的 submodule 指针。
 ## 外部同步（myLectures-agents）
 
-`AGENTS.md` 和 `.agents/skills/lecture-animation-pipeline/` 会同步到独立的公开 GitHub 仓库 [Vioano/myLectures-agents](https://github.com/Vioano/myLectures-agents)。同步清单在 `scripts/sync-agents-manifest.txt`，同步脚本在 `scripts/sync-agents.sh`。
+`AGENTS.md`、规范入口 `.agents/skills/lecture-animation-pipeline/` 和旧版备份 `.agents/skills/lecture-animation-pipeline-legacy/` 会同步到独立的公开 GitHub 仓库 [Vioano/myLectures-agents](https://github.com/Vioano/myLectures-agents)。同步清单在 `scripts/sync-agents-manifest.txt`，同步脚本在 `scripts/sync-agents.sh`。
 
 - agent 修改了清单中列出的文件后，应提醒用户运行 `scripts/sync-agents.sh` 同步到外部仓库。
 - agent 不要自动执行同步脚本，同步操作由用户决定。

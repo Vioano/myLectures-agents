@@ -72,6 +72,39 @@ Concrete cases to consult: `Missing Stage Direction`, `Rigid Stage Zones`,
 `Panel Over Active Function Graph`, `Detached Related Formula Groups`,
 `Overbuilt Multi-View Shot`, `Aesthetically Ugly But Technically Correct`.
 
+### `creator_intent_text_substitutes_for_animation`: Narration Is Republished Instead Of Enacted
+
+Failure class: the voice names a mathematical action, while the screen repeats
+the same words or displays producer-facing explanation instead of changing the
+mathematical object. The result is a narrated PowerPoint rather than animation.
+
+Reject when:
+
+- “旋转”“等比例伸缩”“镜像”“剪切”“拉伸”“弯曲”“平移”或“放大” is spoken but
+  the corresponding object does not visibly perform that action at the word;
+- the approved narration uses a legitimate synonym such as “等比缩放” or
+  “拉长”, but the detector silently misses it or the author locally bypasses
+  the mismatch instead of hardening the canonical detector and regression;
+- a text block tells the viewer what the animation means while the underlying
+  object remains static;
+- the same explanatory phrase is both spoken and displayed without a distinct
+  formula, label, parameter, comparison, or navigation job;
+- a token highlight or formula replacement is submitted as evidence of a
+  geometric transformation.
+
+Acceptable only when:
+
+- every strong action word is bound to exact word alignment and a measured
+  runtime/frame-analysis geometry change;
+- negative claims use a visible counterexample or inhibition contrast;
+- screen text remains limited to objects that the learner needs to point to,
+  calculate with, compare, or retain as symbolic memory.
+
+Pattern keys: `narrated_transform_replaced_by_screen_text`,
+`spoken_action_not_word_locked`, `narration_duplicated_as_screen_prose`,
+`creator_intent_text_substitutes_for_animation`,
+`narrated_action_synonym_escapes_detection`.
+
 ### `ambiguous_visual_object`: Unnamed Or Misleading Visual Element
 
 Failure class: a line, fill, rectangle, star, underline, connector, frame,
@@ -318,9 +351,71 @@ Acceptable fix:
 - Acceptance must come from Manim render, layout audit, review MP4, and tracked
   issue status.
 
+## Post-Restart Invisible Agent Mistaken For Lost Agent
+
+Pattern key: `post_restart_visible_roster_false_negative`.
+
+Failure: after the app or machine restarts, the first
+`collaboration.list_agents` call shows only the main agent. The coordinator
+assumes every completed child identity is gone and immediately spawns
+replacement agents. In practice, the preserved canonical child paths may still
+accept `followup_task` and recover their prior context.
+
+Fix:
+
+- Preserve canonical child ids, worktrees, branches, handoff paths, hashes, and
+  exact next commands in the shutdown checkpoint.
+- Probe every old canonical id directly with a no-write `followup_task` before
+  diagnosing loss.
+- Call `list_agents` again after the probes and seal both the visible roster and
+  per-id probe outcomes with `seal-availability-snapshot`.
+- A `restored` probe forbids replacement. Only a sealed
+  `target_not_found`, `target_unavailable`, or `unrecoverable_error` outcome may
+  support `authorize-replacement`.
+- If a mistaken replacement was already opened, interrupt it before
+  production, run `restore-original-identity`, and cancel unused authorization
+  with `cancel-replacement-authorization`.
+
+Review test: the resume evidence must show direct probe results for every
+preserved id. A first-pass `list_agents` snapshot without those probes is never
+sufficient replacement evidence.
+
 ## Sibling Worktree Production Drift
 
 Failure: a new lesson or agent task is initialized in a sibling directory such as `/Volumes/bocchi/myLectures-0002-hilbert-tts` instead of the canonical repository root. The new `videos/NNNN-slug/` directory is no longer next to earlier lessons, first-lesson artifacts are harder to reference, and Git status fragments across multiple worktrees.
+
+## Semantic-Correct Animatic Passed With Weak Visual Finish
+
+Pattern key:
+`semantic_correct_animatic_passed_with_weak_composition_and_visual_hierarchy`.
+
+Failure: a low-cost animatic correctly represents the mathematical relation,
+passes overlap and causal checks, and may even use the episode palette, but the
+shot still looks like a debugging sketch. Primary objects are too small or
+thin, visual tiers are indistinguishable, large empty areas have no attention
+job, and later formulas or arrows float without inheriting the visual identity
+earned by the preceding scene.
+
+Fix:
+
+- Treat an animatic as low-cost media, not as a composition exemption.
+  Resolution, dense sampling, shading detail, and final easing may be deferred;
+  framing, object scale, hierarchy, contrast, typography roles, line-weight
+  roles, negative-space ownership, and transition topology may not.
+- Require a `visual_finish` hard-gate sweep in addition to mathematical,
+  layout, timing, and novice-causality checks.
+- Make every stage identify one primary focal object, its supporting/context
+  tiers, and the learning or transition job of every large negative-space
+  region.
+- Reject generic Manim-default appearance when the selected objects lack a
+  deliberate scale, line-weight, brightness, and motion hierarchy.
+- Aesthetic refinement is allowed only when it improves hierarchy, material
+  coherence, rhythm, or inspectability. Remove flourishes that fail that test.
+
+Review test: inspect representative opening, peak-explanation, transition, and
+ending frames at thumbnail and full size. A muted viewer must immediately
+identify the focal object and its causal successor, while no decorative object
+becomes primary.
 
 Fix:
 
@@ -1215,13 +1310,16 @@ Fix:
 
 ## Mathematical Word Mispronunciation
 
-Failure: a mathematical term has an unwanted pronunciation, such as IndexTTS2 reading `模长` as `mo zhang`.
+Failure: a mathematical term has an unwanted pronunciation, such as IndexTTS2 reading `模长` as `mo zhang`. The same failure also includes one notation token being pronounced differently across repeated occurrences, while corrected subtitles hide the inconsistency; for example, raw `eta` may alternate between several sounds inside one substitution argument.
 
 Fix:
 
 - Use a TTS-only pronunciation spelling, such as `模常`, when it reliably produces the intended sound.
 - Keep screen formulas, final subtitles, storyboard prose, and searchable math text correct as `模长`.
 - Record the hack in `tts-speaking-rules.md` and the experiment log so later subtitle correction does not preserve the fake spelling.
+- Map every occurrence of the same mathematical token to one fixed spoken form before synthesis; do not send a known-unstable raw Latin token repeatedly and hope the model stays consistent.
+- Regenerate a complete semantic phrase or natural short paragraph instead of splicing an isolated syllable.
+- Export one mandatory-ear asset containing every occurrence. ASR spelling and publication-text normalization are alignment evidence, not pronunciation evidence, and cannot close this gate.
 
 ## Fake Or Unclassified Sound Effects
 
@@ -2019,6 +2117,28 @@ Fix:
 - Validate the final upload/review MP4, not only an intermediate mixed WAV.
   Record `ffprobe` and loudness/true-peak evidence in the experiment log.
 
+## Final Identity Cue Missing Sumino Sprite
+
+Failure: the fixed series sign-off reaches final assembly without Sumino being
+visible when the narrator identifies herself as the keyboard player. A sprite
+may be absent, appear only after the identity phrase, or be placed from a rough
+scene-tail estimate rather than the word-level cue. Another form adds an
+invented on-screen `Sumino` name even though the spoken line contains only the
+identity phrase.
+
+Fix:
+
+- Resolve the first identity word and last farewell word from word/token
+  alignment, not reader-cue or scene-tail estimates.
+- Reuse the latest approved Sumino action, asset family, frame rate, fades,
+  scale, and side placement from the live series precedent.
+- Make Sumino visible no later than the first identity word and hold through
+  the farewell. Do not invent name text when the narration does not say it.
+- Prove before/on/after frames from the final subtitle-burned master, including
+  subtitle, formula, active-diagram, and terminal-hold clearance.
+- Bind the asset, overlay, word anchors, final MP4, and QC hashes in the final
+  assembly manifest. A scene-local sprite preview does not prove the final mux.
+
 ## Final Master Reuses Preview Quality
 
 Failure: a 720p or 1080p review/preview artifact is treated as the final master
@@ -2133,3 +2253,137 @@ Fix:
 - Failure: after a label or brace is added to a group, moving the group center to a mathematical coordinate leaves the actual point offset from the axis or target value.
 - Hard prevention: animate the mathematical point itself, let dependents follow through identity bindings, and export coordinate-map error checks for every claimed endpoint.
 - Review test: inspect the point center numerically and visually at initial, equality, and mismatch states; group proximity is not evidence of coordinate correctness.
+
+## Boundary clause consumed by both adjacent scenes
+
+- `pattern_key`: `boundary_exact_clause_consumed_twice`
+- Failure: the handoff contract records an outgoing owner and an incoming owner, but the same complete sentence is synthesized at the end of one scene and again at the start of the next. Written ownership metadata looks valid while the assembled episode repeats itself.
+- Hard prevention: assign each complete normalized boundary clause to exactly one audio asset. Run an adjacent-script suffix/prefix uniqueness check on the assembled scene order before TTS locking and again before final stitching.
+- Review test: listen across every cut without looking at scene files. The next scene must continue the action or answer the question instead of restating the complete handoff.
+
+## Mode jargon appears before the invariant behavior
+
+- `pattern_key`: `mode_jargon_before_concrete_novice_definition`
+- Failure: narration starts sorting objects into “modes” or “natural modes” before a novice has seen what stays identifiable, what changes, and why the split helps. Later formulas may be correct, but the word has no usable mental model.
+- Hard prevention: first show a direction or shape evolving without mixing, then name that stable identity a mode. Show the payoff by contrasting coupled original coordinates with independent scalar coordinates.
+- Review test: mute every occurrence of the word “mode” and ask whether the motion alone shows one identifiable direction or shape surviving the operator. If not, the definition is still verbal rather than causal.
+
+## Discrete frequency sum jumps directly to an integral
+
+- `pattern_key`: `discrete_modes_to_continuous_integral_bridge_missing`
+- Failure: a finite set of frequency components is followed by an inverse-transform integral with no visible reason for the measure factor or for the index becoming continuous.
+- Hard prevention: show discrete samples, give each sample a width such as `Delta omega`, form the weighted sum, include at least one intermediate denser grid, and only then settle into the integral. Narration must distinguish the discrete/periodic example from the whole-line continuum.
+- Review test: a novice should be able to point to where `Delta omega` came from and what becomes dense before the integral symbol appears.
+
+## Final summary becomes a connector graph
+
+- `pattern_key`: `final_summary_connector_spaghetti`
+- Failure: a synthesis frame tries to preserve every earlier object and connect them with long, crossing, returning, or many-to-many arrows. The relationships may be logically defensible but the composition has no readable order.
+- Hard prevention: reduce the synthesis to one ordered rail or one transformation sequence. Activate at most one primary direction connector at a time; use spatial alignment, object transforms, and inherited semantic color before adding arrows.
+- Review test: inspect the held final frame as a still image. Its reading order must be obvious without tracing a crossing or return arc, and each connector must have exactly one unambiguous source and target.
+
+## Generic narration lint blocks an exact series ending
+
+- `pattern_key`: `fixed_series_ending_blocked_by_generic_route_language_linter`
+- Failure: a broad ban on route-planning phrases also rejects a human-required viewer-facing preview or fixed series signature, tempting the author either to remove the approved ending or disable the safety check globally.
+- Hard prevention: keep the generic ban as the default and add only a scene-bound exact allowlist. Validate the exact final-unit text, order, count, and scene prefix; reject all additional occurrences.
+- Review test: the ordinary linter invocation must still fail on the preview phrase, while the explicit scene-ending mode passes only the locked preview and signature and fails altered or extra wording.
+
+## Final media is not bound to the current scene contract
+
+- `pattern_key`: `final_media_not_bound_to_current_scene_contract`
+- Failure: a repaired MP4 or audio file is delivered after the narration QC, scene-production record, registry, or review manifest was sealed. Each artifact can look locally valid while the review packet actually describes an older candidate.
+- Hard prevention: after any source, audio, alignment, subtitle, timeline, or render change, rebuild the complete scene-local hash chain and bind one exact final MP4. Run manifest verification against that exact candidate before independent review.
+- Review test: independently hash the delivered MP4 and audio, then trace those hashes through narration QC, scene production, registry, formula/text/layout evidence, and the review manifest. Any stale link blocks review.
+
+## Screen-text audit is detached from the delivered MP4
+
+- `pattern_key`: `screen_text_audit_final_mp4_mismatch`
+- Failure: source search or a text inventory claims explanatory prose was removed, but the delivered MP4 still contains it because the audit inspected a different render or an incomplete object registry.
+- Hard prevention: bind the screen-text audit to the current source hash and final MP4 hash. Re-extract regression frames from that exact MP4 after every render, including text created through groups, transforms, or helper functions.
+
+### Frozen video was not produced by the bound source
+
+- `standard_key`: `review_candidate_must_be_real_render_of_bound_source`
+- `pattern_key`: `frozen_video_not_produced_by_bound_source`
+- Failure: a manifest independently hashes current source and an older MP4,
+  while regenerated telemetry, contact sheets, and source-only text inventory
+  make the package look current. Decoded video omits actions present in source
+  or contains screen text absent from source.
+- Hard prevention: render into a fresh media directory and seal a render
+  receipt binding source hash, complete command, tool versions, real runtime
+  telemetry hash, and output MP4 hash. Require `reused_media=false`. Compare
+  decoded non-subtitle video text and key visible actions back to the bound
+  source before author self-review. Independent source and MP4 hashes without
+  this production link are insufficient.
+- Review test: compare the declared inventory with independently extracted final-video frames at every prior text-density hotspot. Visible undeclared prose is an automatic failure.
+
+## Formula transition leaves a ghost overlap
+
+- `pattern_key`: `formula_transition_ghost_overlap`
+- Failure: an old formula and its replacement coexist during a transform or fade, producing doubled glyphs or differently colored copies precisely when the mathematical result should settle.
+- Hard prevention: declare formula ownership at transition midpoints, clear or transform the outgoing formula before the replacement becomes opaque, and include transition-midpoint frames in a scene-specific overlap audit.
+- Review test: inspect before, midpoint, and after frames for every formula replacement. A novice must see exactly one readable mathematical claim at each held state.
+
+## Required formula manifest is missing
+
+- `pattern_key`: `required_formula_manifest_missing`
+- Failure: a formula-dense scene reaches review without a scene-local manifest recording formula identity, visible windows, transforms, and the claims each formula supports.
+- Hard prevention: generate one formula manifest for every independently reviewed formula-dense scene, bind it into the review manifest, and regenerate it whenever formula source or timing changes.
+- Review test: select each narrated mathematical claim and trace it to an exact formula object and visible time window. If the mapping depends on reading source code or memory, the output contract is incomplete.
+
+## Frame-analysis telemetry is only a manual pass assertion
+
+- `pattern_key`: `frame_analysis_telemetry_is_manual_pass_assertion`
+- Failure: runtime evidence reports layout, cue, or novice-causality checks as passed even though it contains only container metadata, copied plan values, or hard-coded booleans rather than measurements derived from the delivered frames.
+- Hard prevention: bind telemetry to the final MP4 hash and export reproducible frame-derived measurements or scene-runtime events for every claimed check. A missing measurement must remain unknown or failed; it cannot be promoted to pass by an author assertion.
+- Review test: independently rerun the evidence command against the delivered MP4 and confirm that the reported bounds, object windows, semantic events, and cue checks can be reproduced without reading the author's verdict.
+
+## Fresh candidate lacks a fresh author self-review chain
+
+- `pattern_key`: `fresh_manifest_without_fresh_author_self_review`
+- Failure: a candidate is re-frozen after policy, source, timing, or media changes, but its author self-review, probe, capsule, or submission still describes an older manifest hash.
+- Hard prevention: treat every new review manifest as a new immutable candidate. Regenerate the author probe, self-review, capsule, and submission after freezing, and require every record to bind the same manifest and media hashes before independent review starts.
+- Review test: begin at the delivered manifest hash and trace it through all author-review records. Any older hash, missing link, or post-review mutation blocks the candidate.
+
+## Screen-text repair freezes the rejected text instead of reducing it
+
+- `pattern_key`: `screen_text_repeats_narration_or_explains_intent`
+- Failure: a human asks for less explanatory text, but the repair merely inventories or freezes the existing title, full-sentence prompt, and synonymous instruction while leaving them visible together.
+- Hard prevention: compare the rejected and repaired on-screen text inventories, remove narration-redundant prose from the rendered source, rerender, and bind a fresh audit to the new MP4. Keep only short mathematical labels or a deliberately designed screenshot-worthy summary.
+- Review test: inspect the original hotspot in the repaired MP4 with audio both on and muted. Every surviving sentence must add indispensable visual structure rather than repeat narration or explain the production plan.
+
+## Canonical review path still points to an older candidate
+
+- `pattern_key`: `stale_canonical_review_alias_mismatch`
+- Failure: a newly reviewed MP4 passes under a versioned filename, while the scene's normal `current/review.mp4` path still contains a shorter or otherwise different old render. Reviewers and users can open a valid path yet inspect the wrong candidate.
+- Hard prevention: after independent approval of a versioned candidate, atomically bind the canonical review path to those exact bytes and record both hashes and durations. Regenerate the scene bundle and manifest chain after the canonical binding changes.
+- Review test: hash and probe both the manifest-bound artifact and the user-facing canonical path. Their bytes, duration, streams, and full-decode result must match before publishing links.
+
+## Final media duration exceeds the active scene contract
+
+- `pattern_key`: `final_media_duration_contract_mismatch`
+- Failure: the delivered audio and MP4 are materially longer than the active timeline fragment or compiled scene profile, so author and reviewer coverage anchors stop before the real ending even though hashes and decodes may still pass.
+- Hard prevention: derive the authoritative scene duration from the locked audio/local rendered scene contract, propagate it through the timeline fragment, profile, plan, registry, telemetry, coverage anchors, and manifest, and permit only the expected frame-quantization or container-tail difference in the MP4.
+- Review test: compare locked-audio duration, final MP4 duration, timeline/profile duration, last reader cue, last aligned word, tail silence, and the latest required review anchor. Any unreviewed media interval beyond frame-level tolerance blocks handoff.
+
+## Mixed channel layouts corrupt the assembled episode audio
+
+- `pattern_key`: `mixed_channel_layout_concat_corrupts_right_channel`
+- Failure: scene MP4s with stereo and mono AAC are passed through one concat demuxer. The episode reports a valid stereo stream and may fully decode, yet mono packets can be interpreted through the earlier stereo layout and produce bursts in one channel, often during an intended silent tail.
+- Hard prevention: normalize every scene to one explicit sample rate, channel count, channel layout, and lossless intermediate codec before concat; encode the delivery audio only after the normalized segments are joined. Add a per-channel terminal-silence audit to the assembly contract.
+- Review test: compare the source tail with the same assembled interval, measure each output channel independently, and listen to the final hold. A full-decode pass or a correct container-level channel count is not sufficient evidence.
+
+## Reused worktree runs a stale Skill registry
+
+- `pattern_key`: `reused_worktree_stale_skill_registry`
+- Failure: the canonical Skill adds a hard rule or state-machine check, but a reused production worktree retains an older `rules.json` or CLI. The author can then seal a locally valid profile, QC chain, manifest, or self-review that never evaluated the new rule; an acceptance reviewer compounds the error by invoking that stale author-worktree CLI.
+- Hard prevention: before every start or resume, mechanically synchronize the complete canonical Skill tree into every reused worktree and compare the rule-registry hash. Seal the complete Skill-tree hash in a fresh production-batch contract. Active `batch-status` must fail when the current Skill tree differs, and the acceptance reviewer must invoke the canonical main-checkout CLI even when `--repo-root` points at an author worktree.
+- Review test: change one canonical rule, leave a reused worktree's old batch contract in place, and run `batch-status --require-clean`. It must fail with the stale-Skill error. Rebuilding only the profile, copying only the Python script, or using the stale local reviewer CLI does not count as recovery.
+
+## Reused worktree authorizes itself from a stale supervisor copy
+
+- `pattern_key`: `reused_worktree_stale_supervisor_session`
+- Failure: the main agent reassigns a reused worker or queues a deferred review todo in the canonical supervisor session, but the author worktree still contains an older copy with the same session id. The author creates a seemingly valid fresh batch from an obsolete task key or misses the deferred todo.
+- Hard prevention: mutate authorization only through the canonical supervisor CLI, synchronize that exact session file into the reused worktree, and require parallel `begin-production-batch` to compare the local and canonical sealed `session_hash` values before reading the grant. Record the canonical path and hash in the batch binding.
+- Review test: change one worker's canonical task key while leaving the worktree copy unchanged, then attempt `begin-production-batch` with both paths. It must fail before batch creation; matching ids without matching session hashes are insufficient.

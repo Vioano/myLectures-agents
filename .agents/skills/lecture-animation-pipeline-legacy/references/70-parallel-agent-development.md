@@ -90,7 +90,7 @@ deliverables:
   - implement make_transformed_square
   - ensure returned objects fit assigned zone
 acceptance_commands:
-  - uv run python .agents/skills/lecture-animation-pipeline/tools/validate_scene_contract.py videos/0000-demo/src/scenes/s014_s018_local_square_transform/contract.yaml
+  - uv run python .agents/skills/lecture-animation-pipeline-legacy/tools/validate_scene_contract.py videos/0000-demo/src/scenes/s014_s018_local_square_transform/contract.yaml
   - uv run pytest videos/0000-demo/src/scenes/s014_s018_local_square_transform/tests
 ```
 

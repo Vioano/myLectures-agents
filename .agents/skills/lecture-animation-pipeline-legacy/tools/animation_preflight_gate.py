@@ -205,6 +205,17 @@ def check_component_package(
                 f"contract.scene_class={scene_class!r} does not match composer classes {class_names}"
             )
 
+    for python_path in sorted(scene_dir.glob("*.py")):
+        if python_path.name in {"composer.py", "__init__.py"} or is_macos_metadata(python_path):
+            continue
+        hidden_scene_classes = python_class_names(python_path)
+        if hidden_scene_classes:
+            errors.append(
+                f"{rel(python_path, repo_root)} defines Manim Scene classes outside composer.py: "
+                f"{hidden_scene_classes}; component packages may not hide a monolithic scene "
+                "behind a thin composer adapter"
+            )
+
     objects_py = scene_dir / "objects.py"
     if objects_py.exists():
         calls = forbidden_scene_calls(objects_py)
@@ -350,10 +361,13 @@ def check_timeline_and_assignment(
         timeline = load_json(timeline_path)
         if isinstance(timeline, dict):
             segments = contract.get("source", {}).get("timeline_segments", [])
+            timeline_entries = timeline.get("segments")
+            if not isinstance(timeline_entries, list):
+                timeline_entries = timeline.get("scene_groups", [])
             for segment in segments if isinstance(segments, list) else []:
                 matches = [
                     item
-                    for item in timeline.get("segments", [])
+                    for item in timeline_entries
                     if isinstance(item, dict) and item.get("id") == segment
                 ]
                 if not matches:

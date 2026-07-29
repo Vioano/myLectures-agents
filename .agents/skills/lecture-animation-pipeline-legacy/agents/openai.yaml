@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lecture Animation Pipeline Legacy Backup"
+  short_description: "Frozen V0 philosophy and compatibility references"
+  default_prompt: "Use $lecture-animation-pipeline-legacy only for an explicitly requested legacy workflow or to inspect a named V0 reference; use $lecture-animation-pipeline for normal production."

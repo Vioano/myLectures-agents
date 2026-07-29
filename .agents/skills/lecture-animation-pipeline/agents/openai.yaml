@@ -1,4 +1,4 @@
 interface:
   display_name: "Lecture Animation Pipeline"
-  short_description: "Manim lecture video production workflow"
-  default_prompt: "Use $lecture-animation-pipeline to plan, build, review, and iterate a Manim-based lecture video segment."
+  short_description: "Evidence-bound lecture production, finishing, and retrospective"
+  default_prompt: "Use $lecture-animation-pipeline to choose main-producer or parallel-batch mode, run the episode readiness gate before TTS, use hash-bound low-token handoffs, enforce every CLI authoring and independent-review gate, promote accepted assets into the canonical checkout, run the portable native-4K subtitle/Sumino finishing route after approval, and perform the quantitative post-episode retrospective when asked."
