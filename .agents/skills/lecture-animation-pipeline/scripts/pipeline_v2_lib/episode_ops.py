@@ -16,6 +16,8 @@ from typing import Any, Iterable
 import wave
 
 from .core import PipelineError, object_hash, utc_now
+from .presentation_boundary import presentation_boundary_violation
+from .screen_text_registration import validate_screen_text_contract_registration
 from .storage import load_json, write_json
 
 
@@ -41,8 +43,34 @@ SRT_TIMESTAMP = re.compile(
     r"(?m)^\d+\s*\n\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+"
     r"\d{2}:\d{2}:\d{2},\d{3}\s*$"
 )
-VISIBLE_TEXT_CONSTRUCTORS = {"Text", "MarkupText", "Paragraph"}
-DEFAULT_FIXED_ENDING = "我是结束乐队的键盘手，下个视频见"
+# Keep episode-level readiness inventory in lockstep with the execution-side
+# screen-text scanner.  The scoped scene snapshots use project wrappers such
+# as ``formula`` and ``label``; treating only bare Text/MarkupText calls as
+# visible text silently produced an empty inventory and made the formal
+# registry appear stale.  Wrapper payloads are always their first argument;
+# style/position arguments are not learner-facing text.
+VISIBLE_TEXT_CONSTRUCTORS = {
+    "Text",
+    "MarkupText",
+    "Paragraph",
+    "Tex",
+    "MathTex",
+    "DecimalNumber",
+    "Integer",
+    "math_tex",
+    "role_formula",
+    "formula",
+    "label",
+    "cn_text",
+}
+VISIBLE_TEXT_WRAPPERS = {
+    "math_tex",
+    "role_formula",
+    "formula",
+    "label",
+    "cn_text",
+}
+DEFAULT_FIXED_ENDING = ""
 PORTABILITY_REQUIRED_ROLES = {
     "lecture",
     "source",
@@ -72,6 +100,10 @@ PRONUNCIATION_SENSITIVE_TOKENS = (
     "psi",
     "omega",
 )
+PRONUNCIATION_REGISTRY_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "references/tts-pronunciation-registry.json"
+)
 PRONUNCIATION_TOKEN_VARIANTS = {
     "alpha": ("alpha", r"\alpha", "α"),
     "beta": ("beta", r"\beta", "β"),
@@ -93,6 +125,7 @@ PRONUNCIATION_TOKEN_VARIANTS = {
     "psi": ("psi", r"\psi", "ψ"),
     "omega": ("omega", r"\omega", "ω"),
 }
+PRONUNCIATION_MACHINE_ACCEPTANCE_MODE = "asr_machine_user_authorized"
 AUTO_NOVICE_BRIDGE_TERMS = {
     "模式": "mode",
     "离散到连续": "discrete_to_continuous",
@@ -205,6 +238,15 @@ def _alignment_words(value: Any) -> list[dict[str, Any]]:
         ):
             rows.append(value)
         else:
+            # Formalized alignment manifests can retain several equivalent
+            # timing representations (word_cues, reader_cues, raw_alignment).
+            # Pace belongs to one canonical token sequence, not the union of
+            # every audit copy. Prefer the most precise declared sequence and
+            # recurse generically only for legacy shapes that have none.
+            for canonical_key in ("word_cues", "words", "tokens", "segments"):
+                canonical = value.get(canonical_key)
+                if isinstance(canonical, list) and canonical:
+                    return _alignment_words(canonical)
             for child in value.values():
                 rows.extend(_alignment_words(child))
     elif isinstance(value, list):
@@ -378,7 +420,11 @@ def _evidence_inventory_count(
     return count
 
 
-def _visible_text_literals(path: Path, label: str, errors: list[str]) -> list[str]:
+def _visible_text_records(
+    path: Path,
+    label: str,
+    errors: list[str],
+) -> list[dict[str, str]]:
     if path.suffix.lower() != ".py":
         errors.append(f"{label}: automatic visible-text inventory currently requires a Python scene")
         return []
@@ -387,7 +433,7 @@ def _visible_text_literals(path: Path, label: str, errors: list[str]) -> list[st
     except SyntaxError as exc:
         errors.append(f"{label}: scene source cannot be parsed for visible text: {exc}")
         return []
-    values: list[str] = []
+    records: list[dict[str, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -400,16 +446,132 @@ def _visible_text_literals(path: Path, label: str, errors: list[str]) -> list[st
         )
         if function_name not in VISIBLE_TEXT_CONSTRUCTORS:
             continue
+        # Runtime-registered project wrappers may intentionally carry a
+        # dynamic payload (for example ``label(f"n={n}")``).  The semantic
+        # contract binds static payloads; dynamic payload count/registration is
+        # enforced by the execution-side scanner and registry.  Do not turn a
+        # legitimate runtime payload into a false static mismatch here.  Bare
+        # constructors remain strict: a dynamic Text/MathTex payload cannot
+        # bypass the frozen inventory.
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(
             node.args[0].value, str
         ):
-            errors.append(
-                f"{label}: dynamic {function_name}(...) text at line "
-                f"{getattr(node, 'lineno', '?')} cannot bypass the frozen inventory"
-            )
+            if function_name not in VISIBLE_TEXT_WRAPPERS:
+                errors.append(
+                    f"{label}: dynamic {function_name}(...) text at line "
+                    f"{getattr(node, 'lineno', '?')} cannot bypass the frozen inventory"
+                )
             continue
-        values.append(node.args[0].value)
-    return values
+        records.append(
+            {
+                "constructor": function_name,
+                "payload": node.args[0].value,
+            }
+        )
+    return records
+
+
+def _visible_text_literals(path: Path, label: str, errors: list[str]) -> list[str]:
+    return [
+        record["payload"]
+        for record in _visible_text_records(path, label, errors)
+    ]
+
+
+def _validate_episode_screen_text_semantics(
+    *,
+    path: Path,
+    repo_root: Path,
+    source_records: list[dict[str, str]],
+    slug: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    if not path.is_file():
+        errors.append(
+            f"{slug}: post_tts readiness requires a machine-readable "
+            "screen_text_semantic_contract_path"
+        )
+        return None
+    try:
+        payload = load_json(path)
+    except (OSError, ValueError, TypeError) as exc:
+        errors.append(f"{slug}: screen text semantic contract cannot be loaded: {exc}")
+        return None
+    contract = (
+        payload.get("screen_text_contract")
+        if isinstance(payload, dict) and isinstance(payload.get("screen_text_contract"), dict)
+        else payload
+    )
+    if isinstance(contract, dict):
+        errors.extend(
+            f"{slug}: screen-text registration: {error}"
+            for error in validate_screen_text_contract_registration(
+                contract, repo_root, slug
+            )
+        )
+    semantic_items = contract.get("semantic_items", []) if isinstance(contract, dict) else []
+    if not isinstance(semantic_items, list):
+        errors.append(f"{slug}: screen text semantic contract requires semantic_items")
+        return payload if isinstance(payload, dict) else None
+
+    actual = Counter(
+        (str(record.get("constructor", "")), str(record.get("payload", "")))
+        for record in source_records
+    )
+    planned: Counter[tuple[str, str]] = Counter()
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(semantic_items):
+        label = f"{slug}.screen_text_semantic_contract.semantic_items[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        key = (str(item.get("constructor", "")), str(item.get("payload", "")))
+        try:
+            count = int(item.get("count", 0))
+        except (TypeError, ValueError):
+            count = 0
+        if not all(key) or count < 1 or key in seen:
+            errors.append(
+                f"{label} requires a unique constructor/payload pair and positive count"
+            )
+        seen.add(key)
+        planned[key] += max(count, 0)
+        if len(str(item.get("unique_visual_job", "")).strip()) < 12:
+            errors.append(f"{label} requires unique_visual_job")
+        if len(str(item.get("necessity", "")).strip()) < 16:
+            errors.append(f"{label} requires learner-facing necessity")
+        if len(str(item.get("removal_failure", "")).strip()) < 16:
+            errors.append(f"{label} requires concrete removal_failure")
+        if len(str(item.get("clearance_condition", "")).strip()) < 8:
+            errors.append(f"{label} requires clearance_condition")
+        if not (
+            str(item.get("math_object_anchor", "")).strip()
+            or str(item.get("learner_question_anchor", "")).strip()
+        ):
+            errors.append(
+                f"{label} must bind math_object_anchor or learner_question_anchor"
+            )
+        if item.get("duplicates_narration") is not False:
+            errors.append(f"{label} must set duplicates_narration=false")
+        if item.get("externalizes_production_intent") is not False:
+            errors.append(f"{label} must set externalizes_production_intent=false")
+        violation = presentation_boundary_violation(key[1])
+        if violation:
+            errors.append(
+                f"{label} violates the learner-facing presentation boundary: {violation}"
+            )
+    if actual != planned:
+        missing = sorted((actual - planned).elements())
+        extra = sorted((planned - actual).elements())
+        if missing:
+            errors.append(
+                f"{slug}: screen text semantic contract misses source payloads: {missing}"
+            )
+        if extra:
+            errors.append(
+                f"{slug}: screen text semantic contract contains absent payloads: {extra}"
+            )
+    return payload if isinstance(payload, dict) else None
 
 
 def _validate_independent_review(
@@ -500,20 +662,664 @@ def _validate_independent_review(
     return review, authority_snapshot
 
 
+def _validate_machine_pronunciation_review(
+    *,
+    path: Path,
+    repo_root: Path,
+    expected_bindings: dict[str, Any],
+    label: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    """Validate an explicit user-authorized ASR acceptance record.
+
+    This is not a human-listening pass.  It is a deliberately separate
+    evidence type used only when the episode contract carries an explicit user
+    authority saying that ASR is the machine acceptance for this production
+    pass.  The final user audio review therefore remains pending in the
+    receipt and cannot be inferred from this record.
+    """
+    if not path.is_file():
+        errors.append(f"{label}: machine pronunciation review does not exist")
+        return None
+    try:
+        review = load_json(path)
+    except PipelineError as exc:
+        errors.append(f"{label}: machine pronunciation review is invalid: {exc}")
+        return None
+    if review.get("schema") != "lecture-animation-pronunciation-machine-review-v1":
+        errors.append(f"{label}: machine pronunciation review schema is invalid")
+    if review.get("verdict") != "pass":
+        errors.append(f"{label}: machine pronunciation review verdict must be pass")
+    if review.get("machine_method") not in {"asr", "asr_alignment"}:
+        errors.append(f"{label}: machine pronunciation review must name ASR")
+    if review.get("human_listening_pass") is not False:
+        errors.append(
+            f"{label}: machine pronunciation review must explicitly keep human listening pending"
+        )
+    payload = dict(review)
+    stored_hash = payload.pop("review_hash", None)
+    if stored_hash != object_hash(payload):
+        errors.append(f"{label}: machine pronunciation review hash is invalid or stale")
+    for key, expected in expected_bindings.items():
+        if review.get(key) != expected:
+            errors.append(f"{label}: machine review binding {key} is stale or mismatched")
+    checks = review.get("checks", {})
+    required = (
+        "exact_audio_bound",
+        "occurrence_windows_bound",
+        "asr_surface_checked",
+        "no_forbidden_form_detected",
+    )
+    if not isinstance(checks, dict) or any(checks.get(key) is not True for key in required):
+        errors.append(
+            f"{label}: machine pronunciation review is missing required checks: "
+            + ", ".join(required)
+        )
+    return review
+
+
 def _formal_occurrence_count(text: str, token: str) -> int:
     variants = PRONUNCIATION_TOKEN_VARIANTS.get(token.lower())
     if variants:
-        escaped = sorted((re.escape(value) for value in variants), key=len, reverse=True)
+        count = 0
+        for value in variants:
+            if len(value) == 1 and not value.isascii():
+                # Unicode Greek glyphs remain distinct tokens even when
+                # adjacent to Latin differential or exponential notation,
+                # such as iθ and dθ.
+                count += text.count(value)
+            else:
+                left_guard = r"(?<![A-Za-z])" if value.startswith("\\") else r"(?<![A-Za-z\\])"
+                count += len(
+                    re.findall(
+                        rf"{left_guard}{re.escape(value)}(?![A-Za-z])",
+                        text,
+                        re.I,
+                    )
+                )
+        return count
+    if re.fullmatch(r"[A-Za-z]+", token):
+        return len(re.findall(rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])", text, re.I))
+    if token.isascii():
         return len(
             re.findall(
-                rf"(?<![A-Za-z])(?:{'|'.join(escaped)})(?![A-Za-z])",
+                rf"(?<![A-Za-z\\]){re.escape(token)}(?![A-Za-z])",
                 text,
                 re.I,
             )
         )
-    if re.fullmatch(r"[A-Za-z]+", token):
-        return len(re.findall(rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])", text, re.I))
     return text.count(token)
+
+
+def _canonical_formal_occurrence_count(
+    text: str,
+    token: str,
+    pronunciation_registry: dict[str, Any] | None = None,
+) -> int:
+    """Count a token using the registry's longest-match identity rules.
+
+    The legacy counter is intentionally kept for backwards-compatible unit
+    tests and callers that only have the compact Greek-token table.  Readiness
+    contracts, however, have an exact pronunciation registry in scope.  In
+    that path a composite identity such as ``Res f`` or ``i d theta`` must
+    occupy its span before the atomic ``f``/``i``/``theta`` tokens are counted.
+    Without this boundary, a valid mapping is reported as both unresolved and
+    over-counted.
+    """
+    if isinstance(pronunciation_registry, dict) and pronunciation_registry.get("tokens"):
+        folded = token.casefold()
+        return sum(
+            1
+            for row in _registry_occurrences(text, pronunciation_registry)
+            if row.get("token_key") == folded
+        )
+    return _formal_occurrence_count(text, token)
+
+
+def _load_pronunciation_registry(
+    path: Path,
+    errors: list[str],
+) -> dict[str, Any]:
+    try:
+        registry = load_json(path)
+    except PipelineError as exc:
+        errors.append(f"canonical TTS pronunciation registry is unavailable: {exc}")
+        return {}
+    if registry.get("schema") != "lecture-animation-tts-pronunciation-registry-v1":
+        errors.append("canonical TTS pronunciation registry has an invalid schema")
+    if not isinstance(registry.get("routes"), dict) or not isinstance(
+        registry.get("tokens"), dict
+    ):
+        errors.append("canonical TTS pronunciation registry requires routes and tokens")
+    return registry
+
+
+def _token_matches(text: str, token: str) -> list[tuple[int, int]]:
+    variants = PRONUNCIATION_TOKEN_VARIANTS.get(token.casefold(), (token,))
+    matches: list[tuple[int, int]] = []
+    for variant in variants:
+        if variant.isascii():
+            pattern = re.compile(
+                rf"(?<![A-Za-z\\]){re.escape(variant)}(?![A-Za-z])",
+                re.I,
+            )
+            matches.extend((match.start(), match.end()) for match in pattern.finditer(text))
+        else:
+            start = 0
+            while True:
+                index = text.find(variant, start)
+                if index < 0:
+                    break
+                matches.append((index, index + len(variant)))
+                start = index + len(variant)
+    return matches
+
+
+def _registry_occurrences(
+    text: str,
+    pronunciation_registry: dict[str, Any],
+) -> list[dict[str, Any]]:
+    candidates: list[tuple[int, int, str]] = []
+    for token in dict(pronunciation_registry.get("tokens", {})):
+        candidates.extend(
+            (start, end, str(token).casefold())
+            for start, end in _token_matches(text, str(token))
+        )
+    # Longest token wins at the same start. This makes composite identities such
+    # as ``i d theta`` and ``Res f`` authoritative over their atomic parts.
+    candidates.sort(key=lambda row: (row[0], -(row[1] - row[0]), row[2]))
+    selected: list[dict[str, Any]] = []
+    occupied_until = -1
+    counts: Counter[str] = Counter()
+    for start, end, token in candidates:
+        if start < occupied_until:
+            continue
+        counts[token] += 1
+        selected.append(
+            {
+                "token_key": token,
+                "formal_start": start,
+                "formal_end": end,
+                "formal_surface": text[start:end],
+                "occurrence_index": counts[token],
+            }
+        )
+        occupied_until = end
+    return selected
+
+
+def _validate_tts_input_mapping(
+    *,
+    mapping_path: Path,
+    formal_script_path: Path,
+    tts_input_path: Path,
+    scene_slug: str,
+    route_id: str,
+    pronunciation_registry: dict[str, Any],
+    repo_root: Path,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    label = f"{scene_slug}.tts_input_mapping"
+    try:
+        mapping = load_json(mapping_path)
+    except PipelineError as exc:
+        errors.append(f"{label} is invalid: {exc}")
+        return None
+    if mapping.get("schema") != "lecture-animation-tts-input-mapping-v2":
+        errors.append(f"{label} must use lecture-animation-tts-input-mapping-v2")
+        return None
+    if mapping.get("scene_slug") != scene_slug:
+        errors.append(f"{label} scene binding is mismatched")
+    if mapping.get("route_id") != route_id:
+        errors.append(f"{label} route binding is mismatched")
+    routes = dict(pronunciation_registry.get("routes", {}))
+    if not route_id or route_id not in routes:
+        errors.append(f"{label} names an unregistered exact TTS route")
+
+    expected_paths = {
+        "formal_script_path": formal_script_path,
+        "tts_input_path": tts_input_path,
+    }
+    for key, expected_path in expected_paths.items():
+        raw = str(mapping.get(key, "")).strip()
+        if not raw or _resolve(raw, repo_root) != expected_path.resolve():
+            errors.append(f"{label} {key} binding is mismatched")
+
+    formal_text = formal_script_path.read_text(encoding="utf-8")
+    tts_text = tts_input_path.read_text(encoding="utf-8")
+    formal_snapshot = artifact_snapshot(formal_script_path, repo_root)
+    tts_snapshot = artifact_snapshot(tts_input_path, repo_root)
+    if mapping.get("formal_script_sha256") != formal_snapshot["sha256"]:
+        errors.append(f"{label} formal script SHA binding is stale")
+    if mapping.get("tts_input_sha256") != tts_snapshot["sha256"]:
+        errors.append(f"{label} TTS input SHA binding is stale")
+
+    rows = mapping.get("occurrences", [])
+    if not isinstance(rows, list):
+        errors.append(f"{label}.occurrences must be a list")
+        rows = []
+    normalized: list[dict[str, Any]] = []
+    prior_end = 0
+    token_counts: Counter[str] = Counter()
+    reconstructed: list[str] = []
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            errors.append(f"{label} occurrence {index} must be an object")
+            continue
+        token_key = str(row.get("token_key", "")).strip().casefold()
+        spoken_form = str(row.get("spoken_form", ""))
+        formal_surface = str(row.get("formal_surface", ""))
+        try:
+            start = int(row.get("formal_start"))
+            end = int(row.get("formal_end"))
+        except (TypeError, ValueError):
+            errors.append(f"{label} occurrence {index} has invalid character offsets")
+            continue
+        if start < prior_end or end <= start or end > len(formal_text):
+            errors.append(
+                f"{label} occurrence {index} must be ordered, non-overlapping, and in bounds"
+            )
+            continue
+        if formal_text[start:end] != formal_surface:
+            errors.append(f"{label} occurrence {index} formal surface does not match its span")
+        token_policy = dict(pronunciation_registry.get("tokens", {})).get(token_key)
+        if not isinstance(token_policy, dict):
+            errors.append(f"{label} occurrence {index} uses unregistered token {token_key!r}")
+        else:
+            route_policy = dict(pronunciation_registry.get("routes", {})).get(
+                route_id, {}
+            )
+            allowed = {
+                str(value)
+                for value in dict(route_policy).get("candidate_forms", {}).get(
+                    token_key, []
+                )
+            }
+            forbidden = {
+                str(value).strip().casefold()
+                for value in token_policy.get("forbidden_forms", [])
+            }
+            if spoken_form != spoken_form.strip() or any(ord(char) < 32 for char in spoken_form):
+                errors.append(
+                    f"{label} occurrence {index} spoken form contains boundary whitespace or controls"
+                )
+            elif spoken_form.casefold() in forbidden:
+                errors.append(
+                    f"{label} occurrence {index} uses forbidden spoken form {spoken_form!r}"
+                )
+            elif spoken_form not in allowed:
+                errors.append(
+                    f"{label} occurrence {index} uses unregistered spoken form {spoken_form!r}"
+                )
+        token_counts[token_key] += 1
+        if row.get("occurrence_index") != token_counts[token_key]:
+            errors.append(
+                f"{label} occurrence {index} has a non-canonical occurrence_index"
+            )
+        if bool(row.get("replacement_applied")) != (formal_surface != spoken_form):
+            errors.append(f"{label} occurrence {index} replacement_applied is false evidence")
+        reconstructed.append(formal_text[prior_end:start])
+        reconstructed.append(spoken_form)
+        prior_end = end
+        normalized.append(
+            {
+                "token_key": token_key,
+                "formal_start": start,
+                "formal_end": end,
+                "formal_surface": formal_surface,
+                "spoken_form": spoken_form,
+                "occurrence_index": token_counts[token_key],
+            }
+        )
+    reconstructed.append(formal_text[prior_end:])
+    if "".join(reconstructed) != tts_text:
+        errors.append(
+            f"{label} cannot exactly reconstruct the TTS input; an unregistered or misplaced edit exists"
+        )
+
+    expected = _registry_occurrences(formal_text, pronunciation_registry)
+    observed = [
+        {
+            key: row[key]
+            for key in (
+                "token_key",
+                "formal_start",
+                "formal_end",
+                "formal_surface",
+                "occurrence_index",
+            )
+        }
+        for row in normalized
+    ]
+    if observed != expected:
+        errors.append(
+            f"{label} occurrence inventory does not exactly cover canonical sensitive tokens"
+        )
+
+    folded_tts = tts_text.casefold()
+    for token_key, token_policy in dict(pronunciation_registry.get("tokens", {})).items():
+        if not isinstance(token_policy, dict):
+            continue
+        for forbidden in token_policy.get("forbidden_forms", []):
+            forbidden_text = str(forbidden).strip()
+            if forbidden_text and forbidden_text.casefold() in folded_tts:
+                errors.append(
+                    f"{label} TTS input contains forbidden form {forbidden_text!r} "
+                    f"registered for {token_key}"
+                )
+    return {
+        "mapping": artifact_snapshot(mapping_path, repo_root),
+        "formal_script": formal_snapshot,
+        "tts_input": tts_snapshot,
+        "route_id": route_id,
+        "occurrences": normalized,
+        "status": "candidate_pending_exact_scene_ear_review",
+    }
+
+
+def _validate_pronunciation_binding(
+    *,
+    token: str,
+    binding: dict[str, Any],
+    formal_count: int,
+    readiness_stage: str,
+    repo_root: Path,
+    narration_lookup: dict[str, str],
+    scene_audio_paths: dict[str, Path],
+    author_id: str,
+    route_id: str,
+    pronunciation_registry: dict[str, Any],
+    exact_mapping_evidence: dict[str, Any] | None,
+    acceptance_mode: str = "human_or_independent",
+    errors: list[str],
+) -> dict[str, Any] | None:
+    scene_slug = str(binding.get("scene_slug", "")).strip()
+    label = f"pronunciation mapping for {token}"
+    if scene_slug:
+        label += f" in {scene_slug}"
+    spoken_form = str(binding.get("spoken_form", "")).strip()
+    tts_input_raw = str(binding.get("tts_input_path", "")).strip()
+    ear_evidence_raw = str(binding.get("ear_evidence_path", "")).strip()
+    ear_review_raw = str(binding.get("ear_review_path", "")).strip()
+    machine_review_raw = str(binding.get("machine_review_path", "")).strip()
+    source_audio_raw = str(binding.get("source_audio_path", "")).strip()
+    if not spoken_form or not tts_input_raw or not scene_slug:
+        errors.append(
+            f"{label} requires spoken_form, scene_slug, and tts_input_path"
+        )
+        return None
+    token_policy = dict(pronunciation_registry.get("tokens", {})).get(
+        token.lower()
+    )
+    if not isinstance(token_policy, dict):
+        errors.append(f"{label} is not registered in the canonical TTS registry")
+    else:
+        forbidden = {
+            str(value).strip().casefold()
+            for value in token_policy.get("forbidden_forms", [])
+        }
+        route_policy = dict(pronunciation_registry.get("routes", {})).get(
+            route_id, {}
+        )
+        allowed = {
+            str(value)
+            for value in dict(route_policy).get("candidate_forms", {}).get(
+                token.lower(), []
+            )
+        }
+        if spoken_form != spoken_form.strip() or any(ord(char) < 32 for char in spoken_form):
+            errors.append(f"{label} spoken form contains boundary whitespace or controls")
+        elif spoken_form.casefold() in forbidden:
+            errors.append(
+                f"{label} uses forbidden spoken form {spoken_form!r}"
+            )
+        elif spoken_form not in allowed:
+            errors.append(
+                f"{label} uses unregistered spoken form {spoken_form!r}"
+            )
+    binding_route_id = str(binding.get("route_id", "")).strip()
+    if not route_id or binding_route_id != route_id:
+        errors.append(
+            f"{label} must bind the exact canonical TTS route {route_id!r}"
+        )
+    if scene_slug not in narration_lookup:
+        errors.append(f"{label} names unknown scene {scene_slug}")
+        return None
+    expected_count = int(binding.get("occurrences", formal_count) or 0)
+    if expected_count != formal_count or expected_count <= 0:
+        errors.append(
+            f"{label} binds {expected_count} occurrences; narration has {formal_count}"
+        )
+    tts_input_path = _resolve(tts_input_raw, repo_root)
+    if not tts_input_path.is_file():
+        errors.append(f"TTS input for {token} in {scene_slug} does not exist")
+        return None
+    mapped_tts_input = (
+        exact_mapping_evidence.get("tts_input")
+        if isinstance(exact_mapping_evidence, dict)
+        else None
+    )
+    if not isinstance(mapped_tts_input, dict):
+        errors.append(f"{label} lacks exact scene TTS mapping evidence")
+    else:
+        binding_snapshot = artifact_snapshot(tts_input_path, repo_root)
+        if (
+            binding_snapshot.get("path") != mapped_tts_input.get("path")
+            or binding_snapshot.get("sha256") != mapped_tts_input.get("sha256")
+        ):
+            errors.append(
+                f"{label} tts_input_path must equal the exact-mapped scene TTS input"
+            )
+    tts_input = tts_input_path.read_text(encoding="utf-8", errors="ignore")
+    mapped_rows = (
+        exact_mapping_evidence.get("occurrences", [])
+        if isinstance(exact_mapping_evidence, dict)
+        else []
+    )
+    token_rows = [
+        row
+        for row in mapped_rows
+        if isinstance(row, dict)
+        and str(row.get("token_key", "")).casefold() == token.casefold()
+    ]
+    if token_rows:
+        observed_spoken_count = sum(
+            1 for row in token_rows if str(row.get("spoken_form", "")) == spoken_form
+        )
+    else:
+        # Keep a conservative fallback for legacy callers that do not carry
+        # exact mapping evidence.  Post-TTS readiness normally takes the
+        # registry-bound branch above.
+        observed_spoken_count = tts_input.count(spoken_form)
+    if observed_spoken_count != expected_count:
+        errors.append(
+            f"TTS input for {token} in {scene_slug} must contain spoken form "
+            f"{spoken_form!r} exactly {expected_count} times"
+        )
+    unresolved_formal_count = _canonical_formal_occurrence_count(
+        tts_input,
+        token,
+        pronunciation_registry,
+    )
+    if mapped_rows:
+        # Subtract every exact mapped spoken span that still contains the
+        # target token.  This covers literal routes (``f``), composite
+        # identities (``i d theta``), and approved alternatives such as
+        # ``Res f`` -> ``residue f``.  Counting each replacement under the
+        # same longest-match registry prevents a composite from leaking its
+        # atomic children while still exposing an extra, unmapped occurrence.
+        mapped_spoken_count = sum(
+            _canonical_formal_occurrence_count(
+                str(row.get("spoken_form", "")),
+                token,
+                pronunciation_registry,
+            )
+            for row in mapped_rows
+            if isinstance(row, dict)
+        )
+        unresolved_formal_count -= mapped_spoken_count
+    elif spoken_form.casefold() == token.casefold():
+        unresolved_formal_count -= expected_count
+    unresolved_formal_count = max(0, unresolved_formal_count)
+    if unresolved_formal_count > 0:
+        errors.append(
+            f"TTS input for {token} in {scene_slug} still contains the unresolved formal token"
+        )
+    evidence: dict[str, Any] = {
+        "formal_occurrences": formal_count,
+        "spoken_form": spoken_form,
+        "scene_slug": scene_slug,
+        "route_id": route_id,
+        "tts_input": artifact_snapshot(tts_input_path, repo_root),
+    }
+    if readiness_stage == "pre_tts":
+        evidence["review_status"] = "pending_post_tts"
+        return evidence
+    required_review_path = (
+        machine_review_raw
+        if acceptance_mode == PRONUNCIATION_MACHINE_ACCEPTANCE_MODE
+        else ear_review_raw
+    )
+    if not ear_evidence_raw or not source_audio_raw or not required_review_path:
+        review_label = (
+            "machine_review_path"
+            if acceptance_mode == PRONUNCIATION_MACHINE_ACCEPTANCE_MODE
+            else "ear_review_path"
+        )
+        errors.append(
+            f"post_tts {label} requires source_audio_path, ear_evidence_path, "
+            f"and {review_label}"
+        )
+        return evidence
+    source_audio_path = _resolve(source_audio_raw, repo_root)
+    ear_evidence_path = _resolve(ear_evidence_raw, repo_root)
+    bound_scene_audio = scene_audio_paths.get(scene_slug)
+    if not source_audio_path.is_file() or not ear_evidence_path.is_file():
+        errors.append(f"pronunciation evidence files for {token} in {scene_slug} do not all exist")
+        return evidence
+    if bound_scene_audio is None or source_audio_path.resolve() != bound_scene_audio.resolve():
+        errors.append(
+            f"{label} source_audio_path must equal the bound scene audio_path"
+        )
+    if ear_evidence_path.resolve() != source_audio_path.resolve():
+        errors.append(
+            f"{label} ear_evidence_path must be the bound final scene audio; "
+            "shorter clips are review aids, not gate evidence"
+        )
+    try:
+        source_duration = _wav_duration(source_audio_path)
+        _wav_duration(ear_evidence_path)
+    except (wave.Error, EOFError) as exc:
+        errors.append(
+            f"pronunciation evidence for {token} in {scene_slug} is not a decodable WAV: {exc}"
+        )
+        source_duration = 0.0
+    checks = binding.get("ear_check_results", [])
+    windows = binding.get("occurrence_windows_seconds", [])
+    normalized_windows: list[list[float]] = []
+    if not isinstance(windows, list) or len(windows) != expected_count:
+        errors.append(f"{label} requires one occurrence window per occurrence")
+    else:
+        previous_end = -1.0
+        for index, raw_window in enumerate(windows, start=1):
+            try:
+                start, end = map(float, raw_window)
+            except (TypeError, ValueError):
+                errors.append(f"{label} occurrence window {index} is invalid")
+                continue
+            if start < 0 or end <= start or end > source_duration or start < previous_end:
+                errors.append(
+                    f"{label} occurrence window {index} must be ordered, "
+                    "non-overlapping, and inside the bound scene audio"
+                )
+            normalized_windows.append([start, end])
+            previous_end = end
+    expected_occurrences = list(range(1, expected_count + 1))
+    observed_occurrences = [
+        row.get("occurrence") for row in checks if isinstance(row, dict)
+    ] if isinstance(checks, list) else []
+    normalized_check_windows: list[list[float] | None] = []
+    if isinstance(checks, list):
+        for row in checks:
+            raw_window = row.get("window_seconds") if isinstance(row, dict) else None
+            try:
+                start, end = map(float, raw_window)
+                normalized_check_windows.append([start, end])
+            except (TypeError, ValueError):
+                normalized_check_windows.append(None)
+    if (
+        not isinstance(checks, list)
+        or len(checks) != expected_count
+        or any(not isinstance(row, dict) or row.get("result") != "pass" for row in checks)
+        or observed_occurrences != expected_occurrences
+        or normalized_check_windows != normalized_windows
+    ):
+        errors.append(
+            f"{label} requires ordered 1..N passing ear_check_results bound "
+            "to the declared occurrence windows"
+        )
+    source_audio_snapshot = artifact_snapshot(source_audio_path, repo_root)
+    ear_review_result = None
+    machine_review = None
+    if acceptance_mode == PRONUNCIATION_MACHINE_ACCEPTANCE_MODE:
+        machine_review_path = _resolve(machine_review_raw, repo_root)
+        machine_review = _validate_machine_pronunciation_review(
+            path=machine_review_path,
+            repo_root=repo_root,
+            expected_bindings={
+                "scene_slug": scene_slug,
+                "token": token,
+                "spoken_form": spoken_form,
+                "source_audio_sha256": source_audio_snapshot["sha256"],
+                "occurrence_windows_seconds": normalized_windows,
+                "occurrence_results": checks,
+            },
+            label=f"pronunciation.{token}.{scene_slug}.machine_review",
+            errors=errors,
+        )
+    else:
+        ear_review_path = _resolve(ear_review_raw, repo_root)
+        ear_review_result = _validate_independent_review(
+            path=ear_review_path,
+            repo_root=repo_root,
+            expected_schema="lecture-animation-pronunciation-review-v2",
+            expected_bindings={
+                "scene_slug": scene_slug,
+                "token": token,
+                "spoken_form": spoken_form,
+                "source_audio_sha256": source_audio_snapshot["sha256"],
+                "occurrence_windows_seconds": normalized_windows,
+                "occurrence_results": checks,
+            },
+            required_checks=(
+                "all_occurrences_heard",
+                "spoken_form_consistent",
+                "no_formal_token_read_aloud",
+            ),
+            label=f"pronunciation.{token}.{scene_slug}.ear_review",
+            errors=errors,
+            author_id=author_id,
+            expected_review_kind="pronunciation",
+        )
+    evidence.update(
+        {
+            "source_audio": source_audio_snapshot,
+            "ear_evidence": artifact_snapshot(ear_evidence_path, repo_root),
+            "occurrence_windows_seconds": normalized_windows,
+            "ear_check_results": checks,
+        }
+    )
+    if ear_review_result is not None:
+        _, authority_snapshot = ear_review_result
+        evidence["ear_review"] = artifact_snapshot(ear_review_path, repo_root)
+        evidence["ear_review_authority"] = authority_snapshot
+    if machine_review is not None:
+        evidence["machine_review"] = artifact_snapshot(
+            _resolve(machine_review_raw, repo_root),
+            repo_root,
+        )
+        evidence["acceptance_mode"] = PRONUNCIATION_MACHINE_ACCEPTANCE_MODE
+    return evidence
 
 
 def run_episode_preflight(
@@ -526,9 +1332,89 @@ def run_episode_preflight(
     readiness_stage = str(contract.get("readiness_stage", "post_tts")).strip()
     if readiness_stage not in {"pre_tts", "post_tts"}:
         errors.append("readiness_stage must be pre_tts or post_tts")
+    readiness_scope = str(contract.get("readiness_scope", "full_episode")).strip()
+    if readiness_scope not in {"full_episode", "progressive_wave"}:
+        errors.append("readiness_scope must be full_episode or progressive_wave")
     author_id = str(contract.get("author_id", "")).strip()
     if not author_id:
         errors.append("readiness contract requires author_id")
+    registry_raw = str(contract.get("pronunciation_registry_path", "")).strip()
+    canonical_registry_path = (
+        repo_root
+        / ".agents/skills/lecture-animation-pipeline/references/tts-pronunciation-registry.json"
+    )
+    registry_path = canonical_registry_path
+    if registry_raw and _resolve(registry_raw, repo_root) != canonical_registry_path.resolve():
+        errors.append(
+            "pronunciation_registry_path must name the canonical Skill registry"
+        )
+    route_id = str(contract.get("tts_route_id", "")).strip()
+    pronunciation_acceptance_mode = str(
+        contract.get("pronunciation_acceptance_mode", "human_or_independent")
+    ).strip()
+    pronunciation_acceptance_authority: dict[str, Any] | None = None
+    if pronunciation_acceptance_mode == PRONUNCIATION_MACHINE_ACCEPTANCE_MODE:
+        authority_raw = str(
+            contract.get("pronunciation_acceptance_authority_path", "")
+        ).strip()
+        if not authority_raw:
+            errors.append(
+                "ASR machine pronunciation acceptance requires "
+                "pronunciation_acceptance_authority_path"
+            )
+        else:
+            authority_path = _resolve(authority_raw, repo_root)
+            try:
+                authority = load_json(authority_path)
+            except PipelineError as exc:
+                errors.append(f"pronunciation acceptance authority is invalid: {exc}")
+                authority = {}
+            if authority.get("schema") != "lecture-animation-user-authority-v1":
+                errors.append(
+                    "pronunciation acceptance authority schema must be "
+                    "lecture-animation-user-authority-v1"
+                )
+            if authority.get("decision") not in {"authorize", "approve", "continue"}:
+                errors.append("pronunciation acceptance authority is not explicit")
+            if authority.get("episode") != _relative(episode, repo_root):
+                errors.append("pronunciation acceptance authority episode is invalid")
+            if not str(authority.get("exact_user_text", "") or "").strip():
+                errors.append("pronunciation acceptance authority text is missing")
+            if authority.get("asr_machine_acceptance") is not True:
+                errors.append(
+                    "pronunciation acceptance authority must explicitly set "
+                    "asr_machine_acceptance=true"
+                )
+            if authority.get("human_review_pending") is not True:
+                errors.append(
+                    "pronunciation acceptance authority must preserve pending human review"
+                )
+            if authority.get("quality_gates_unchanged") is not True:
+                errors.append(
+                    "pronunciation acceptance authority must preserve quality gates"
+                )
+            if authority_path.is_file():
+                pronunciation_acceptance_authority = artifact_snapshot(
+                    authority_path, repo_root
+                )
+    elif pronunciation_acceptance_mode != "human_or_independent":
+        errors.append(
+            "unknown pronunciation_acceptance_mode: "
+            + pronunciation_acceptance_mode
+        )
+    registry_required = bool(
+        readiness_stage == "pre_tts"
+        or route_id
+        or contract.get("pronunciation_map")
+        or contract.get("sensitive_tokens")
+    )
+    pronunciation_registry = (
+        _load_pronunciation_registry(registry_path, errors)
+        if registry_required
+        else {}
+    )
+    if route_id and route_id not in dict(pronunciation_registry.get("routes", {})):
+        errors.append("readiness contract names an unregistered exact tts_route_id")
     scene_results: list[dict[str, Any]] = []
     narration_by_scene: list[tuple[str, str]] = []
     pronunciation_map = {
@@ -536,11 +1422,54 @@ def run_episode_preflight(
         for key, value in dict(contract.get("pronunciation_map", {})).items()
         if str(key).strip()
     }
+    if pronunciation_map and not route_id:
+        errors.append("pronunciation evidence requires a registered exact tts_route_id")
     sensitive_found: set[str] = set()
     pronunciation_evidence: dict[str, Any] = {}
+    tts_mapping_evidence: dict[str, Any] = {}
     scene_audio_paths: dict[str, Path] = {}
     narration_lookup: dict[str, str] = {}
     scene_artifacts_lookup: dict[str, dict[str, Any]] = {}
+    scene_author_lookup: dict[str, str] = {}
+    progressive_artifact: dict[str, Any] | None = None
+    progressive_scene_order: dict[str, int] = {}
+    progressive_scene_count = 0
+
+    if readiness_scope == "progressive_wave":
+        progressive_raw = str(contract.get("progressive_production_path", "")).strip()
+        if not progressive_raw:
+            errors.append("progressive_wave readiness requires progressive_production_path")
+        else:
+            progressive_path = _resolve(progressive_raw, repo_root)
+            try:
+                progressive = load_json(progressive_path)
+                progressive_artifact = artifact_snapshot(progressive_path, repo_root)
+            except PipelineError as exc:
+                errors.append(f"progressive production tracker is invalid: {exc}")
+                progressive = {}
+            if progressive.get("schema") != "lecture-animation-progressive-production-v2":
+                errors.append(
+                    "progressive production schema must be lecture-animation-progressive-production-v2"
+                )
+            progressive_payload = dict(progressive)
+            progressive_hash = progressive_payload.pop("production_hash", None)
+            if not progressive_hash or progressive_hash != object_hash(progressive_payload):
+                errors.append("progressive production hash is invalid")
+            tracker_rows = progressive.get("scenes", [])
+            if not isinstance(tracker_rows, list) or not tracker_rows:
+                errors.append("progressive production tracker requires scenes")
+                tracker_rows = []
+            tracker_slugs = [
+                str(row.get("scene_slug", "")).strip()
+                for row in tracker_rows
+                if isinstance(row, dict) and str(row.get("scene_slug", "")).strip()
+            ]
+            if len(tracker_slugs) != len(set(tracker_slugs)):
+                errors.append("progressive production tracker contains duplicate scene slugs")
+            progressive_scene_order = {
+                slug: index for index, slug in enumerate(tracker_slugs)
+            }
+            progressive_scene_count = len(tracker_slugs)
 
     scenes = contract.get("scenes", [])
     if not isinstance(scenes, list) or not scenes:
@@ -558,6 +1487,11 @@ def run_episode_preflight(
         if slug in seen_slugs:
             errors.append(f"duplicate scene_slug in readiness contract: {slug}")
         seen_slugs.add(slug)
+        scene_author_id = str(item.get("author_id", author_id)).strip()
+        if not scene_author_id:
+            errors.append(f"{slug}: scene author_id is missing")
+            scene_author_id = author_id
+        scene_author_lookup[slug] = scene_author_id
         scene_artifacts: dict[str, Any] = {}
         scene_source_raw = str(item.get("scene_source_path", "")).strip()
         scene_source_root_raw = str(item.get("scene_source_root", "")).strip()
@@ -570,14 +1504,17 @@ def run_episode_preflight(
         if scene_source_path is None or not scene_source_path.is_file():
             errors.append(f"{slug}: scene_source_path must name the exact scene source file")
             source_visible_inventory: list[tuple[str, str]] = []
+            source_visible_records: list[dict[str, str]] = []
         elif scene_source_root is None or not scene_source_root.is_dir():
             errors.append(
                 f"{slug}: scene_source_root must name the complete scene source package"
             )
             source_visible_inventory = []
+            source_visible_records = []
         elif scene_source_path != scene_source_root and scene_source_root not in scene_source_path.parents:
             errors.append(f"{slug}: scene_source_path must live inside scene_source_root")
             source_visible_inventory = []
+            source_visible_records = []
         else:
             try:
                 scene_artifacts["scene_source"] = artifact_snapshot(
@@ -589,16 +1526,32 @@ def run_episode_preflight(
             except PipelineError as exc:
                 errors.append(f"{slug}: {exc}")
             source_visible_inventory = []
+            source_visible_records = []
             for source_file in sorted(scene_source_root.rglob("*.py")):
                 if _clean_path(source_file):
-                    source_values = _visible_text_literals(
+                    source_rows = _visible_text_records(
                         source_file,
                         f"{slug}.scene_source_root:{source_file.relative_to(scene_source_root)}",
                         errors,
                     )
                     source_relative = _relative(source_file, repo_root)
                     source_visible_inventory.extend(
-                        (value, source_relative) for value in source_values
+                        (row["payload"], source_relative) for row in source_rows
+                    )
+                    source_visible_records.extend(
+                        {
+                            "constructor": row["constructor"],
+                            "payload": row["payload"],
+                            "source_path": source_relative,
+                        }
+                        for row in source_rows
+                    )
+            for value, source_relative in source_visible_inventory:
+                violation = presentation_boundary_violation(value)
+                if violation:
+                    errors.append(
+                        f"{slug}: visible text {value!r} violates the learner-facing "
+                        f"presentation boundary in {source_relative}: {violation}"
                     )
         narration = ""
         narration_path_raw = str(item.get("narration_path", "")).strip()
@@ -617,6 +1570,55 @@ def run_episode_preflight(
         narration_by_scene.append((slug, narration))
         narration_lookup[slug] = narration
         sensitive_found.update(_pronunciation_tokens(narration, contract))
+
+        tts_input_raw = str(item.get("tts_input_path", "")).strip()
+        tts_input_path: Path | None = None
+        requires_compiled_tts_input = (
+            readiness_stage == "pre_tts" or bool(route_id) or bool(pronunciation_map)
+        )
+        if requires_compiled_tts_input and not tts_input_raw:
+            errors.append(f"{slug}: readiness requires tts_input_path")
+        elif tts_input_raw:
+            tts_input_path = _resolve(tts_input_raw, repo_root)
+            if not tts_input_path.is_file():
+                errors.append(f"{slug}: tts_input_path does not exist: {tts_input_raw}")
+                tts_input_path = None
+            else:
+                scene_artifacts["tts_input"] = artifact_snapshot(
+                    tts_input_path, repo_root
+                )
+        mapping_raw = str(item.get("tts_input_mapping_path", "")).strip()
+        if tts_input_path is not None:
+            if not mapping_raw:
+                errors.append(f"{slug}: tts_input_mapping_path is required with tts_input_path")
+            elif not narration_path_raw:
+                errors.append(f"{slug}: exact TTS mapping requires narration_path")
+            else:
+                mapping_path = _resolve(mapping_raw, repo_root)
+                if not mapping_path.is_file():
+                    errors.append(
+                        f"{slug}: tts_input_mapping_path does not exist: {mapping_raw}"
+                    )
+                else:
+                    mapping_evidence = _validate_tts_input_mapping(
+                        mapping_path=mapping_path,
+                        formal_script_path=_resolve(narration_path_raw, repo_root),
+                        tts_input_path=tts_input_path,
+                        scene_slug=slug,
+                        route_id=route_id,
+                        pronunciation_registry=pronunciation_registry,
+                        repo_root=repo_root,
+                        errors=errors,
+                    )
+                    if mapping_evidence is not None:
+                        tts_mapping_evidence[slug] = mapping_evidence
+                        sensitive_found.update(
+                            row["token_key"]
+                            for row in mapping_evidence["occurrences"]
+                        )
+                        scene_artifacts["tts_input_mapping"] = mapping_evidence[
+                            "mapping"
+                        ]
 
         duration = float(item.get("duration_seconds", 0.0) or 0.0)
         audio_raw = str(item.get("audio_path", "")).strip()
@@ -678,7 +1680,7 @@ def run_episode_preflight(
                     ),
                     label=f"{slug}.novice_bridge_review",
                     errors=errors,
-                    author_id=author_id,
+                    author_id=scene_author_id,
                     expected_review_kind="novice_bridge",
                 )
                 if review_result is not None:
@@ -726,11 +1728,58 @@ def run_episode_preflight(
                 f"{slug}: screen_text_count {declared_screen_text_count} does not match "
                 f"evidence inventory count {screen_text_count}"
             )
-        screen_text_budget = int(item.get("screen_text_budget", contract.get("screen_text_budget", 12)) or 12)
+        default_screen_text_budget = int(contract.get("screen_text_budget", 12) or 12)
+        screen_text_budget = int(
+            item.get("screen_text_budget", default_screen_text_budget)
+            or default_screen_text_budget
+        )
+        if screen_text_budget > default_screen_text_budget:
+            exception = item.get("screen_text_budget_exception")
+            duration_bound_cap = max(
+                default_screen_text_budget,
+                int(duration / 5.0) + 1,
+            )
+            if (
+                not isinstance(exception, dict)
+                or len(str(exception.get("reason", "")).strip()) < 24
+                or len(str(exception.get("transient_text_plan", "")).strip()) < 16
+                or len(str(exception.get("semantic_contract_path", "")).strip()) < 8
+            ):
+                errors.append(
+                    f"{slug}: an increased screen_text_budget requires a reason, "
+                    "transient_text_plan, and semantic_contract_path"
+                )
+            if screen_text_budget > duration_bound_cap:
+                errors.append(
+                    f"{slug}: screen_text_budget {screen_text_budget} exceeds the "
+                    f"duration-bound cap {duration_bound_cap}"
+                )
         if screen_text_count > screen_text_budget:
             errors.append(
                 f"{slug}: screen text count {screen_text_count} exceeds budget {screen_text_budget}"
             )
+        if readiness_stage == "post_tts":
+            semantics_raw = str(
+                item.get("screen_text_semantic_contract_path", "")
+            ).strip()
+            if not semantics_raw:
+                errors.append(
+                    f"{slug}: post_tts readiness requires "
+                    "screen_text_semantic_contract_path"
+                )
+            else:
+                semantics_path = _resolve(semantics_raw, repo_root)
+                semantics = _validate_episode_screen_text_semantics(
+                    path=semantics_path,
+                    repo_root=repo_root,
+                    source_records=source_visible_records,
+                    slug=slug,
+                    errors=errors,
+                )
+                if semantics is not None:
+                    scene_artifacts["screen_text_semantic_contract"] = (
+                        artifact_snapshot(semantics_path, repo_root)
+                    )
         connector_count = _evidence_inventory_count(
             rows=item.get("summary_connector_inventory"),
             repo_root=repo_root,
@@ -789,6 +1838,7 @@ def run_episode_preflight(
         scene_results.append(
             {
                 "scene_slug": slug,
+                "author_id": scene_author_id,
                 "duration_seconds": round(duration, 3),
                 "average_tokens_per_second": round(average_pace, 3) if average_pace is not None else None,
                 "rolling_tokens_per_second": (
@@ -802,8 +1852,40 @@ def run_episode_preflight(
         )
         scene_artifacts_lookup[slug] = scene_artifacts
 
+    wave_scene_slugs = [slug for slug, _ in narration_by_scene]
+    if readiness_scope == "progressive_wave":
+        declared_wave = [
+            str(value).strip()
+            for value in contract.get("wave_scene_slugs", [])
+            if str(value).strip()
+        ]
+        if declared_wave != wave_scene_slugs:
+            errors.append(
+                "progressive_wave wave_scene_slugs must exactly match scenes in order"
+            )
+        missing_from_tracker = sorted(
+            set(wave_scene_slugs) - set(progressive_scene_order)
+        )
+        if missing_from_tracker:
+            errors.append(
+                "progressive wave scenes are missing from progressive production: "
+                + ", ".join(missing_from_tracker)
+            )
+        ordered_positions = [
+            progressive_scene_order[slug]
+            for slug in wave_scene_slugs
+            if slug in progressive_scene_order
+        ]
+        if ordered_positions != sorted(ordered_positions):
+            errors.append("progressive wave scenes must follow episode scene order")
+
     duplicate_boundaries: list[dict[str, Any]] = []
     for (left_slug, left), (right_slug, right) in zip(narration_by_scene, narration_by_scene[1:]):
+        if readiness_scope == "progressive_wave":
+            left_index = progressive_scene_order.get(left_slug)
+            right_index = progressive_scene_order.get(right_slug)
+            if left_index is None or right_index != left_index + 1:
+                continue
         duplicates = _boundary_duplicates(left, right)
         if duplicates:
             duplicate_boundaries.append(
@@ -812,196 +1894,170 @@ def run_episode_preflight(
             errors.append(f"{left_slug}->{right_slug}: duplicate narration at scene boundary")
 
     all_narration = "\n".join(value for _, value in narration_by_scene)
-    expected_ending = _normalized_clause(
-        str(contract.get("fixed_ending", DEFAULT_FIXED_ENDING)).strip()
-    )
-    ending_count = _normalized_clause(all_narration).count(expected_ending) if expected_ending else 0
+    fixed_ending_raw = str(contract.get("fixed_ending", DEFAULT_FIXED_ENDING)).strip()
+    fixed_ending_contract = contract.get("fixed_ending_contract", {})
+    if not fixed_ending_raw:
+        errors.append("readiness contract requires an explicit learner-facing fixed_ending")
+    if (
+        not isinstance(fixed_ending_contract, dict)
+        or fixed_ending_contract.get("role") not in {
+            "mathematical_conclusion",
+            "learner_facing_math_question",
+        }
+        or len(str(fixed_ending_contract.get("learner_job", "")).strip()) < 16
+        or len(str(fixed_ending_contract.get("math_anchor", "")).strip()) < 4
+        or fixed_ending_contract.get("externalizes_production_intent") is not False
+    ):
+        errors.append(
+            "fixed_ending_contract must bind a learner-facing mathematical role, "
+            "learner_job, math_anchor, and externalizes_production_intent=false"
+        )
+    ending_violation = presentation_boundary_violation(fixed_ending_raw)
+    if ending_violation:
+        errors.append(
+            f"fixed ending violates the learner-facing presentation boundary: {ending_violation}"
+        )
+    fixed_ending_source_artifact: dict[str, Any] | None = None
+    ending_text = all_narration
+    if readiness_scope == "progressive_wave":
+        fixed_ending_source_raw = str(
+            contract.get("fixed_ending_source_path", "")
+        ).strip()
+        if not fixed_ending_source_raw:
+            errors.append("progressive_wave readiness requires fixed_ending_source_path")
+            ending_text = ""
+        else:
+            fixed_ending_source_path = _resolve(fixed_ending_source_raw, repo_root)
+            try:
+                fixed_ending_source_path.resolve().relative_to(episode.resolve())
+            except ValueError:
+                errors.append("fixed_ending_source_path must live inside the episode")
+            if not fixed_ending_source_path.is_file():
+                errors.append("fixed_ending_source_path does not exist")
+                ending_text = ""
+            else:
+                ending_text = fixed_ending_source_path.read_text(
+                    encoding="utf-8", errors="ignore"
+                )
+                fixed_ending_source_artifact = artifact_snapshot(
+                    fixed_ending_source_path, repo_root
+                )
+    expected_ending = _normalized_clause(fixed_ending_raw)
+    ending_count = _normalized_clause(ending_text).count(expected_ending) if expected_ending else 0
     if ending_count != 1:
         errors.append(f"fixed ending must appear exactly once; observed {ending_count}")
 
-    missing_pronunciations = sorted(
-        token for token in sensitive_found if token.lower() not in pronunciation_map
+    registered_tokens = {
+        str(token).casefold()
+        for token in dict(pronunciation_registry.get("tokens", {}))
+    }
+    unregistered_sensitive = sorted(
+        token for token in sensitive_found if token.casefold() not in registered_tokens
+    )
+    if unregistered_sensitive:
+        errors.append(
+            "canonical TTS registry is missing sensitive tokens: "
+            + ", ".join(unregistered_sensitive)
+        )
+    missing_pronunciations = (
+        []
+        if readiness_stage == "pre_tts"
+        else sorted(
+            token for token in sensitive_found if token.lower() not in pronunciation_map
+        )
     )
     if missing_pronunciations:
         errors.append(
             "pronunciation map is missing sensitive tokens: " + ", ".join(missing_pronunciations)
         )
-    for token in sorted(sensitive_found - set(missing_pronunciations)):
+    for token in sorted(
+        token
+        for token in sensitive_found - set(missing_pronunciations)
+        if token.lower() in pronunciation_map
+    ):
         mapping = pronunciation_map.get(token.lower())
         if not isinstance(mapping, dict):
             errors.append(f"pronunciation mapping for {token} must be an evidence-bound object")
             continue
-        spoken_form = str(mapping.get("spoken_form", "")).strip()
-        tts_input_raw = str(mapping.get("tts_input_path", "")).strip()
-        ear_evidence_raw = str(mapping.get("ear_evidence_path", "")).strip()
-        ear_review_raw = str(mapping.get("ear_review_path", "")).strip()
-        scene_slug = str(mapping.get("scene_slug", "")).strip()
-        source_audio_raw = str(mapping.get("source_audio_path", "")).strip()
-        if not spoken_form or not tts_input_raw or not scene_slug:
-            errors.append(
-                f"pronunciation mapping for {token} requires spoken_form, scene_slug, "
-                "and tts_input_path"
+        scene_counts = {
+            scene_slug: _canonical_formal_occurrence_count(
+                narration,
+                token,
+                pronunciation_registry,
             )
-            continue
-        if scene_slug not in narration_lookup:
-            errors.append(
-                f"pronunciation mapping for {token} names unknown scene {scene_slug}"
+            for scene_slug, narration in narration_lookup.items()
+            if _canonical_formal_occurrence_count(
+                narration,
+                token,
+                pronunciation_registry,
             )
-            continue
-        formal_count = _formal_occurrence_count(narration_lookup[scene_slug], token)
-        episode_formal_count = _formal_occurrence_count(all_narration, token)
-        if formal_count != episode_formal_count:
-            errors.append(
-                f"pronunciation mapping for {token} must cover every occurrence in one bound scene; "
-                f"{scene_slug} has {formal_count}, episode has {episode_formal_count}"
-            )
-        expected_count = int(mapping.get("occurrences", formal_count) or 0)
-        if expected_count != formal_count or expected_count <= 0:
-            errors.append(
-                f"pronunciation mapping for {token} binds {expected_count} occurrences; narration has {formal_count}"
-            )
-        tts_input_path = _resolve(tts_input_raw, repo_root)
-        if not tts_input_path.is_file():
-            errors.append(f"TTS input for {token} does not exist")
-            continue
-        tts_input = tts_input_path.read_text(encoding="utf-8", errors="ignore")
-        if tts_input.count(spoken_form) != expected_count:
-            errors.append(
-                f"TTS input for {token} must contain spoken form {spoken_form!r} exactly {expected_count} times"
-            )
-        if _formal_occurrence_count(tts_input, token):
-            errors.append(f"TTS input still contains unresolved formal token {token}")
-        if readiness_stage == "pre_tts":
-            pronunciation_evidence[token] = {
-                "formal_occurrences": formal_count,
-                "spoken_form": spoken_form,
-                "scene_slug": scene_slug,
-                "tts_input": artifact_snapshot(tts_input_path, repo_root),
-                "review_status": "pending_post_tts",
-            }
-            continue
-        if not ear_evidence_raw or not source_audio_raw or not ear_review_raw:
-            errors.append(
-                f"post_tts pronunciation mapping for {token} requires source_audio_path, "
-                "ear_evidence_path, and ear_review_path"
-            )
-            continue
-        source_audio_path = _resolve(source_audio_raw, repo_root)
-        ear_evidence_path = _resolve(ear_evidence_raw, repo_root)
-        bound_scene_audio = scene_audio_paths.get(scene_slug)
-        if (
-            not tts_input_path.is_file()
-            or not source_audio_path.is_file()
-            or not ear_evidence_path.is_file()
-        ):
-            errors.append(f"pronunciation evidence files for {token} do not all exist")
-            continue
-        if bound_scene_audio is None or source_audio_path.resolve() != bound_scene_audio.resolve():
-            errors.append(
-                f"pronunciation mapping for {token} source_audio_path must equal the bound "
-                f"scene audio_path"
-            )
-        if ear_evidence_path.resolve() != source_audio_path.resolve():
-            errors.append(
-                f"pronunciation mapping for {token} ear_evidence_path must be the bound "
-                "final scene audio; shorter clips are review aids, not gate evidence"
-            )
-        try:
-            source_duration = _wav_duration(source_audio_path)
-            _wav_duration(ear_evidence_path)
-        except (wave.Error, EOFError) as exc:
-            errors.append(f"pronunciation evidence for {token} is not a decodable WAV: {exc}")
-            source_duration = 0.0
-        checks = mapping.get("ear_check_results", [])
-        windows = mapping.get("occurrence_windows_seconds", [])
-        normalized_windows: list[list[float]] = []
-        if not isinstance(windows, list) or len(windows) != expected_count:
-            errors.append(
-                f"pronunciation mapping for {token} requires one occurrence window per occurrence"
-            )
-        else:
-            previous_end = -1.0
-            for index, raw_window in enumerate(windows, start=1):
-                try:
-                    start, end = map(float, raw_window)
-                except (TypeError, ValueError):
-                    errors.append(
-                        f"pronunciation mapping for {token} occurrence window {index} is invalid"
-                    )
-                    continue
-                if start < 0 or end <= start or end > source_duration or start < previous_end:
-                    errors.append(
-                        f"pronunciation mapping for {token} occurrence window {index} "
-                        "must be ordered, non-overlapping, and inside the bound scene audio"
-                    )
-                normalized_windows.append([start, end])
-                previous_end = end
-        expected_occurrences = list(range(1, expected_count + 1))
-        observed_occurrences = [
-            row.get("occurrence") for row in checks if isinstance(row, dict)
-        ] if isinstance(checks, list) else []
-        normalized_check_windows: list[list[float] | None] = []
-        if isinstance(checks, list):
-            for row in checks:
-                raw_window = row.get("window_seconds") if isinstance(row, dict) else None
-                try:
-                    start, end = map(float, raw_window)
-                    normalized_check_windows.append([start, end])
-                except (TypeError, ValueError):
-                    normalized_check_windows.append(None)
-        if (
-            not isinstance(checks, list)
-            or len(checks) != expected_count
-            or any(not isinstance(row, dict) or row.get("result") != "pass" for row in checks)
-            or observed_occurrences != expected_occurrences
-            or normalized_check_windows != normalized_windows
-        ):
-            errors.append(
-                f"pronunciation mapping for {token} requires ordered 1..N passing "
-                "ear_check_results bound to the declared occurrence windows"
-            )
-        source_audio_snapshot = artifact_snapshot(source_audio_path, repo_root)
-        ear_review_path = _resolve(ear_review_raw, repo_root)
-        ear_review_result = _validate_independent_review(
-            path=ear_review_path,
-            repo_root=repo_root,
-            expected_schema="lecture-animation-pronunciation-review-v2",
-            expected_bindings={
-                "scene_slug": scene_slug,
-                "token": token,
-                "spoken_form": spoken_form,
-                "source_audio_sha256": source_audio_snapshot["sha256"],
-                "occurrence_windows_seconds": normalized_windows,
-                "occurrence_results": checks,
-            },
-            required_checks=(
-                "all_occurrences_heard",
-                "spoken_form_consistent",
-                "no_formal_token_read_aloud",
-            ),
-            label=f"pronunciation.{token}.ear_review",
-            errors=errors,
-            author_id=author_id,
-            expected_review_kind="pronunciation",
-        )
-        pronunciation_evidence[token] = {
-            "formal_occurrences": formal_count,
-            "spoken_form": spoken_form,
-            "scene_slug": scene_slug,
-            "tts_input": artifact_snapshot(tts_input_path, repo_root),
-            "source_audio": source_audio_snapshot,
-            "ear_evidence": artifact_snapshot(ear_evidence_path, repo_root),
-            "occurrence_windows_seconds": normalized_windows,
-            "ear_check_results": checks,
+            > 0
         }
-        if ear_review_result is not None:
-            _, authority_snapshot = ear_review_result
-            pronunciation_evidence[token]["ear_review"] = artifact_snapshot(
-                ear_review_path, repo_root
+        raw_bindings = mapping.get("bindings")
+        if raw_bindings is None:
+            bindings: list[Any] = [mapping]
+        elif not isinstance(raw_bindings, list) or not raw_bindings:
+            errors.append(
+                f"pronunciation mapping for {token}.bindings must be a non-empty list"
             )
-            pronunciation_evidence[token][
-                "ear_review_authority"
-            ] = authority_snapshot
+            continue
+        else:
+            bindings = raw_bindings
+        if len(scene_counts) > 1 and raw_bindings is None:
+            errors.append(
+                f"pronunciation mapping for {token} spans multiple scenes and requires "
+                "one evidence object per scene in bindings"
+            )
+        bound_slugs = [
+            str(binding.get("scene_slug", "")).strip()
+            for binding in bindings
+            if isinstance(binding, dict)
+        ]
+        if len(bound_slugs) != len(set(bound_slugs)):
+            errors.append(
+                f"pronunciation mapping for {token} contains duplicate scene bindings"
+            )
+        missing_scene_bindings = sorted(set(scene_counts) - set(bound_slugs))
+        extra_scene_bindings = sorted(set(bound_slugs) - set(scene_counts))
+        if missing_scene_bindings:
+            errors.append(
+                f"pronunciation mapping for {token} is missing scene bindings: "
+                + ", ".join(missing_scene_bindings)
+            )
+        if extra_scene_bindings:
+            errors.append(
+                f"pronunciation mapping for {token} contains scene bindings without "
+                "formal occurrences: " + ", ".join(extra_scene_bindings)
+            )
+        binding_evidence: list[dict[str, Any]] = []
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                errors.append(
+                    f"pronunciation mapping for {token} contains a non-object binding"
+                )
+                continue
+            scene_slug = str(binding.get("scene_slug", "")).strip()
+            evidence = _validate_pronunciation_binding(
+                token=token,
+                binding=binding,
+                formal_count=scene_counts.get(scene_slug, 0),
+                readiness_stage=readiness_stage,
+                repo_root=repo_root,
+                narration_lookup=narration_lookup,
+                scene_audio_paths=scene_audio_paths,
+                author_id=scene_author_lookup.get(scene_slug, author_id),
+                route_id=route_id,
+                pronunciation_registry=pronunciation_registry,
+                exact_mapping_evidence=tts_mapping_evidence.get(scene_slug),
+                acceptance_mode=pronunciation_acceptance_mode,
+                errors=errors,
+            )
+            if evidence is not None:
+                binding_evidence.append(evidence)
+        pronunciation_evidence[token] = {
+            "formal_occurrences": sum(scene_counts.values()),
+            "bindings": binding_evidence,
+        }
 
     required_bridges = {
         str(value).strip()
@@ -1090,6 +2146,7 @@ def run_episode_preflight(
         "created_at": utc_now(),
         "episode": _relative(episode, repo_root),
         "readiness_stage": readiness_stage,
+        "readiness_scope": readiness_scope,
         "author_id": author_id,
         "contract_hash": object_hash(contract),
         "status": "blocked" if errors else ("warn" if warnings else "pass"),
@@ -1100,10 +2157,26 @@ def run_episode_preflight(
         "pronunciation_tokens_found": sorted(sensitive_found),
         "pronunciation_tokens_mapped": sorted(pronunciation_map),
         "pronunciation_evidence": pronunciation_evidence,
+        "pronunciation_acceptance_mode": pronunciation_acceptance_mode,
+        "pronunciation_acceptance_authority": pronunciation_acceptance_authority,
+        "tts_route_id": route_id,
+        "pronunciation_registry": (
+            artifact_snapshot(registry_path, repo_root)
+            if pronunciation_registry and route_id
+            else None
+        ),
+        "tts_input_mapping_evidence": tts_mapping_evidence,
         "fixed_ending_count": ending_count,
+        "fixed_ending_source": fixed_ending_source_artifact,
+        "progressive_production": progressive_artifact,
+        "planned_scene_count": progressive_scene_count if readiness_scope == "progressive_wave" else len(scene_results),
+        "wave_scene_count": len(scene_results),
         "required_concept_bridges": sorted(required_bridges),
         "supplied_concept_bridges": sorted(supplied_bridges),
     }
+    evidence_payload = dict(result)
+    evidence_payload.pop("created_at", None)
+    result["readiness_evidence_hash"] = object_hash(evidence_payload)
     result["receipt_hash"] = object_hash(result)
     return result
 
@@ -1141,7 +2214,32 @@ def validate_episode_readiness_receipt(
         or receipt.get("episode") != _relative(episode, repo_root)
     ):
         raise PipelineError("episode readiness receipt is invalid or blocked")
+    receipt_evidence = dict(receipt)
+    receipt_evidence.pop("created_at", None)
+    receipt_evidence.pop("receipt_hash", None)
+    stored_evidence_hash = receipt_evidence.pop("readiness_evidence_hash", None)
+    receipt_evidence.pop("contract_artifact", None)
+    if not stored_evidence_hash or stored_evidence_hash != object_hash(receipt_evidence):
+        raise PipelineError(
+            "episode readiness receipt payload does not match its readiness evidence hash"
+        )
     artifacts: list[dict[str, Any]] = []
+
+    def collect_artifacts(value: Any) -> None:
+        if isinstance(value, dict):
+            if {
+                "path",
+                "kind",
+                "sha256",
+            }.issubset(value):
+                artifacts.append(value)
+                return
+            for child in value.values():
+                collect_artifacts(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_artifacts(child)
+
     if not isinstance(receipt.get("contract_artifact"), dict):
         raise PipelineError("episode readiness receipt is missing its contract artifact binding")
     artifacts.append(receipt["contract_artifact"])
@@ -1157,20 +2255,10 @@ def validate_episode_readiness_receipt(
             for value in dict(scene.get("artifacts", {})).values()
             if isinstance(value, dict)
         )
-    for evidence in dict(receipt.get("pronunciation_evidence", {})).values():
-        if not isinstance(evidence, dict):
-            continue
-        artifacts.extend(
-            evidence[key]
-            for key in (
-                "tts_input",
-                "source_audio",
-                "ear_evidence",
-                "ear_review",
-                "ear_review_authority",
-            )
-            if isinstance(evidence.get(key), dict)
-        )
+    collect_artifacts(receipt.get("pronunciation_registry"))
+    collect_artifacts(receipt.get("pronunciation_acceptance_authority"))
+    collect_artifacts(receipt.get("tts_input_mapping_evidence", {}))
+    collect_artifacts(receipt.get("pronunciation_evidence", {}))
     for artifact in artifacts:
         path = _resolve(str(artifact.get("path", "")), repo_root)
         current = artifact_snapshot(path, repo_root)
@@ -1178,6 +2266,13 @@ def validate_episode_readiness_receipt(
             raise PipelineError(
                 f"episode readiness receipt is stale for {artifact.get('path')}"
             )
+    contract_path = _resolve(str(receipt["contract_artifact"].get("path", "")), repo_root)
+    contract = _load_contract(contract_path)
+    current = run_episode_preflight(repo_root, episode, contract)
+    if current.get("readiness_evidence_hash") != receipt.get("readiness_evidence_hash"):
+        raise PipelineError(
+            "episode readiness receipt does not match a fresh canonical preflight"
+        )
     scene_slugs = {
         str(item.get("scene_slug"))
         for item in receipt.get("scenes", [])
@@ -1443,6 +2538,7 @@ def run_portability_audit(
 
     result = {
         "schema": "lecture-animation-portability-audit-v2",
+        "compiler": "pipeline_v2.audit-portability",
         "created_at": utc_now(),
         "episode": _relative(episode, repo_root),
         "status": "blocked" if errors else "pass",

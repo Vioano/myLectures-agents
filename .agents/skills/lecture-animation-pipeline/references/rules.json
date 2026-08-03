@@ -1,6 +1,6 @@
 {
   "schema": "lecture-animation-rules-v2",
-  "version": 6,
+  "version": 8,
   "rules": [
     {
       "rule_id": "CORE-001",
@@ -100,20 +100,20 @@
     },
     {
       "rule_id": "TEXT-003",
-      "title": "Screen text has a unique non-narrative visual job",
+      "title": "Every screen-text payload proves why it must exist",
       "severity": "blocker",
       "status": "active",
       "owners": ["author", "reviewer"],
       "check_mode": "machine",
       "applies_when": ["always"],
-      "requirement": "Every static screen-text payload is inventoried as a formula, object label, axis or tick, parameter value, scene title, comparison label, or transient question with one unique visual job. Explanatory prose that repeats narration or externalizes production intent is forbidden.",
+      "requirement": "Every literal learner-facing text payload, including project wrappers such as cn_text, is extracted from the hash-bound final source. Its contract must state a unique visual job, why the text is necessary, what learner-visible failure removal would cause, which mathematical object or learner question anchors it, and the exact condition that clears it. Post-TTS episode readiness must bind a machine-readable semantic contract whose constructor, payload, and count inventory exactly matches the final source; missing, stale, extra, or self-exempted text blocks candidate rendering and handoff. Explanatory prose that repeats narration, announces a recap, describes the episode or production process, or substitutes text for animation is forbidden regardless of the author's self-declared flags.",
       "evidence_fields": ["timestamp_seconds", "artifact_key", "object_id", "observation", "novice_impact"],
       "source_patterns": ["narration_duplicated_as_screen_prose", "presentation_boundary_failure", "creator_intent_text_substitutes_for_animation"]
     },
     {
       "rule_id": "VIS-001",
       "title": "Every fill and connector has mathematical ownership",
-      "severity": "major",
+      "severity": "blocker",
       "status": "active",
       "owners": ["author", "reviewer"],
       "check_mode": "hybrid",
@@ -128,16 +128,16 @@
       "severity": "major",
       "status": "active",
       "owners": ["author", "reviewer"],
-      "check_mode": "reviewer",
+      "check_mode": "hybrid",
       "applies_when": ["always"],
-      "requirement": "The active object changes at the pace of the explanation, attention follows a declared route, and local refinement adds inspectable mathematics without weakening the global hierarchy.",
+      "requirement": "The active mathematical object changes at the pace of the spoken explanation and each clause's named object, relation, or operation receives a word-locked visual response. A spoken reasoning window may not sit over a long static composition unless the contract declares a short reading hold with a learner task. Full-episode frame-difference or equivalent motion audit flags low-motion spoken windows for novice review.",
       "evidence_fields": ["timestamp_seconds", "artifact_key", "object_id", "observation", "novice_impact"],
-      "source_patterns": ["ppt_like_static_derivation", "dead_formula_lane_at_climax", "insufficient_visual_guidance"]
+      "source_patterns": ["ppt_like_static_derivation", "dead_formula_lane_at_climax", "insufficient_visual_guidance", "spoken_reasoning_over_static_frame", "word_locked_motion_missing"]
     },
     {
       "rule_id": "VIS-003",
       "title": "Cross-region relations use disciplined visual routing",
-      "severity": "major",
+      "severity": "blocker",
       "status": "active",
       "owners": ["author", "reviewer"],
       "check_mode": "hybrid",
@@ -151,12 +151,36 @@
       "title": "No production intent on the student-facing stage",
       "severity": "major",
       "status": "active",
-      "owners": ["author"],
-      "check_mode": "reviewer",
+      "owners": ["author", "reviewer"],
+      "check_mode": "machine",
       "applies_when": ["always"],
-      "requirement": "Visible text explains mathematical objects only, never pipeline choices, review policy, creator intent, or engineering workarounds.",
+      "requirement": "Before source authoring, every proposed learner-facing literal must pass the v1 preregistration sequence: neutral risk disclosure, a two-sided keep versus remove-or-replace reflection, and formal registration. A deterministic source scan still rejects text that describes the episode, recap operation, next-video scheduling, creator identity, production process, review policy, or engineering workaround. The fixed ending must itself be a mathematical conclusion or learner-facing mathematical question. Author declarations such as externalizes_production_intent=false never override the formal or source-level verdict.",
       "evidence_fields": ["timestamp_seconds", "artifact_key", "object_id", "observation", "novice_impact"],
-      "source_patterns": ["presentation_boundary_failure"]
+      "source_patterns": ["presentation_boundary_failure", "screen_text_preregistration_missing", "screen_text_reflection_missing", "episode_recap_process_title", "creator_persona_outro", "next_episode_teaser_on_stage"]
+    },
+    {
+      "rule_id": "FINAL-001",
+      "title": "Spoken keyboard-player identity requires the Sumino carrier",
+      "severity": "blocker",
+      "status": "active",
+      "owners": ["author", "gate", "reviewer"],
+      "check_mode": "machine",
+      "applies_when": ["finalization"],
+      "requirement": "If final word alignment contains 我是结束乐队的键盘手, the finalization manifest contains exactly one mandatory sumino overlay that begins no later than the aligned 我 and ends no earlier than 键盘手. The action is not fixed to talking; it must be nonempty, registered in the bound Sumino asset metadata, semantically appropriate for the narration, and backed by the same validated clip and asset-root hashes. The spoken identity and farewell remain absent from burned subtitles and all screen text. Protected rectangle, before/on/late evidence, and final-vs-baseline pixel difference are required.",
+      "evidence_fields": ["timestamp_seconds", "artifact_key", "object_id", "observation", "novice_impact"],
+      "source_patterns": ["series_signature_missing_sumino_identity_sprite", "creator_persona_outro"]
+    },
+    {
+      "rule_id": "FINAL-002",
+      "title": "Series characters follow a restrained semantic rhythm",
+      "severity": "major",
+      "status": "active",
+      "owners": ["author", "gate", "reviewer"],
+      "check_mode": "hybrid",
+      "applies_when": ["finalization"],
+      "requirement": "Editorial character overlays are word-locked supporting reactions with character, action, semantic anchor, protected rectangle, and clip/asset hashes. Confused, aha, and thinking roles are present or each has a collision-evidence omission. Multiple approved characters and one disjoint two-character reaction are allowed; more than twelve overlay records require a hash-bound human-approved density override. Characters may not cover subtitles, formulas, axes, or active diagrams or become the primary focal object while new mathematics lands. Directional gestures additionally bind intrinsic asset direction, mirror state, derived screen direction, and a mathematical target rectangle; exact on/late frames must show the gesture pointing inward toward that target.",
+      "evidence_fields": ["timestamp_seconds", "artifact_key", "object_id", "observation", "novice_impact"],
+      "source_patterns": ["series_sprite_semantic_rhythm_missing", "series_sprite_overcrowds_math", "series_sprite_collision", "sprite_gesture_points_away_from_mathematical_target"]
     },
     {
       "rule_id": "FORM-001",
@@ -339,6 +363,30 @@
       "source_patterns": ["coarse_timeline_visual_alignment", "subtitle_math_homophone_drift", "reader_srt_used_as_animation_timing_contract", "unedited_tts_breaths_and_sentence_gaps"]
     },
     {
+      "rule_id": "AUDIO-002",
+      "title": "Pronunciation inputs are compiled, route-bound, and fail closed",
+      "severity": "blocker",
+      "status": "active",
+      "owners": ["author", "reviewer", "gate"],
+      "check_mode": "hybrid",
+      "applies_when": ["tts", "asr", "audio_alignment", "authoring", "render", "finalization"],
+      "requirement": "Keep formal mathematical notation immutable. Compile every TTS input from the formal script through the canonical pronunciation registry and an ordered, non-overlapping character-span mapping. The compiler and preflight reject forbidden or unregistered spoken forms, missing sensitive occurrences, unregistered text edits, mismatched route fingerprints, and stale registry, mapping, input, audio, review, or authority hashes. A candidate spelling is never a listening pass; post-TTS readiness requires ordered per-occurrence review against the exact final scene WAV. A prior scene, route, or WAV cannot authorize a new occurrence. Bottom-level synthesis output without a fresh canonical receipt cannot advance narration QC, scene production, authoring, rendering, or finalization.",
+      "evidence_fields": ["formal_script", "tts_input_mapping", "tts_input", "pronunciation_registry", "route_fingerprint", "final_scene_wav", "raw_asr", "alignment", "occurrence_windows", "listening_review", "review_authority", "readiness_receipt"],
+      "source_patterns": ["unverified_global_transliteration", "tts_pronunciation_registry_bypass", "compound_math_token_phonetic_collapse", "operator_name_abbreviated_phonetically_without_audition", "math_term_homophone_semantic_swap", "audio_gate_bypass_via_unbound_or_self_asserted_evidence", "stale_listening_evidence_replay", "phonetic_surface_masquerades_as_formal_literal"]
+    },
+    {
+      "rule_id": "PLAN-001",
+      "title": "Exact-word visual plan passes before animation production",
+      "severity": "blocker",
+      "status": "active",
+      "owners": ["author", "reviewer", "gate"],
+      "check_mode": "hybrid",
+      "applies_when": ["always"],
+      "requirement": "After exact listened audio and word alignment, the complete detailed visual plan must independently pass novice causality, mathematical truth, stage choreography, visual composition, and audio-handoff review before animation source or render work begins. Optional Keynote, wireframe, or keyframe probes are supporting evidence only and cannot replace any plan field or transition check.",
+      "evidence_fields": ["artifact_key", "observation", "novice_impact"],
+      "source_patterns": ["animation_started_before_independent_word_timed_visual_plan_review", "animation_authored_before_final_word_timing", "keyframe_probe_substituted_for_complete_visual_plan"]
+    },
+    {
       "rule_id": "ART-001",
       "title": "Review evidence is artifact-bound",
       "severity": "blocker",
@@ -349,6 +397,18 @@
       "requirement": "The review submission references the manifest hash for the exact source, timeline, audio, SRT, audit, QC, and review MP4 it judged.",
       "evidence_fields": ["artifact_key", "observation"],
       "source_patterns": ["stale_review_inheritance", "contract_evidence_circular"]
+    },
+    {
+      "rule_id": "ART-002",
+      "title": "Final review evidence covers the complete media stream",
+      "severity": "blocker",
+      "status": "active",
+      "owners": ["gate", "reviewer"],
+      "check_mode": "machine",
+      "applies_when": ["always"],
+      "requirement": "Before any full-episode motion, text, layout, contact-sheet, or acceptance result can pass, decoded video and audio endpoints must be measured independently, the video must reach the last aligned word within one output frame, the video/audio endpoints must agree within one output frame, decoded frames must exist on both sides of every promoted scene boundary, and every overview or boundary QC frame must be extracted from the exact final episode bytes. Decoder EOF before the audited narration window is a blocker, never an implicit zero-finding pass.",
+      "evidence_fields": ["timestamp_seconds", "artifact_key", "object_id", "observation", "novice_impact"],
+      "source_patterns": ["final_assembly_video_stream_truncated_after_scene", "motion_audit_silent_eof_false_pass", "contact_sheet_samples_standalone_instead_of_exact_episode"]
     },
     {
       "rule_id": "REVIEW-001",

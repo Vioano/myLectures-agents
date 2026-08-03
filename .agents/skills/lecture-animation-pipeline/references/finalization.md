@@ -36,8 +36,9 @@ hash-bound receipt to
 ear-evidence/reviewer hash blocks completion, and the receipt scene set must
 exactly equal `progressive_production.json`. Then preflight font availability and glyph
 coverage, subtitle renderer, BGM source/recipe, sprite sources, audio channel
-layout, Sumino's ending anchor, and all output directories before starting any
-native 4K render. Episode wrappers may supply paths and scene-class mappings,
+layout, the series sprite rhythm, the mandatory spoken-identity Sumino cue,
+and all output directories before starting any native 4K render. Episode
+wrappers may supply paths and scene-class mappings,
 but must call this standard route and must not retain temporary-worktree
 absolute paths.
 
@@ -106,35 +107,61 @@ override this default; silence or a new balance is not an implicit option.
 After any audio repair or remux, verify the final MP4 contains the BGM layer and
 measure the final mix. Do not validate only an intermediate WAV.
 
-## Sumino And Editorial Sprites
+## Series Characters And Editorial Sprites
 
 Search the repository and Git history for the latest approved sprite action,
 size, side, margins, fade, and frame rate. Keep sprites editorial: they may
 support pacing but cannot cover subtitles, formulas, axes, active diagrams, or
 the last mathematical hold.
 
-The current series precedent is a restrained four-cue semantic rhythm, not a
-single decorative ending sticker: `confused` when the motivating problem is
-still tangled, `aha` when the central organizing idea becomes visible,
-`thinking` at the main transfer or generalization step, and `talking` for the
-fixed sign-off. Resolve each cue from the current episode's narration and
-mathematical stage rather than copying old timestamps. A cue may be shortened,
-moved to the opposite safe edge, or omitted only when measured protected-region
-or subtitle collision cannot be avoided; record the exception in the manifest.
+The current series precedent is a restrained semantic rhythm, not a decorative
+ending sticker. Before final composition, resolve three episode-level roles
+from the final word alignment:
 
-Hard ending rule: when the fixed identity/name line is spoken, Sumino must be
-visibly present. Resolve the first identity/name word and the last farewell
-word from word/token alignment. Start the overlay no later than the first word,
-hold through the farewell, and prove before/on/after frames. A scene-tail guess,
-reader-cue-only estimate, or sprite that appears after the identity phrase does
-not pass.
+- `confused` at a genuine motivating contradiction or unresolved obstacle;
+- `aha` when the central organizing relation becomes visible;
+- `thinking` at the main transfer, generalization, or consequence.
 
-If the spoken line identifies the keyboard player without literally saying
-`Sumino`, bind to the first word of the identity phrase; do not invent an
-on-screen name. Reuse the approved Sumino asset and animation. If current
-composition makes the precedent size collide, keep the same identity/action
-and make only the minimum measured scale/position change; record the protected
-region, clearance, and QC evidence.
+The character need not always be Sumino. Approved Bocchi, Nijika, Ryo, Kita,
+and Sumino actions may be selected by semantic fit. One carefully staged
+two-character reaction is allowed when both reactions share the same exact
+mathematical word window, occupy disjoint protected regions, and clarify a
+collective recognition or comparison. Multiple characters are a series visual
+signature, but they remain supporting actors: never place more than twelve
+overlay records in a standard episode without a hash-bound human-approved
+density override, never stack reactions merely to fill empty space, and never
+let a character become the primary focal object while new mathematics is
+landing.
+
+Resolve every cue from the current episode's narration and mathematical stage
+rather than copying old timestamps. Each manifest row records character,
+action, semantic anchor, exact word window, global overlay window, clip and
+asset hashes, side, size, protected rectangle, and subtitle-occlusion policy.
+For a directional action such as `point_left` or `point_right`, the action name
+is not evidence that the rendered character faces the intended target. Record
+the asset's intrinsic facing direction, any horizontal mirror, the resulting
+screen direction, and a protected target rectangle belonging to the active
+mathematical object. The finalization gate must derive the rendered direction
+from the asset direction and mirror flag, then reject a target rectangle that
+does not lie inward along that direction. Independent QC must inspect exact
+on/late frames and reject a gesture that points toward the frame edge or away
+from its declared mathematical target.
+For each of the three standard semantic roles, either provide a real cue or a
+role-specific omission with collision evidence and a reason. A generic
+“optional” flag is not an omission contract.
+
+The fixed screen ending remains a learner-facing mathematical conclusion or
+question. Separately, when the approved spoken series sign-off contains
+`我是结束乐队的键盘手`, exactly one `sumino` overlay is mandatory. Its action is
+not fixed to `talking`: choose any nonempty action registered in the bound
+Sumino asset metadata that is semantically appropriate for the narration and
+passes the same clip/asset, timing, protected-region, and pixel-QC checks.
+It must already be visible before the aligned word `我`, remain visible through
+`键盘手`, and may continue through `下个视频见`. The spoken sign-off stays in
+audio, but the identity and farewell text must not appear in burned subtitles
+or any other on-screen text. This mandatory identity carrier cannot be omitted
+for layout convenience: move or resize it within a proven safe region while
+preserving the final mathematical hold.
 
 ## Final Media And Independent QC
 
@@ -149,20 +176,37 @@ Require all of the following:
 - exactly one AAC stereo 48 kHz audio stream and no subtitle stream for a
   burned-subtitle upload;
 - duration drift no greater than `0.12 s` from the sealed assembly duration;
+- independently probe decoded video and audio endpoints: both must reach the
+  final aligned word, their endpoints must agree within one output frame, and
+  decoded video frames must exist on both sides of every promoted scene
+  boundary; an audit that reaches decoder EOF before its narration window is
+  blocked even when it reports zero findings;
 - full `ffmpeg` video/audio decode with no error;
 - loudness/true-peak evidence from the final MP4;
 - terminal visual hold, no clipped voice, and stereo-channel integrity; when
   BGM is present, validate the tail as BGM-only rather than demanding digital
   silence;
-- all scene boundaries plus opening and ending QC frames;
+- all scene boundaries plus opening and ending QC frames, extracted from the
+  exact final episode bytes rather than standalone scene candidates;
 - publication-subtitle structure, formal-text, glyph, line-count, safe-zone,
   and burned-pixel checks;
-- Sumino visible at the exact identity word anchor and through the farewell,
-  with no subtitle or mathematical-object collision;
+- every editorial character cue bound to an exact word anchor and semantic
+  role, with clip/asset hashes, a protected rectangle, before/on/late frames,
+  and no subtitle or mathematical-object collision;
+- when the spoken identity line is present, exactly one hash-bound Sumino cue
+  using a nonempty, registered, semantically appropriate action and covering
+  the complete `我是结束乐队的键盘手` word window,
+  plus a positive final-vs-baseline pixel-difference check inside its protected
+  rectangle and a zero-difference check immediately before it;
+- spoken identity/farewell absent from burned subtitles and screen text while
+  remaining present in the diagnostic word alignment and final audio;
 - manifest hashes matching every native render contract, normalized segment,
   subtitle overlay/SRT, sprite asset/overlay, mixed audio, BGM, final MP4, and
   QC contact sheet;
-- no AppleDouble `._*` files in the delivery or review package.
+- no AppleDouble `._*` files in either the delivery tree or the complete
+  episode `review/` evidence tree; the machine report must enumerate both
+  scoped roots and contain a failing
+  cleanliness assertion rather than relying on a later manual `find`.
 
 Write the final output under `exports/final/`, with a versioned 2160p30/upload
 name, corrected reader SRT, finalization manifest, subtitle audit, QC frames,
@@ -192,6 +236,7 @@ The final report gives direct choices, not a process dump:
 - upload MP4 absolute path and SHA-256;
 - corrected reader SRT absolute path and SHA-256;
 - manifest and contact-sheet paths;
-- resolution/fps/audio/loudness/decode/subtitle/Sumino verdicts;
+- resolution/fps/audio/loudness/decode/subtitle, character-rhythm, and
+  mandatory-Sumino-sign-off verdicts;
 - whether source/control was committed and the commit hash;
 - any remaining upload or push action that still requires authority.

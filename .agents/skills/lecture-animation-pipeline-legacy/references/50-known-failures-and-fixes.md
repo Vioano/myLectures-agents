@@ -2247,6 +2247,52 @@ Fix:
 - Failure: several necessary mathematical states are forced into a short clause even though the audio can be cut at phrase boundaries.
 - Hard prevention: insert pauses in the production full audio, shift reader/word/phrase subtitles and alignment JSON, rebuild `timeline.json`, and propagate downstream scene offsets before rendering.
 - Review test: with audio muted, the operation, intermediate evidence, and result must each have a stable pointing frame.
+
+## Final animation stretches a pre-TTS animatic across locked narration
+
+- `pattern_key`: `animation_authored_before_final_word_timing`
+- Failure: a coarse animatic is treated as final source, then stretched to the
+  completed WAV. Narration continues while the frame holds because the visual
+  beats were never redesigned around the actual words.
+- Hard prevention: after the exact scene WAV and word alignment are sealed,
+  compile a word-action contract for every major clause and rebuild final
+  choreography from those anchors. The pre-TTS animatic may preserve object
+  identity and composition, but it cannot supply final durations by global
+  scaling or long waits. Run a frame-derived low-motion-over-speech scan on
+  the exact rendered candidate and require novice review of every hit.
+- Review test: inspect every spoken window longer than two seconds. The active
+  mathematical object must change, transfer attention, or deliberately settle
+  for reading; an unexplained narrated still is a revision.
+
+## Animation API call has zero mathematical displacement
+
+- `pattern_key`: `zero_displacement_play_call_false_motion`
+- Failure: source contains `play`, `animate`, an updater, or a tracker, but its
+  start and end state are equal. Code review reports activity while the
+  delivered frames remain a narrated slide.
+- Hard prevention: export nonzero driver deltas for each word-locked action and
+  pair them with frame-derived motion evidence. A call whose geometric,
+  opacity, color, value, or topology delta is zero cannot satisfy the beat.
+- Review test: compare the first and last driver values and scrub the exact
+  spoken window. Both the mathematical change and its visible consequence
+  must be observable.
+
+## Screen-text contract trusts the author's semantic checkbox
+
+- `pattern_key`: `screen_text_semantic_self_attestation_bypass`
+- Failure: production-process prose or creator commentary survives because the
+  author labels it learner-facing and sets
+  `externalizes_production_intent=false`. A plan-time inventory passes while
+  the active source or final render contains different text.
+- Hard prevention: extract every visible literal from the active source after
+  TTS, require exact constructor/payload/count equality with the semantic
+  contract, and apply deterministic forbidden-intent lint to the literal
+  itself. Each survivor must name a mathematical object, parameter,
+  comparison, or learner question and declare when it clears. Bind the
+  contract to the final source and candidate hashes.
+- Review test: insert a process phrase such as “把这一集的因果链重新走一遍”
+  while falsely declaring it non-meta. The gate must fail on the source text
+  before rendering.
 ## Group center used for a point target
 
 - `pattern_key`: `group_center_used_for_point_target`
@@ -2325,6 +2371,24 @@ Fix:
 - Hard prevention: declare formula ownership at transition midpoints, clear or transform the outgoing formula before the replacement becomes opaque, and include transition-midpoint frames in a scene-specific overlap audit.
 - Review test: inspect before, midpoint, and after frames for every formula replacement. A novice must see exactly one readable mathematical claim at each held state.
 
+## Dynamic case label overlaps an already-owned formula lane
+
+- `standard_key`: `dynamic_layout_overlap`
+- `pattern_key`: `dynamic_case_label_overlaps_formula_lane`
+- Failure: a static layout audit passes the scene's initial or final state, but
+  a later narration-bound label enters, scales, or shifts into a formula that
+  already owns the same lane. The collision exists only during the live
+  transition or hold, so a single contact-sheet frame can miss it.
+- Hard prevention: every dynamically entering text, formula, brace, bar, and
+  panel must declare its full visible interval and swept bounding region.
+  Layout QC samples onset, motion midpoint, settled hold, and exit against all
+  simultaneously live protected regions; union-of-swept-bounds overlap blocks
+  the candidate even when the initial and terminal states are clean.
+- Review test: place a case label so its settled center looks acceptable but
+  its entrance or emphasis scale crosses a live formula. The dynamic layout
+  audit must identify the exact interval and object pair before independent
+  review.
+
 ## Required formula manifest is missing
 
 - `pattern_key`: `required_formula_manifest_missing`
@@ -2367,6 +2431,28 @@ Fix:
 - Hard prevention: derive the authoritative scene duration from the locked audio/local rendered scene contract, propagate it through the timeline fragment, profile, plan, registry, telemetry, coverage anchors, and manifest, and permit only the expected frame-quantization or container-tail difference in the MP4.
 - Review test: compare locked-audio duration, final MP4 duration, timeline/profile duration, last reader cue, last aligned word, tail silence, and the latest required review anchor. Any unreviewed media interval beyond frame-level tolerance blocks handoff.
 
+## Final episode video stream ends while later-scene audio continues
+
+- `pattern_key`: `final_assembly_video_stream_truncated_after_scene`
+- Failure: the final MP4 container and audio stream reach the declared episode
+  duration, but the video stream ends after an earlier scene. A full decode may
+  still exit successfully, a frame-difference audit may silently stop at EOF
+  and report zero later findings, and contact sheets built from standalone
+  scene files may falsely suggest complete visual coverage.
+- Hard prevention: normalize and concatenate video and audio as separately
+  explicit streams, then probe decoded video/audio endpoints and frame counts
+  from the exact muxed episode. Require video coverage through the last aligned
+  word, video/audio endpoint agreement within one output frame, and decoded
+  frames on both sides of every promoted scene boundary. Every final overview,
+  boundary sheet, and motion audit must bind the exact episode SHA; decoder EOF
+  before the requested audit window blocks instead of truncating the sample
+  denominator.
+- Review test: deliberately truncate the video after a middle scene while
+  retaining the full audio track. The stream-coverage gate, full-episode motion
+  audit, and exact-episode contact-sheet builder must all fail. After repair,
+  confirm the final frame belongs to the terminal scene and independently
+  decode the middle-to-late boundary that previously disappeared.
+
 ## Mixed channel layouts corrupt the assembled episode audio
 
 - `pattern_key`: `mixed_channel_layout_concat_corrupts_right_channel`
@@ -2387,3 +2473,18 @@ Fix:
 - Failure: the main agent reassigns a reused worker or queues a deferred review todo in the canonical supervisor session, but the author worktree still contains an older copy with the same session id. The author creates a seemingly valid fresh batch from an obsolete task key or misses the deferred todo.
 - Hard prevention: mutate authorization only through the canonical supervisor CLI, synchronize that exact session file into the reused worktree, and require parallel `begin-production-batch` to compare the local and canonical sealed `session_hash` values before reading the grant. Record the canonical path and hash in the batch binding.
 - Review test: change one worker's canonical task key while leaving the worktree copy unchanged, then attempt `begin-production-batch` with both paths. It must fail before batch creation; matching ids without matching session hashes are insufficient.
+
+## Locally correct micro-objects fragment the scene's visual grammar
+
+- `standard_key`: `visual_hierarchy_failure`
+- `pattern_key`: `local_reading_visual_language_fragmented_into_unowned_micro_objects`
+- Failure: every arrow, formula, contour, label, and driver may be locally defensible, yet the held frame contains several independent origins, directions, scales, and color roles. A reviewer checks mathematical presence and misses that a beginner has no single reading path. Persistent recap formulas and large unowned negative space amplify the fragmentation; short `Indicate` pulses are then used to imply relationships that the stage never actually constructs.
+- Concrete regression: episode 0009 G009 r08 was automatically passed and then human-rejected on 2026-08-02. Around 11 s, a small local contour, phase arrow, tangent `dw`, power arrow, product arrow, exponent labels, bottom product formula, and stale top conclusion chain competed in one sparse frame. Later local-to-global ownership relied on brief pulses, and the final outer contour shared the frame with stale local formulas and labels.
+- Hard prevention:
+  - Give each held state exactly one primary focal owner and a declared reading path; supporting objects must originate from or terminate on that owner.
+  - Require the primary object to occupy a delivery-readable portion of the usable stage. Negative space must serve an upcoming transition or protected lane; otherwise reallocate it.
+  - Clear recap or conclusion formulas when their beat ends. A formula cannot remain merely because it is mathematically true.
+  - Use one shared origin and a sequential build for factor/product vectors. Do not display several independently placed arrows and ask the learner to mentally compose them.
+  - Replace `Indicate`-only ownership changes with a real transform, movement, deformation, or state change of the mathematical object.
+  - Limit held shots to two dominant accent colors with stable semantic roles.
+- Review test: inspect the three ugliest candidate frames at full size and thumbnail scale with narration muted. The reviewer must identify the primary object, causal action, result, and reading order immediately. If explanation requires naming several disconnected micro-objects or recalling narration, the verdict is `revise` even when layout and mathematics pass. After a human false pass, apply this test to earlier automatically accepted scenes before surfacing them again.

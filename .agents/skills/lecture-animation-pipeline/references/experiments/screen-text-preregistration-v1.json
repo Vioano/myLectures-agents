@@ -1,0 +1,89 @@
+{
+  "schema": "lecture-animation-skill-experiment-v1",
+  "experiment_id": "screen-text-decision-gate-v1",
+  "title": "Decision-time progressive disclosure for learner-facing screen text",
+  "hypothesis": "A neutral preregistration reflection gate will prevent producer-intent screen text before source authoring while preserving legitimate learner-facing labels.",
+  "active_from_autopilot_contract_version": 8,
+  "mechanism": {
+    "states": [
+      "pre_registered",
+      "reflected_keep",
+      "reflected_revise",
+      "reflected_remove",
+      "registered_or_formally_blocked"
+    ],
+    "neutrality": "Risk signals prompt both keep and remove-or-replace hypotheses; they are not presented as a verdict.",
+    "hard_boundary": "Formal registration still applies deterministic presentation-boundary and narration-duplication checks.",
+    "durable_ledger": "review/evolution/screen_text_registration_attempts.jsonl",
+    "zero_text_observation": "Every compiled scene writes an idempotent gate_initialized observation, so an empty candidate set is distinguishable from an uninstrumented scene."
+  },
+  "baseline": {
+    "episode": "videos/0008-mpm-8-cauchy_integral",
+    "measurement_role": "pre_change_historical_baseline",
+    "decision_gate_instrumentation_status": "unknown_not_instrumented",
+    "screen_text_registration_attempt_count": null,
+    "screen_text_pre_source_prevention_count": null,
+    "human_screen_text_escape_issue_count": 1,
+    "human_screen_text_escape_scene_count": 1,
+    "human_screen_text_overblock_issue_count": 0,
+    "human_screen_text_escape_payload_count": 2,
+    "escaped_payload_descriptions": [
+      "episode-process recap title",
+      "creator-persona sign-off rendered as screen text"
+    ],
+    "pre_change_skill_tree": "d02bab5a2e6002b5de434a851c8dd940552fb28d",
+    "evidence": [
+      {
+        "path": "videos/0008-mpm-8-cauchy_integral/review/issues/human_g012_layout_pace_and_presentation_boundary_2026-07-31.json",
+        "sha256": "12cda849034f1ed95339e679d667b34c270876fa6807e5a77e400bf0e50ea69e"
+      },
+      {
+        "path": "videos/0008-mpm-8-cauchy_integral/review/human-feedback/2026-07-31-user-review-round-01.md",
+        "sha256": "17ab1ced38f5a48ec9b8fae13f1863c4b611fc642fc9ce0b64d414ffa5487499"
+      },
+      {
+        "path": "videos/0008-mpm-8-cauchy_integral/review/evolution/iterations/screen_text_preregistration_v1_before.json",
+        "sha256": "492938c2ba368bf09f46e075815693d990c4944214c689d6bc1d7c4b3fa0eade",
+        "snapshot_hash": "99c4495af371ccc5dee7cfa11a629c756c1608c22011f90e05bd6403f3ea3577"
+      },
+      {
+        "path": "videos/0008-mpm-8-cauchy_integral/review/evolution/postmortem.json",
+        "sha256": "11a2dd80a4d80ba5192276dee186a7a049884bd3a8bb9a4530ab8a555bc6e0ce",
+        "retrospective_hash": "1ded6d3099101f2d340f821b36925d6f8a591acc48d216376fff6bbd5dc71188"
+      }
+    ],
+    "caveats": [
+      "Episode 8 predates the decision ledger, so missing attempt and prevention counts are unknown rather than zero.",
+      "The two escaped payloads were grouped in one human issue record and one scene.",
+      "The spoken persona sign-off is permitted by user policy; only its visible screen-text form belongs to this experiment."
+    ]
+  },
+  "comparison_metrics": [
+    "decision_gate_terminal_coverage",
+    "scene_gate_coverage",
+    "zero_candidate_scene_count",
+    "risk_signalled_attempt_count",
+    "registered_count",
+    "prevented_before_source_count",
+    "formal_block_count",
+    "human_screen_text_escape_issue_count",
+    "human_screen_text_escape_scene_count",
+    "human_screen_text_escape_payload_count",
+    "human_screen_text_escape_payload_attribution_coverage",
+    "human_screen_text_overblock_issue_count",
+    "human_escape_per_100_registered"
+  ],
+  "success_thresholds": {
+    "terminal_coverage": 1.0,
+    "scene_gate_coverage": 1.0,
+    "max_human_escape_issue_count": 0,
+    "max_human_overblock_issue_count": 0,
+    "max_invalid_attempt_row_count": 0,
+    "max_invalid_scene_observation_row_count": 0
+  },
+  "interpretation": {
+    "effectiveness_signal": "Observed pre-source prevention together with fewer human screen-text escapes than Episode 8.",
+    "quality_guardrail": "Zero human screen-text boundary escapes and zero human overblocking findings; legitimate registered labels remain available to teaching scenes.",
+    "non_claim": "A same-episode rerun after the change proves tooling behavior, not cross-episode production effectiveness."
+  }
+}

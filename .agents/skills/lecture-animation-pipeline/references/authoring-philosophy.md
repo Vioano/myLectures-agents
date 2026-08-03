@@ -120,7 +120,7 @@ The author is therefore not asked to select from a menu of zooms, rotations, spl
 
 The implementation may use any visual language that answers those questions and respects the continuity invariants.
 
-For complex or repeatedly rejected scenes, generate lightweight stage hypotheses before coding. These are not multiple polished animations. They are materially different answers to the representational problem. Compare them by:
+For every scene, write the complete stage scheme before coding. For complex or repeatedly rejected scenes, first generate lightweight stage hypotheses. These are not multiple polished animations. They are materially different answers to the representational problem. Compare them by:
 
 - causal visibility;
 - identity continuity;
@@ -129,13 +129,13 @@ For complex or repeatedly rejected scenes, generate lightweight stage hypotheses
 - visual economy;
 - capacity for truthful refinement.
 
-Select one and record why the others fail. This gives the same author Agent room to invent without paying for several rendering or review agents.
+Select one and record why the others fail, then expand the winner into the full detailed plan: stage states, transitions, identity, clearance, composition, hierarchy, negative-space jobs, and clause handoffs. Optional Keynote, grayscale wireframes, or a few critical keyframes may make risky frames inspectable, but they remain attachments. They cannot replace the written plan or authorize production. This gives the same author Agent room to invent without paying for several rendered alternatives.
 
 Retrieve precedents by **problem signature**, not by effect name. Search for the learner operation, hidden relation, mathematical driver, identity invariant, and attention transfer. A useful old scene may use a completely different camera technique while solving the same representational problem.
 
 ## 3. Refine Each Region Locally
 
-After the wireframe composition works, ask of every region:
+After the planned composition works—and after any optional wireframe has tested rather than replaced it—ask of every region:
 
 - What local question does this region answer?
 - Which mathematical variation can be made inspectable here?
@@ -217,29 +217,45 @@ For every primary object, write an executable invariant before coding. Do not an
 
 The author must export runtime telemetry for these checks. A manually asserted "looks fine" audit is not evidence.
 
-## Authoring Passes
+## Planning And Authoring Passes
 
 ### Pass A: Learning Contract
 
 Write the learner state, core claim, misconception, visible evidence, and success test. Reject the scene if these are vague.
 
-### Pass B: Grayscale Wireframe
+### Pass B: Narration And Dynamic-Stage Co-Design
 
-Place only major regions and primary objects. Verify that region relationships communicate the argument before adding formulas or polish.
+Draft every major region and primary object, each time-varying stage state, transition trigger, identity carrier, clearance, focal handoff, formula-memory state, and visual-finish choice while refining the scene narration. No animation source is written in this pass.
 
-### Pass C: Mathematical Animatic
+### Pass C: Exact Audio And Timing Lock
 
-Connect all decisive changes to real drivers. Verify cause, operation, and result with low-resolution output.
+Freeze the scene script, synthesize and listen to the exact WAV, generate reader and word-level subtitles/alignment, seal narration QC, and write the exact local timeline. Estimated sentence timing is no longer allowed after this pass.
 
-### Pass D: Regional Refinement
+### Pass D: Complete The Word-Anchored Visual Plan
+
+Bind every clause and transformation to exact word anchors, finish every stage state and transition, and verify in prose and structured contracts that the region relationships communicate the argument. This complete detailed plan is mandatory.
+
+### Pass E: Optional Static Visual Probe
+
+Use Keynote, a grayscale wireframe, or a few critical keyframes only when a risky composition, scale, or transition midpoint benefits from direct visual inspection. Bind each probe to the exact plan sections it tests. Do not create a full-duration silent animatic, and do not treat attractive keyframes as evidence that missing plan logic exists.
+
+### Pass F: Independent Plan Review
+
+An agent other than the plan author reviews the complete plan across novice causality, mathematical truth, stage choreography and attention, visual composition and finish, and audio/production handoffs. Every stage state and transition must pass. Production remains blocked until the hash-bound plan-review receipt passes.
+
+### Pass G: Mathematical Animation
+
+Only now connect all decisive changes to real drivers in animation source. The final code consumes the exact scene-production contract and execution registry; it is not stretched from a silent prototype.
+
+### Pass H: Regional Refinement
 
 Add small multiples, samples, local axes, formula memory, or other semantically owned detail. Keep the primary hierarchy intact.
 
-### Pass E: Micro Choreography
+### Pass I: Micro Choreography
 
 Bind every major spoken clause to its own object change, then tune attention handoffs, holds, transformations, and exits. Record formula rest geometry before emphasis and add a QC anchor at every stage-transition midpoint.
 
-### Pass F: Deterministic Preflight
+### Pass J: Deterministic Preflight
 
 Export telemetry and run `validate-authoring-qc`. Fix every mechanical failure before rendering the review candidate.
 

@@ -153,7 +153,7 @@ class GovernanceTests(unittest.TestCase):
                 / "episode_efficiency_contract.json"
             )
             contract = {
-                "schema": "lecture-animation-episode-efficiency-contract-v3",
+                "schema": "lecture-animation-episode-efficiency-contract-v4",
                 "created_at": "2026-07-28T00:00:00+00:00",
                 "episode": "videos/0001-test",
                 "canonical_repo_root": str(root.resolve()),

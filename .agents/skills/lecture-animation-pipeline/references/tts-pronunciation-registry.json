@@ -1,0 +1,178 @@
+{
+  "schema": "lecture-animation-tts-pronunciation-registry-v1",
+  "version": 1,
+  "policy": {
+    "default": "literal_first",
+    "unregistered_spoken_forms_are_blocked": true,
+    "candidate_forms_are_route_scoped": true,
+    "token_documented_candidates_are_non_authoritative": true,
+    "scene_local_ear_review_is_always_required": true,
+    "verified_patch_reuse_never_grants_a_new_scene_pass": true
+  },
+  "routes": {
+    "indextts2-mlx8-zaojian-takagi-seed3407": {
+      "engine": "IndexTTS2 MLX 8-bit",
+      "model_id": "mlx-indexTTS-2.0-8bit",
+      "model_version": "2.0",
+      "quantization": "8bit",
+      "model_artifact_sha256": "f8342f3918929f5ff6ad7db32b745d8b2c5fb75d73125fcafb99cf135f9361c7",
+      "w2v_bert_artifact_sha256": "c4b830e5e7c320def5cd50d6f65fede6dbbc9552ca1196932ba592cc498e49d3",
+      "campplus_artifact_sha256": "3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8",
+      "cli_sha256": "4a5fecc82050b6413d641450f78929ba20b085fa2b148e07bf2559d287f1f27d",
+      "speaker": "Zaojian",
+      "speaker_sha256": "336c1f0057c0d3457820ceb22dd1464301d09d41b1ebb1005e52764a07e2a291",
+      "emotion_reference": "Takagi",
+      "emotion_sha256": "fde66fdd98e4975fa1b6c7e517bdf08e76c469343e8a973fb067542aaae84d7d",
+      "seed": 3407,
+      "emo_alpha": 0.9,
+      "diffusion_steps": 25,
+      "cfg_rate": 0.7,
+      "max_text_tokens": 120,
+      "max_tokens": 1500,
+      "interval_silence_ms": 200,
+      "speed": 1.0,
+      "candidate_forms": {
+        "theta": ["theta", "thay-ta"],
+        "alpha": ["alpha"],
+        "beta": ["beta"],
+        "gamma": ["gamma"],
+        "delta": ["delta"],
+        "epsilon": ["epsilon"],
+        "eta": ["eta", "伊塔"],
+        "lambda": ["lambda"],
+        "mu": ["mu"],
+        "nu": ["nu"],
+        "xi": ["xi"],
+        "rho": ["rho"],
+        "sigma": ["sigma"],
+        "tau": ["tau"],
+        "phi": ["phi"],
+        "chi": ["chi"],
+        "psi": ["psi"],
+        "omega": ["omega"],
+        "w": ["w"],
+        "d w": ["d w"],
+        "i d theta": ["i d theta", "i d thay-ta"],
+        "n": ["n"],
+        "r": ["R"],
+        "f": ["f"],
+        "i": ["i", "艾"],
+        "z": ["z"],
+        "z 零": ["z 零", "z零"],
+        "res f": ["Res f", "residue f"],
+        "pi": ["pi", "派"],
+        "二 pi": ["二 pi", "二派"],
+        "二 pi i": ["二 pi i", "二派艾", "二派 i"],
+        "二派 i": ["二派 i", "二派艾"],
+        "二派艾": ["二派艾"],
+        "a 下标负一": ["a 下标负一", "a下标负一"]
+      }
+    }
+  },
+  "tokens": {
+    "theta": {
+      "documented_candidates": ["theta", "thay-ta"],
+      "forbidden_forms": ["西塔"],
+      "baseline": "theta",
+      "notes": "Use the literal English name first. thay-ta is only an audition candidate learned from Episode 8; it still requires exact-scene ear review."
+    },
+    "alpha": {"documented_candidates": ["alpha"], "forbidden_forms": [], "baseline": "alpha"},
+    "beta": {"documented_candidates": ["beta"], "forbidden_forms": [], "baseline": "beta"},
+    "gamma": {"documented_candidates": ["gamma"], "forbidden_forms": [], "baseline": "gamma"},
+    "delta": {"documented_candidates": ["delta"], "forbidden_forms": [], "baseline": "delta"},
+    "epsilon": {"documented_candidates": ["epsilon"], "forbidden_forms": [], "baseline": "epsilon"},
+    "eta": {"documented_candidates": ["eta", "伊塔"], "forbidden_forms": [], "baseline": "eta"},
+    "lambda": {"documented_candidates": ["lambda"], "forbidden_forms": [], "baseline": "lambda"},
+    "mu": {"documented_candidates": ["mu"], "forbidden_forms": [], "baseline": "mu"},
+    "nu": {"documented_candidates": ["nu"], "forbidden_forms": [], "baseline": "nu"},
+    "xi": {"documented_candidates": ["xi"], "forbidden_forms": [], "baseline": "xi"},
+    "rho": {"documented_candidates": ["rho"], "forbidden_forms": [], "baseline": "rho"},
+    "sigma": {"documented_candidates": ["sigma"], "forbidden_forms": [], "baseline": "sigma"},
+    "tau": {"documented_candidates": ["tau"], "forbidden_forms": [], "baseline": "tau"},
+    "phi": {"documented_candidates": ["phi"], "forbidden_forms": [], "baseline": "phi"},
+    "chi": {"documented_candidates": ["chi"], "forbidden_forms": [], "baseline": "chi"},
+    "psi": {"documented_candidates": ["psi"], "forbidden_forms": [], "baseline": "psi"},
+    "omega": {"documented_candidates": ["omega"], "forbidden_forms": [], "baseline": "omega"},
+    "w": {
+      "documented_candidates": ["w"],
+      "forbidden_forms": ["达布留", "达布溜"],
+      "baseline": "w"
+    },
+    "d w": {
+      "documented_candidates": ["d w"],
+      "forbidden_forms": ["迪 达布留", "迪 达布溜"],
+      "baseline": "d w"
+    },
+    "i d theta": {
+      "documented_candidates": ["i d theta", "i d thay-ta"],
+      "forbidden_forms": ["艾 迪 西塔"],
+      "baseline": "i d theta"
+    },
+    "n": {
+      "documented_candidates": ["n"],
+      "forbidden_forms": ["恩"],
+      "baseline": "n"
+    },
+    "r": {
+      "documented_candidates": ["R"],
+      "forbidden_forms": ["阿尔"],
+      "baseline": "R"
+    },
+    "f": {
+      "documented_candidates": ["f"],
+      "forbidden_forms": ["艾弗"],
+      "baseline": "f"
+    },
+    "i": {
+      "documented_candidates": ["i", "艾"],
+      "forbidden_forms": [],
+      "baseline": "i"
+    },
+    "z": {
+      "documented_candidates": ["z"],
+      "forbidden_forms": [],
+      "baseline": "z"
+    },
+    "z 零": {
+      "documented_candidates": ["z 零", "z零"],
+      "forbidden_forms": [],
+      "baseline": "z 零"
+    },
+    "res f": {
+      "documented_candidates": ["Res f", "residue f"],
+      "forbidden_forms": ["瑞斯艾弗", "瑞斯f"],
+      "baseline": "Res f",
+      "notes": "residue f is an allowed audition candidate, not a pre-approved pronunciation."
+    },
+    "pi": {
+      "documented_candidates": ["pi", "派"],
+      "forbidden_forms": [],
+      "baseline": "pi"
+    },
+    "二 pi": {
+      "documented_candidates": ["二 pi", "二派"],
+      "forbidden_forms": [],
+      "baseline": "二 pi"
+    },
+    "二 pi i": {
+      "documented_candidates": ["二 pi i", "二派艾", "二派 i"],
+      "forbidden_forms": [],
+      "baseline": "二 pi i"
+    },
+    "二派 i": {
+      "documented_candidates": ["二派 i", "二派艾"],
+      "forbidden_forms": [],
+      "baseline": "二派 i"
+    },
+    "二派艾": {
+      "documented_candidates": ["二派艾"],
+      "forbidden_forms": [],
+      "baseline": "二派艾"
+    },
+    "a 下标负一": {
+      "documented_candidates": ["a 下标负一", "a下标负一"],
+      "forbidden_forms": [],
+      "baseline": "a 下标负一"
+    }
+  }
+}

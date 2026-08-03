@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+
+from pipeline_v2_lib.core import object_hash
+from pipeline_v2_lib.engine import (
+    DELIVERY_STAGE_DEADLINE_SECONDS,
+    PIPELINE_PREFLIGHT_SCHEMA,
+    PIPELINE_PREFLIGHT_TESTS,
+    artifact_snapshot,
+    default_efficiency_budget,
+    default_efficiency_quality_target,
+    delivery_clock_initial_hash,
+    empty_efficiency_reservation_ledger,
+    skill_tree_hash,
+)
 
 
 SCRIPT = Path(__file__).with_name("supervisor_watch.py")
@@ -18,7 +31,14 @@ class SupervisorWatchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.session = self.root / "supervisor_session.json"
+        self.episode = self.root / "capacity-sources"
+        self.episode.mkdir(parents=True)
+        skill_root = self.root / ".agents" / "skills" / "lecture-animation-pipeline"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text(
+            "# supervisor test skill\n", encoding="utf-8"
+        )
+        self.session = self.episode / "supervisor_session.json"
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -56,8 +76,6 @@ class SupervisorWatchTests(unittest.TestCase):
         return path
 
     def write_self_review(self) -> Path:
-        from pipeline_v2_lib.core import object_hash
-
         payload = {
             "schema": "lecture-animation-author-self-review-v2",
             "verdict": "ready_for_independent_review",
@@ -68,6 +86,290 @@ class SupervisorWatchTests(unittest.TestCase):
         path = self.root / "author_self_review.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
+
+    def compile_capacity_evidence(
+        self,
+        *,
+        reviewer_wait_minutes: float = 12.0,
+        candidate_queue_depth: int = 0,
+        paused_minutes: float = 0.0,
+    ) -> Path:
+        source_root = self.episode
+        source_root.mkdir(parents=True, exist_ok=True)
+        supervisor = json.loads(self.session.read_text(encoding="utf-8"))
+        now = datetime.now(timezone.utc)
+        clock_path = source_root / "delivery_clock.json"
+        board = {}
+        if candidate_queue_depth:
+            board = {
+                f"g{index:03d}": {
+                    "state": "rendered",
+                    "owner_agent_id": f"owner-{index}",
+                    "history": [],
+                }
+                for index in range(1, candidate_queue_depth + 1)
+            }
+        preflight_path = self.root / "pipeline-preflight.json"
+        preflight = {
+            "schema": PIPELINE_PREFLIGHT_SCHEMA,
+            "created_at": now.isoformat(),
+            "repo_root": str(self.root),
+            "skill_tree_hash": skill_tree_hash(self.root, None),
+            "tests": list(PIPELINE_PREFLIGHT_TESTS),
+            "command": ["python3", "-m", "unittest"],
+            "returncode": 0,
+            "duration_seconds": 1.0,
+            "stdout_sha256": "a" * 64,
+            "stderr_sha256": "b" * 64,
+            "status": "pass",
+        }
+        preflight["receipt_hash"] = object_hash(preflight)
+        preflight_path.write_text(json.dumps(preflight), encoding="utf-8")
+        idle_since = now - timedelta(minutes=reviewer_wait_minutes)
+        t0_time = idle_since - timedelta(minutes=5)
+        t0 = t0_time.isoformat()
+        active_intervals = [
+            {"started_at": t0, "ended_at": None, "reason": "test"}
+        ]
+        pause_intervals: list[dict[str, str]] = []
+        if paused_minutes:
+            pause_start = idle_since + timedelta(minutes=1)
+            pause_end = pause_start + timedelta(minutes=paused_minutes)
+            if pause_end >= now:
+                raise AssertionError(
+                    "paused test time must leave a positive active tail"
+                )
+            active_intervals = [
+                {
+                    "started_at": t0,
+                    "ended_at": pause_start.isoformat(),
+                    "reason": "test",
+                },
+                {
+                    "started_at": pause_end.isoformat(),
+                    "ended_at": None,
+                    "reason": "resumed test",
+                },
+            ]
+            pause_intervals = [
+                {
+                    "kind": "human_wait",
+                    "started_at": pause_start.isoformat(),
+                    "ended_at": pause_end.isoformat(),
+                    "reason": "test human pause",
+                }
+            ]
+        clock = {
+            "schema": "lecture-animation-delivery-clock-v1",
+            "episode": "capacity-sources",
+            "t0": t0,
+            "created_at": t0,
+            "status": "active",
+            "current_stage": "fanout",
+            "stage_deadline_seconds": dict(DELIVERY_STAGE_DEADLINE_SECONDS),
+            "delivery_target_seconds": 8 * 3600,
+            "retrospective_reserve_seconds": 45 * 60,
+            "max_production_agents": int(supervisor["max_subagents"]),
+            "max_frozen_candidates": 2,
+            "sol_review_model": "gpt-5.6-sol",
+            "pipeline_preflight": artifact_snapshot(preflight_path, self.root),
+            "pipeline_preflight_hash": preflight["receipt_hash"],
+            "skill_tree_hash_at_t0": skill_tree_hash(self.root, None),
+            "active_intervals": active_intervals,
+            "pause_intervals": pause_intervals,
+            "checkpoints": [
+                {
+                    "stage": "fanout",
+                    "created_at": idle_since.isoformat(),
+                }
+            ],
+            "representative_scene": None,
+            "representative_release": None,
+            "scene_board": board,
+            "scope_forecast": {
+                "planned_scene_count": 6,
+                "approved_narration_minutes": 8.0,
+                "new_representation_family_count": 1,
+                "approved_grammar_reuse": True,
+                "forecast_class": "matched_envelope",
+                "normalized_delivery_hours": 8.0,
+            },
+        }
+        clock["clock_hash"] = object_hash(clock)
+        clock_path.write_text(json.dumps(clock), encoding="utf-8")
+
+        phase_log = source_root / "episode_phase_events.jsonl"
+        phase_event = {
+            "schema": "lecture-animation-phase-event-v2",
+            "event_id": "capacity-observed-phase",
+            "phase_instance_id": "capacity-observed-phase-instance",
+            "run_id": "capacity-observed-run",
+            "scene_slug": "g001",
+            "phase": "planning",
+            "phase_purpose": "episode_spine",
+            "started_at": (now - timedelta(minutes=20)).isoformat(),
+            "ended_at": (now - timedelta(minutes=19, seconds=59)).isoformat(),
+            "duration_seconds": 1.0,
+            "input_tokens": 100,
+            "cached_input_tokens": 50,
+            "output_tokens": 10,
+            "reasoning_tokens": 5,
+            "token_observed": True,
+        }
+        phase_log.write_text(json.dumps(phase_event) + "\n", encoding="utf-8")
+        contract_path = source_root / "efficiency.json"
+        ledger_path = source_root / "episode_token_reservations.json"
+        contract = {
+            "schema": "lecture-animation-episode-efficiency-contract-v4",
+            "workflow_gate_version": 1,
+            "created_at": now.isoformat(),
+            "episode": "capacity-sources",
+            "canonical_repo_root": str(self.root),
+            "central_phase_log": "capacity-sources/episode_phase_events.jsonl",
+            "central_reservation_ledger": (
+                "capacity-sources/episode_token_reservations.json"
+            ),
+            "budget": default_efficiency_budget(),
+            "quality_target": default_efficiency_quality_target(),
+            "status": "active",
+            "delivery_clock_binding": {
+                "path": "capacity-sources/delivery_clock.json",
+                "t0": t0,
+                "initial_clock_hash": delivery_clock_initial_hash(clock),
+            },
+        }
+        contract["contract_hash"] = object_hash(contract)
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        ledger = empty_efficiency_reservation_ledger(contract)
+        ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+        output = source_root / "capacity_evidence.json"
+        self.run_cli(
+            "seal-capacity-evidence",
+            "--repo-root", str(self.root),
+            "--session", str(self.session),
+            "--delivery-clock", str(clock_path),
+            "--efficiency-contract", str(contract_path),
+            "--output", str(output),
+        )
+        return output
+
+    def compile_capacity_availability(
+        self,
+        *,
+        live_agent_ids: tuple[str, ...] = (),
+        reusable_agent_ids: tuple[str, ...] = (),
+        followup_attempts: tuple[str, ...] = (),
+        name: str = "capacity-availability.json",
+    ) -> Path:
+        output = self.episode / name
+        command = ["seal-availability-snapshot"]
+        for agent_id in live_agent_ids:
+            command.extend(("--live-agent-id", agent_id))
+        for agent_id in reusable_agent_ids:
+            command.extend(("--reusable-agent-id", agent_id))
+        for attempt in followup_attempts:
+            command.extend(("--followup-attempt", attempt))
+        command.extend(("--output", str(output)))
+        self.run_cli(*command)
+        return output
+
+    def test_stale_active_assignment_requires_health_probe_until_heartbeat(self) -> None:
+        self.begin()
+        session = json.loads(self.session.read_text(encoding="utf-8"))
+        stale_at = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        assignment = session["assignments"]["author-1"]
+        assignment["updated_at"] = stale_at
+        assignment.pop("last_heartbeat_at", None)
+        session.pop("session_hash", None)
+        session["session_hash"] = object_hash(session)
+        self.session.write_text(json.dumps(session), encoding="utf-8")
+
+        status = json.loads(
+            self.run_cli("status", "--session", str(self.session)).stdout
+        )
+        self.assertEqual(status["health_probe_required_assignments"], ["author-1"])
+        self.assertEqual(status["heartbeat_stale_seconds"], 600)
+        self.assertIn(
+            "author-1",
+            status["health_probe_deadlines"],
+        )
+        self.assertIn(
+            "STALE_ACTIVE_ASSIGNMENT_REQUIRES_RECONCILIATION",
+            status["roster_warnings"],
+        )
+        self.assertFalse(status["roster_clean"])
+        dirty = self.run_cli(
+            "status",
+            "--session",
+            str(self.session),
+            "--require-clean",
+            check=False,
+        )
+        self.assertEqual(dirty.returncode, 2)
+
+        self.run_cli(
+            "record", "--session", str(self.session),
+            "--event-type", "agent_heartbeat", "--agent-id", "author-1",
+            "--summary", "Author is alive and continuing the assigned scene.",
+        )
+        status = json.loads(
+            self.run_cli("status", "--session", str(self.session)).stdout
+        )
+        self.assertEqual(status["health_probe_required_assignments"], [])
+        self.assertNotIn(
+            "STALE_ACTIVE_ASSIGNMENT_REQUIRES_RECONCILIATION",
+            status["roster_warnings"],
+        )
+        self.assertTrue(status["roster_clean"])
+
+    def test_duplicate_heartbeat_event_is_a_strict_noop(self) -> None:
+        self.begin()
+        event_id = "heartbeat:author-1:fixed"
+        first = json.loads(
+            self.run_cli(
+                "record",
+                "--session",
+                str(self.session),
+                "--event-type",
+                "agent_heartbeat",
+                "--agent-id",
+                "author-1",
+                "--summary",
+                "Author is alive and continuing the assigned scene.",
+                "--event-id",
+                event_id,
+            ).stdout
+        )
+        self.assertEqual(first["event_id"], event_id)
+        session_after_first = self.session.read_bytes()
+        log_path = self.session.parent / "supervisor_events.jsonl"
+        log_after_first = log_path.read_bytes()
+
+        replay = json.loads(
+            self.run_cli(
+                "record",
+                "--session",
+                str(self.session),
+                "--event-type",
+                "agent_heartbeat",
+                "--agent-id",
+                "author-1",
+                "--summary",
+                "Author is alive and continuing the assigned scene.",
+                "--event-id",
+                event_id,
+            ).stdout
+        )
+        self.assertTrue(replay["idempotent"])
+        self.assertEqual(self.session.read_bytes(), session_after_first)
+        self.assertEqual(log_path.read_bytes(), log_after_first)
+        self.assertEqual(
+            sum(
+                json.loads(line)["event_id"] == event_id
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ),
+            1,
+        )
 
     def write_animatic_artifacts(
         self, scene_slug: str = "g008a"
@@ -206,6 +508,402 @@ class SupervisorWatchTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("exceeds --max-subagents", result.stderr)
 
+    def test_roster_ceiling_is_flexible_but_initial_roster_stays_bounded(self) -> None:
+        too_high = self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "9",
+            "--assignment", "a1|animation_author|batch-a|G001|gpt-5.6-sol",
+            "--output", str(self.session), check=False,
+        )
+        self.assertNotEqual(too_high.returncode, 0)
+        self.assertIn("must be in 1..8", too_high.stderr)
+
+        bypass_args = [
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "8",
+            "--capacity-override-reason",
+            "The host has measured room, but every additive identity still needs evidence.",
+        ]
+        for index in range(1, 9):
+            bypass_args.extend(
+                (
+                    "--assignment",
+                    f"a{index}|animation_author|batch-{index}|G{index:03d}|gpt-5.6-sol",
+                )
+            )
+        bypass_args.extend(("--replace", "--replace-reason"))
+        bypass_args.append(
+            "A nonexistent closed session must never waive additive capacity evidence."
+        )
+        bypass_args.extend(("--output", str(self.session)))
+        replace_bypass = self.run_cli(*bypass_args, check=False)
+        self.assertNotEqual(replace_bypass.returncode, 0)
+        self.assertIn("existing closed supervisor session", replace_bypass.stderr)
+        self.assertFalse(self.session.exists())
+
+        four_at_t0 = self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "4",
+            "--capacity-override-reason",
+            "The host has measured room for four producers while total cost remains bounded.",
+            "--assignment", "a1|animation_author|batch-a|G001|gpt-5.6-sol",
+            "--assignment", "a2|animation_author|batch-b|G002|gpt-5.6-sol",
+            "--assignment", "a3|animation_author|batch-c|G003|gpt-5.6-sol",
+            "--assignment", "a4|animation_author|batch-d|G004|gpt-5.6-sol",
+            "--output", str(self.session), check=False,
+        )
+        self.assertNotEqual(four_at_t0.returncode, 0)
+        self.assertIn("initial roster cannot exceed three", four_at_t0.stderr)
+
+    def test_four_subagents_are_allowed_with_sealed_capacity_override(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "4",
+            "--capacity-override-reason",
+            "Five runtime slots are available, the reviewer is measurably starved, and the episode cost ceiling remains safe.",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--assignment", "a2|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--assignment", "a3|animation_author|batch-c|G007-G009|gpt-5.6-sol",
+            "--planned-task", "batch-d|animation_author|G010-G012",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence()
+        availability = self.compile_capacity_availability()
+        authorization = json.loads(
+            self.run_cli(
+                "authorize-capacity", "--session", str(self.session),
+                "--role", "animation_author", "--task-key", "batch-d",
+                "--scope", "G010-G012", "--model", "gpt-5.6-sol",
+                "--availability-snapshot", str(availability),
+                "--capacity-evidence", str(evidence), "--reason",
+                "The measured empty review queue justifies one bounded producer for the pending independent batch.",
+            ).stdout
+        )
+        status = json.loads(
+            self.run_cli(
+                "register-capacity", "--session", str(self.session),
+                "--authorization-id", authorization["authorization_id"],
+                "--new-agent-id", "a4",
+            ).stdout
+        )
+        self.assertEqual(status["roster_metrics"]["current_identity_count"], 4)
+        self.assertEqual(status["roster_metrics"]["capacity_expansion_count"], 1)
+        session = json.loads(self.session.read_text(encoding="utf-8"))
+        self.assertEqual(session["max_subagents"], 4)
+        self.assertEqual(session["roster_policy"], "reuse_before_spawn")
+        for agent_id in ("a1", "a2", "a3", "a4"):
+            self.run_cli(
+                "set-assignment", "--session", str(self.session),
+                "--agent-id", agent_id, "--state", "completed",
+            )
+        self.run_cli("finish", "--session", str(self.session))
+        restarted = json.loads(
+            self.run_cli(
+                "begin", "--supervisor-agent-id", "root-agent",
+                "--assignment", "a1|animation_author|batch-e|G013|gpt-5.6-sol",
+                "--assignment", "a2|animation_author|batch-f|G014|gpt-5.6-sol",
+                "--assignment", "a3|animation_author|batch-g|G015|gpt-5.6-sol",
+                "--assignment", "a4|animation_author|batch-h|G016|gpt-5.6-sol",
+                "--replace", "--replace-reason",
+                "User restarted the app and resumed the complete evidence-expanded identity pool.",
+                "--output", str(self.session),
+            ).stdout
+        )
+        self.assertEqual(
+            restarted["roster_metrics"]["current_identity_count"], 4
+        )
+        self.assertEqual(
+            restarted["roster_metrics"]["historical_identity_count"], 4
+        )
+
+    def test_capacity_expansion_rejects_a_compatible_reusable_identity(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "3",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--assignment", "a2|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--planned-task", "batch-c|animation_author|G007-G009",
+            "--output", str(self.session),
+        )
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "a2", "--state", "completed",
+        )
+        evidence = self.compile_capacity_evidence()
+        availability = self.compile_capacity_availability()
+        result = self.run_cli(
+            "authorize-capacity", "--session", str(self.session),
+            "--role", "animation_author", "--task-key", "batch-c",
+            "--scope", "G007-G009", "--model", "gpt-5.6-sol",
+            "--availability-snapshot", str(availability),
+            "--capacity-evidence", str(evidence), "--reason",
+            "The measured empty review queue would otherwise justify the pending independent batch.",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compatible roster member is reusable", result.stderr)
+
+    def test_capacity_reuse_check_normalizes_requested_model(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "a1", "--state", "completed",
+        )
+        evidence = self.compile_capacity_evidence()
+        availability = self.compile_capacity_availability()
+        rejected = self.run_cli(
+            "authorize-capacity", "--session", str(self.session),
+            "--role", "animation_author", "--task-key", "batch-b",
+            "--scope", "G004-G006", "--model", " gpt-5.6-sol ",
+            "--availability-snapshot", str(availability),
+            "--capacity-evidence", str(evidence), "--reason",
+            "The pending batch would otherwise use one measured additive producer slot.",
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("compatible roster member is reusable", rejected.stderr)
+
+    def test_capacity_rejects_restored_compatible_retired_identity(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "old-author|animation_author|batch-a|G001-G003|gpt-5.6-luna",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        replacement = json.loads(
+            self.run_cli(
+                "authorize-replacement", "--session", str(self.session),
+                "--old-agent-id", "old-author",
+                "--reason", "model_change_required",
+                "--new-model", "gpt-5.6-sol",
+                "--evidence",
+                "Human authorized a bounded Sol takeover after the Luna quality experiment.",
+            ).stdout
+        )
+        self.run_cli(
+            "register-replacement", "--session", str(self.session),
+            "--authorization-id", replacement["authorization_id"],
+            "--new-agent-id", "new-sol-author",
+        )
+        evidence = self.compile_capacity_evidence()
+        availability = self.compile_capacity_availability(
+            live_agent_ids=("old-author",),
+            reusable_agent_ids=("old-author",),
+            followup_attempts=(
+                "old-author|restored|Direct followup_task restored the original Luna identity and preserved context.",
+            ),
+            name="restored-capacity-availability.json",
+        )
+        rejected = self.run_cli(
+            "authorize-capacity", "--session", str(self.session),
+            "--role", "animation_author", "--task-key", "batch-b",
+            "--scope", "G004-G006", "--model", "gpt-5.6-luna",
+            "--availability-snapshot", str(availability),
+            "--capacity-evidence", str(evidence), "--reason",
+            "The pending batch would otherwise use one measured additive producer slot.",
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("restore-original-identity", rejected.stderr)
+
+    def test_capacity_wait_excludes_human_pause_intervals(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence(
+            reviewer_wait_minutes=50.0,
+            paused_minutes=47.0,
+        )
+        availability = self.compile_capacity_availability()
+        rejected = self.run_cli(
+            "authorize-capacity", "--session", str(self.session),
+            "--role", "animation_author", "--task-key", "batch-b",
+            "--scope", "G004-G006", "--model", "gpt-5.6-sol",
+            "--availability-snapshot", str(availability),
+            "--capacity-evidence", str(evidence), "--reason",
+            "The wall clock looks idle, but most of that interval was an authorized human pause.",
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("five measured reviewer-wait minutes", rejected.stderr)
+
+    def test_capacity_expansion_rejects_compiled_nonempty_candidate_queue(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence(candidate_queue_depth=1)
+        availability = self.compile_capacity_availability()
+        rejected = self.run_cli(
+            "authorize-capacity", "--session", str(self.session),
+            "--role", "animation_author", "--task-key", "batch-b",
+            "--scope", "G004-G006", "--model", "gpt-5.6-sol",
+            "--availability-snapshot", str(availability),
+            "--capacity-evidence", str(evidence), "--reason",
+            "One independent batch remains pending while the production ceiling has room.",
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("candidate already waits for review", rejected.stderr)
+
+    def test_capacity_registration_revalidates_compiled_source_bytes(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence()
+        availability = self.compile_capacity_availability()
+        authorization = json.loads(
+            self.run_cli(
+                "authorize-capacity", "--session", str(self.session),
+                "--role", "animation_author", "--task-key", "batch-b",
+                "--scope", "G004-G006", "--model", "gpt-5.6-sol",
+                "--availability-snapshot", str(availability),
+                "--capacity-evidence", str(evidence), "--reason",
+                "One independent batch remains pending while the measured review queue is empty.",
+            ).stdout
+        )
+        receipt = json.loads(evidence.read_text(encoding="utf-8"))
+        clock_path = Path(receipt["sources"]["delivery_clock"]["path"])
+        clock = json.loads(clock_path.read_text(encoding="utf-8"))
+        clock["source_changed_after_authorization"] = True
+        clock.pop("clock_hash", None)
+        clock["clock_hash"] = object_hash(clock)
+        clock_path.write_text(json.dumps(clock), encoding="utf-8")
+        rejected = self.run_cli(
+            "register-capacity", "--session", str(self.session),
+            "--authorization-id", authorization["authorization_id"],
+            "--new-agent-id", "a2", check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("is stale", rejected.stderr)
+
+    def test_capacity_evidence_rejects_incomplete_token_telemetry(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence()
+        receipt = json.loads(evidence.read_text(encoding="utf-8"))
+        phase_log = Path(receipt["sources"]["phase_log"]["path"])
+        event = json.loads(phase_log.read_text(encoding="utf-8"))
+        event["token_observed"] = False
+        phase_log.write_text(json.dumps(event) + "\n", encoding="utf-8")
+        rejected = self.run_cli(
+            "seal-capacity-evidence",
+            "--repo-root", str(self.root),
+            "--session", str(self.session),
+            "--delivery-clock", receipt["sources"]["delivery_clock"]["path"],
+            "--efficiency-contract", receipt["sources"]["efficiency_contract"]["path"],
+            "--output", str(self.root / "incomplete-capacity-evidence.json"),
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("complete cumulative token telemetry", rejected.stderr)
+
+    def test_capacity_evidence_requires_exact_episode_clock_lineage(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence()
+        receipt = json.loads(evidence.read_text(encoding="utf-8"))
+        clock_path = Path(receipt["sources"]["delivery_clock"]["path"])
+        contract_path = Path(receipt["sources"]["efficiency_contract"]["path"])
+
+        other_episode = self.root / "other-episode"
+        other_episode.mkdir()
+        clock = json.loads(clock_path.read_text(encoding="utf-8"))
+        clock["episode"] = "other-episode"
+        clock.pop("clock_hash", None)
+        clock["clock_hash"] = object_hash(clock)
+        clock_path.write_text(json.dumps(clock), encoding="utf-8")
+        mismatched = self.run_cli(
+            "seal-capacity-evidence", "--repo-root", str(self.root),
+            "--session", str(self.session),
+            "--delivery-clock", str(clock_path),
+            "--efficiency-contract", str(contract_path),
+            "--output", str(self.root / "mismatched-capacity.json"),
+            check=False,
+        )
+        self.assertNotEqual(mismatched.returncode, 0)
+        self.assertIn("belong to different episodes", mismatched.stderr)
+
+        evidence = self.compile_capacity_evidence()
+        receipt = json.loads(evidence.read_text(encoding="utf-8"))
+        contract_path = Path(receipt["sources"]["efficiency_contract"]["path"])
+        ledger_path = Path(receipt["sources"]["reservation_ledger"]["path"])
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract.pop("delivery_clock_binding")
+        contract.pop("contract_hash", None)
+        contract["contract_hash"] = object_hash(contract)
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        ledger["efficiency_contract_hash"] = contract["contract_hash"]
+        ledger.pop("ledger_hash", None)
+        ledger["ledger_hash"] = object_hash(ledger)
+        ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+        unbound = self.run_cli(
+            "seal-capacity-evidence", "--repo-root", str(self.root),
+            "--session", str(self.session),
+            "--delivery-clock", receipt["sources"]["delivery_clock"]["path"],
+            "--efficiency-contract", str(contract_path),
+            "--output", str(self.root / "unbound-capacity.json"),
+            check=False,
+        )
+        self.assertNotEqual(unbound.returncode, 0)
+        self.assertIn("lacks exact delivery-clock lineage", unbound.stderr)
+
+    def test_capacity_evidence_rejects_forged_initial_clock_hash(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence()
+        receipt = json.loads(evidence.read_text(encoding="utf-8"))
+        contract_path = Path(receipt["sources"]["efficiency_contract"]["path"])
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        contract["delivery_clock_binding"]["initial_clock_hash"] = "f" * 64
+        contract.pop("contract_hash", None)
+        contract["contract_hash"] = object_hash(contract)
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        rejected = self.run_cli(
+            "seal-capacity-evidence", "--repo-root", str(self.root),
+            "--session", str(self.session),
+            "--delivery-clock", receipt["sources"]["delivery_clock"]["path"],
+            "--efficiency-contract", str(contract_path),
+            "--output", str(self.root / "forged-lineage-capacity.json"),
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("lacks exact delivery-clock lineage", rejected.stderr)
+
     def test_completed_agent_is_reused_for_next_task(self) -> None:
         self.begin("--planned-task", "batch-b|animation_author|G008A-G008C")
         self.run_cli(
@@ -223,6 +921,171 @@ class SupervisorWatchTests(unittest.TestCase):
         self.assertEqual(status["roster_metrics"]["historical_identity_count"], 1)
         self.assertEqual(status["roster_metrics"]["reuse_count"], 1)
         self.assertEqual(status["roster_metrics"]["replacement_count"], 0)
+
+    def test_closed_session_restart_cannot_reset_identity_history(self) -> None:
+        self.begin()
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "author-1", "--state", "completed",
+        )
+        self.run_cli("finish", "--session", str(self.session))
+        rejected = self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "author-2|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--replace", "--replace-reason",
+            "User reopened production after final review and requested one bounded follow-up scene.",
+            "--output", str(self.session), check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("must reuse preserved identities", rejected.stderr)
+        status = json.loads(
+            self.run_cli(
+                "begin", "--supervisor-agent-id", "root-agent",
+                "--assignment", "author-1|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+                "--replace", "--replace-reason",
+                "User reopened production after final review and requested one bounded follow-up scene.",
+                "--output", str(self.session),
+            ).stdout
+        )
+        self.assertEqual(status["roster_metrics"]["historical_identity_count"], 1)
+
+    def test_closed_session_restart_must_restore_complete_current_identity_pool(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--assignment", "a2|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--output", str(self.session),
+        )
+        for agent_id in ("a1", "a2"):
+            self.run_cli(
+                "set-assignment", "--session", str(self.session),
+                "--agent-id", agent_id, "--state", "completed",
+            )
+        self.run_cli("finish", "--session", str(self.session))
+        rejected = self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "a1|animation_author|batch-c|G007-G009|gpt-5.6-sol",
+            "--replace", "--replace-reason",
+            "User reopened production after final review and requested one bounded follow-up batch.",
+            "--output", str(self.session), check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("restore the complete current identity pool", rejected.stderr)
+
+    def test_cancelled_task_does_not_cancel_identity_reuse(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--assignment", "a2|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--output", str(self.session),
+        )
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "a1", "--state", "completed",
+        )
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "a2", "--state", "cancelled",
+        )
+        self.run_cli("finish", "--session", str(self.session))
+        rejected = self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "a1|animation_author|batch-c|G007-G009|gpt-5.6-sol",
+            "--replace", "--replace-reason",
+            "User reopened production after final review and requested one bounded follow-up batch.",
+            "--output", str(self.session), check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("restore the complete current identity pool", rejected.stderr)
+
+    def test_public_assignment_transition_cannot_retire_or_hide_active_task(self) -> None:
+        self.begin()
+        retired = self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "author-1", "--state", "retired",
+            check=False,
+        )
+        self.assertNotEqual(retired.returncode, 0)
+        self.assertIn("invalid choice", retired.stderr)
+
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "author-1", "--state", "completed",
+        )
+        for state in ("active", "blocked"):
+            reopened = self.run_cli(
+                "set-assignment", "--session", str(self.session),
+                "--agent-id", "author-1", "--state", state,
+                check=False,
+            )
+            self.assertNotEqual(reopened.returncode, 0)
+            self.assertIn("use assign-task", reopened.stderr)
+
+        session = json.loads(self.session.read_text(encoding="utf-8"))
+        session["task_queue"]["batch-a"]["state"] = "active"
+        session.pop("session_hash", None)
+        session["session_hash"] = object_hash(session)
+        self.session.write_text(json.dumps(session), encoding="utf-8")
+        blocked = self.run_cli(
+            "finish", "--session", str(self.session), check=False
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("task rows remain active", blocked.stderr)
+
+    def test_closed_session_restart_cannot_change_reused_role_or_model(self) -> None:
+        self.begin()
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "author-1", "--state", "completed",
+        )
+        self.run_cli("finish", "--session", str(self.session))
+        for assignment in (
+            "author-1|independent_reviewer|batch-b|G004-G006|gpt-5.6-sol",
+            "author-1|animation_author|batch-b|G004-G006|gpt-5.6-luna",
+        ):
+            rejected = self.run_cli(
+                "begin", "--supervisor-agent-id", "root-agent",
+                "--assignment", assignment,
+                "--replace", "--replace-reason",
+                "User reopened production after final review and requested one bounded follow-up scene.",
+                "--output", str(self.session), check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("preserve each reused identity's role and model", rejected.stderr)
+
+    def test_capacity_expansion_requires_untampered_compiled_evidence(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--max-subagents", "2",
+            "--assignment", "a1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
+            "--planned-task", "batch-b|animation_author|G004-G006",
+            "--output", str(self.session),
+        )
+        evidence = self.compile_capacity_evidence()
+        availability = self.compile_capacity_availability()
+        original = json.loads(evidence.read_text(encoding="utf-8"))
+        for section, field, value in (
+            ("delivery", "reviewer_wait_minutes", "nan"),
+            ("delivery", "reviewer_wait_minutes", "inf"),
+            ("cost", "cost_headroom_fraction", "nan"),
+            ("cost", "cost_headroom_fraction", "inf"),
+        ):
+            forged = json.loads(json.dumps(original))
+            forged[section][field] = value
+            forged.pop("receipt_hash", None)
+            forged["receipt_hash"] = object_hash(forged)
+            forged_path = self.root / f"forged-{section}-{str(value)}.json"
+            forged_path.write_text(json.dumps(forged), encoding="utf-8")
+            rejected = self.run_cli(
+                "authorize-capacity", "--session", str(self.session),
+                "--role", "animation_author", "--task-key", "batch-b",
+                "--scope", "G004-G006", "--model", "gpt-5.6-sol",
+                "--availability-snapshot", str(availability),
+                "--capacity-evidence", str(forged_path), "--reason",
+                "The measured empty review queue would otherwise justify the pending independent batch.",
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
 
     def test_completed_batch_key_can_be_reopened_for_a_new_bounded_cycle(self) -> None:
         self.begin()
@@ -737,7 +1600,7 @@ class SupervisorWatchTests(unittest.TestCase):
         self.run_cli(
             "begin", "--supervisor-agent-id", "root-agent",
             "--assignment", "author-1|animation_author|batch-a|G001-G003|gpt-5.6-sol",
-            "--assignment", "author-2|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--assignment", "author-2|animation_author|batch-b|G004-G006|gpt-5.7-sol",
             "--output", str(self.session),
         )
         self.run_cli(
@@ -753,6 +1616,29 @@ class SupervisorWatchTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("compatible roster member is reusable", result.stderr)
+
+    def test_model_change_can_replace_when_no_reusable_identity_has_requested_model(self) -> None:
+        self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "author-1|animation_author|batch-a|G001-G003|gpt-5.6-luna",
+            "--assignment", "author-2|animation_author|batch-b|G004-G006|gpt-5.6-luna",
+            "--output", str(self.session),
+        )
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "author-2", "--state", "completed",
+        )
+        authorization = json.loads(
+            self.run_cli(
+                "authorize-replacement", "--session", str(self.session),
+                "--old-agent-id", "author-1",
+                "--reason", "model_change_required",
+                "--new-model", "gpt-5.6-sol",
+                "--evidence",
+                "Human authorized a Sol author takeover after the Luna visual-language failure.",
+            ).stdout
+        )
+        self.assertEqual(authorization["new_model"], "gpt-5.6-sol")
 
     def test_unavailable_agent_replacement_requires_live_snapshot_and_is_recorded(self) -> None:
         self.begin()
@@ -791,6 +1677,45 @@ class SupervisorWatchTests(unittest.TestCase):
         self.assertEqual(status["active_assignments"], ["author-2"])
         self.assertEqual(status["roster_metrics"]["historical_identity_count"], 2)
         self.assertEqual(status["roster_metrics"]["replacement_count"], 1)
+
+    def test_closed_session_restart_cannot_directly_revive_retired_identity(self) -> None:
+        self.begin()
+        unavailable_path = self.root / "unavailable-retired.json"
+        self.run_cli(
+            "seal-availability-snapshot",
+            "--followup-attempt",
+            "author-1|target_not_found|Direct followup_task reported that the original target was not found.",
+            "--output", str(unavailable_path),
+        )
+        authorization = json.loads(
+            self.run_cli(
+                "authorize-replacement", "--session", str(self.session),
+                "--old-agent-id", "author-1", "--reason", "agent_unavailable",
+                "--availability-snapshot", str(unavailable_path),
+                "--evidence",
+                "A sealed direct followup probe reported the original identity unavailable.",
+            ).stdout
+        )
+        self.run_cli(
+            "register-replacement", "--session", str(self.session),
+            "--authorization-id", authorization["authorization_id"],
+            "--new-agent-id", "author-2",
+        )
+        self.run_cli(
+            "set-assignment", "--session", str(self.session),
+            "--agent-id", "author-2", "--state", "completed",
+        )
+        self.run_cli("finish", "--session", str(self.session))
+        rejected = self.run_cli(
+            "begin", "--supervisor-agent-id", "root-agent",
+            "--assignment", "author-1|animation_author|batch-b|G004-G006|gpt-5.6-sol",
+            "--assignment", "author-2|animation_author|batch-c|G007-G009|gpt-5.6-sol",
+            "--replace", "--replace-reason",
+            "User reopened production after final review and requested one bounded follow-up scene.",
+            "--output", str(self.session), check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("cannot directly revive retired identity", rejected.stderr)
 
     def test_replacement_rejects_visibility_snapshot_without_direct_followup_probe(self) -> None:
         self.begin()

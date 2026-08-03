@@ -1,4 +1,4 @@
-"""Hard design-readiness receipt required before expensive audio and final renders."""
+"""Historical workflow-v1 animatic readiness; workflow v2 uses visual-plan review."""
 
 from __future__ import annotations
 

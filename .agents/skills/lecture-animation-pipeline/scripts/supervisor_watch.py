@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -39,13 +40,24 @@ ROUTINE_EVENT_TYPES = {
     "hash_or_gate_detail",
 }
 ASSIGNMENT_STATES = {"active", "idle", "completed", "blocked", "cancelled", "retired"}
-REUSABLE_STATES = {"idle", "completed"}
+# ``cancelled`` terminates a task, not the durable child identity.  Keeping it
+# reusable prevents a cancelled batch from becoming an unrecorded spawn escape.
+REUSABLE_STATES = {"idle", "completed", "cancelled"}
 REPLACEMENT_REASONS = {
     "agent_unavailable",
     "task_tree_changed",
     "model_change_required",
     "unrecoverable_failure",
 }
+CAPACITY_AUTHORIZATION_STATUSES = {"authorized", "consumed", "cancelled"}
+CAPACITY_EVIDENCE_SCHEMA = "lecture-animation-capacity-evidence-v1"
+CAPACITY_EVIDENCE_MAX_AGE_SECONDS = 15 * 60
+CAPACITY_TOKEN_FIELDS = (
+    "raw_input_plus_output_tokens",
+    "uncached_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+)
 FOLLOWUP_OUTCOMES = {
     "restored",
     "target_not_found",
@@ -53,6 +65,8 @@ FOLLOWUP_OUTCOMES = {
     "unrecoverable_error",
 }
 DEFAULT_MAX_SUBAGENTS = 3
+MAX_SUBAGENTS = 8
+DEFAULT_HEARTBEAT_STALE_SECONDS = 10 * 60
 DEFAULT_MAX_REPLACEMENTS = 1
 MAX_AVAILABILITY_AGE_SECONDS = 15 * 60
 REVIEW_TODO_STATES = {
@@ -102,6 +116,261 @@ def bound_file(path: Path) -> dict[str, Any]:
     }
 
 
+def _parse_utc(value: Any, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PipelineError(f"{label} timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _capacity_clock_hash(clock: dict[str, Any]) -> str:
+    payload = dict(clock)
+    payload.pop("clock_hash", None)
+    return object_hash(payload)
+
+
+def capacity_delivery_metrics(
+    clock: dict[str, Any], *, now: datetime
+) -> dict[str, Any]:
+    if clock.get("schema") != "lecture-animation-delivery-clock-v1":
+        raise PipelineError("capacity evidence delivery clock schema is invalid")
+    if clock.get("clock_hash") != _capacity_clock_hash(clock):
+        raise PipelineError("capacity evidence delivery clock hash is invalid or stale")
+    if clock.get("status") != "active":
+        raise PipelineError("capacity evidence requires an active delivery clock")
+    stage = str(clock.get("current_stage", ""))
+    if stage not in {"fanout", "closure"}:
+        raise PipelineError(
+            "additive production capacity is allowed only during fanout or closure"
+        )
+    stage_times = [
+        _parse_utc(row.get("created_at"), "delivery checkpoint")
+        for row in clock.get("checkpoints", [])
+        if isinstance(row, dict) and row.get("stage") == stage
+    ]
+    if not stage_times:
+        raise PipelineError(
+            "capacity evidence lacks the current delivery-stage checkpoint"
+        )
+    board = clock.get("scene_board", {})
+    if not isinstance(board, dict):
+        raise PipelineError("capacity evidence delivery board is invalid")
+    candidate_queue_depth = sum(
+        1
+        for row in board.values()
+        if isinstance(row, dict)
+        and row.get("state")
+        in {"rendered", "self_review_passed", "sol_reviewed"}
+    )
+    review_completion_times: list[datetime] = []
+    for row in board.values():
+        if not isinstance(row, dict):
+            continue
+        for event in row.get("history", []):
+            if isinstance(event, dict) and event.get("state") == "sol_reviewed":
+                review_completion_times.append(
+                    _parse_utc(event.get("at"), "Sol review completion")
+                )
+    reviewer_idle_since = max([*stage_times, *review_completion_times])
+    if reviewer_idle_since > now + timedelta(seconds=5):
+        raise PipelineError("capacity evidence reviewer-idle baseline is in the future")
+    reviewer_wait_seconds = 0.0
+    for interval in clock.get("active_intervals", []):
+        if not isinstance(interval, dict):
+            continue
+        interval_start = _parse_utc(
+            interval.get("started_at"), "delivery active interval"
+        )
+        interval_end = (
+            _parse_utc(interval.get("ended_at"), "delivery active interval")
+            if interval.get("ended_at")
+            else now
+        )
+        overlap_start = max(reviewer_idle_since, interval_start)
+        overlap_end = min(now, interval_end)
+        reviewer_wait_seconds += max(
+            0.0, (overlap_end - overlap_start).total_seconds()
+        )
+    reviewer_wait_minutes = reviewer_wait_seconds / 60.0
+    return {
+        "delivery_clock_hash": clock.get("clock_hash"),
+        "current_stage": stage,
+        "max_production_agents": int(clock.get("max_production_agents", 0) or 0),
+        "candidate_queue_depth": candidate_queue_depth,
+        "reviewer_idle_since": reviewer_idle_since.isoformat(),
+        "reviewer_wait_minutes": round(reviewer_wait_minutes, 3),
+    }
+
+
+def capacity_cost_metrics(
+    efficiency_contract_path: Path,
+) -> dict[str, Any]:
+    # The efficiency engine owns phase de-duplication and reservation
+    # accounting. Import lazily so routine supervisor heartbeats stay cheap.
+    from pipeline_v2_lib.engine import (
+        active_token_reservations,
+        efficiency_status_from_rows,
+        episode_efficiency_central_log,
+        episode_efficiency_reservation_ledger,
+        phase_rows_with_accounting,
+        validate_efficiency_reservation_ledger,
+        validate_episode_efficiency_contract,
+    )
+
+    contract_path = efficiency_contract_path.expanduser().resolve()
+    contract = load_json(contract_path)
+    contract_errors = validate_episode_efficiency_contract(contract)
+    if contract_errors:
+        raise PipelineError(
+            "capacity evidence efficiency contract failed: "
+            + " | ".join(contract_errors)
+        )
+    if contract.get("status") != "active":
+        raise PipelineError("capacity evidence requires an active efficiency contract")
+    phase_log_path = episode_efficiency_central_log(contract)
+    ledger_path = episode_efficiency_reservation_ledger(contract)
+    if not phase_log_path.is_file() or not ledger_path.is_file():
+        raise PipelineError(
+            "capacity evidence requires the canonical phase log and reservation ledger"
+        )
+    ledger = load_json(ledger_path)
+    ledger_errors = validate_efficiency_reservation_ledger(ledger, contract)
+    if ledger_errors:
+        raise PipelineError(
+            "capacity evidence reservation ledger failed: "
+            + " | ".join(ledger_errors)
+        )
+    rows = read_jsonl(phase_log_path)
+    status = efficiency_status_from_rows(
+        contract, rows, reservation_ledger=ledger
+    )
+    observability = status.get("token_observability", {})
+    if (
+        observability.get("applicable") is not True
+        or float(observability.get("coverage", 0.0) or 0.0) < 1.0
+    ):
+        raise PipelineError(
+            "capacity expansion requires complete cumulative token telemetry"
+        )
+    accounted_rows = phase_rows_with_accounting(
+        rows, contract=contract, reservation_ledger=ledger
+    )
+    completed_accounting_identities = {
+        str(row.get("accounting_identity"))
+        for row in accounted_rows
+        if row.get("accounting_identity")
+    }
+    reserved = active_token_reservations(
+        ledger,
+        contract=contract,
+        excluded_accounting_identities=completed_accounting_identities,
+    )
+    observed = status.get("token_status", {}).get("observed", {})
+    limits = {
+        field: int(contract.get("budget", {}).get(field, 0) or 0)
+        for field in CAPACITY_TOKEN_FIELDS
+    }
+    if any(limit <= 0 for limit in limits.values()):
+        raise PipelineError("capacity evidence token limits are invalid")
+    used_with_reservations = {
+        field: int(observed.get(field, 0) or 0)
+        + int(reserved.get(field, 0) or 0)
+        for field in CAPACITY_TOKEN_FIELDS
+    }
+    headroom_by_field = {
+        field: round(
+            max(0.0, (limits[field] - used_with_reservations[field]) / limits[field]),
+            6,
+        )
+        for field in CAPACITY_TOKEN_FIELDS
+    }
+    return {
+        "efficiency_contract_hash": contract.get("contract_hash"),
+        "reservation_ledger_hash": ledger.get("ledger_hash"),
+        "token_observability": observability,
+        "token_limits": limits,
+        "token_observed": {
+            field: int(observed.get(field, 0) or 0)
+            for field in CAPACITY_TOKEN_FIELDS
+        },
+        "active_token_reservations": reserved,
+        "token_used_with_reservations": used_with_reservations,
+        "cost_headroom_by_field": headroom_by_field,
+        "cost_headroom_fraction": min(headroom_by_field.values()),
+        "phase_log_path": phase_log_path,
+        "reservation_ledger_path": ledger_path,
+    }
+
+
+def capacity_episode_lineage(
+    *,
+    repo_root: Path,
+    session_path: Path,
+    clock_path: Path,
+    efficiency_contract_path: Path,
+) -> dict[str, Any]:
+    from pipeline_v2_lib.engine import (
+        delivery_clock_initial_hash,
+        relative_or_absolute,
+        resolve_stored_path,
+        validate_delivery_clock,
+    )
+
+    canonical_root = repo_root.expanduser().resolve()
+    clock_resolved = clock_path.expanduser().resolve()
+    contract_resolved = efficiency_contract_path.expanduser().resolve()
+    session_resolved = session_path.expanduser().resolve()
+    clock = load_json(clock_resolved)
+    clock_errors = validate_delivery_clock(clock, repo_root=canonical_root)
+    if clock_errors:
+        raise PipelineError(
+            "capacity evidence delivery clock failed full validation: "
+            + " | ".join(clock_errors)
+        )
+    contract = load_json(contract_resolved)
+    if Path(str(contract.get("canonical_repo_root", ""))).expanduser().resolve() != canonical_root:
+        raise PipelineError(
+            "capacity evidence efficiency contract uses another canonical repo root"
+        )
+    if contract.get("episode") != clock.get("episode"):
+        raise PipelineError(
+            "capacity evidence clock and efficiency contract belong to different episodes"
+        )
+    episode = resolve_stored_path(str(clock.get("episode", "")), canonical_root).resolve()
+    if session_resolved != episode and episode not in session_resolved.parents:
+        raise PipelineError(
+            "capacity evidence supervisor session is outside the canonical episode"
+        )
+    delivery_binding = contract.get("delivery_clock_binding")
+    expected_clock_path = relative_or_absolute(clock_resolved, canonical_root)
+    expected_initial_hash = delivery_clock_initial_hash(clock)
+    if (
+        not isinstance(delivery_binding, dict)
+        or delivery_binding.get("path") != expected_clock_path
+        or delivery_binding.get("t0") != clock.get("t0")
+        or delivery_binding.get("initial_clock_hash") != expected_initial_hash
+    ):
+        raise PipelineError(
+            "capacity evidence efficiency contract lacks exact delivery-clock lineage"
+        )
+    return {
+        "repo_root": str(canonical_root),
+        "episode": str(clock.get("episode")),
+        "delivery_clock_path": expected_clock_path,
+        "delivery_clock_t0": clock.get("t0"),
+        "initial_delivery_clock_hash": expected_initial_hash,
+        "efficiency_contract_path": relative_or_absolute(
+            contract_resolved, canonical_root
+        ),
+        "supervisor_session_path": relative_or_absolute(
+            session_resolved, canonical_root
+        ),
+    }
+
+
 def validate_bound_file(binding: dict[str, Any], label: str) -> None:
     """Reject a checkpoint whose bound artifact changed after sealing."""
     if not isinstance(binding, dict):
@@ -113,6 +382,183 @@ def validate_bound_file(binding: dict[str, Any], label: str) -> None:
         raise PipelineError(f"animatic checkpoint {label} size is stale")
     if str(binding.get("sha256", "")) != sha256_file(path):
         raise PipelineError(f"animatic checkpoint {label} hash is stale")
+
+
+def _serializable_capacity_cost(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metrics.items()
+        if key not in {"phase_log_path", "reservation_ledger_path"}
+    }
+
+
+def validate_capacity_evidence(
+    receipt: dict[str, Any],
+    *,
+    session_path: Path,
+    session: dict[str, Any],
+    require_current_session_hash: bool,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    if receipt.get("schema") != CAPACITY_EVIDENCE_SCHEMA:
+        raise PipelineError("capacity evidence schema is invalid")
+    payload = dict(receipt)
+    stored_hash = payload.pop("receipt_hash", None)
+    if stored_hash != object_hash(payload):
+        raise PipelineError("capacity evidence hash is invalid or stale")
+    current = now or datetime.now(timezone.utc)
+    created_at = _parse_utc(receipt.get("created_at"), "capacity evidence created_at")
+    expires_at = _parse_utc(receipt.get("expires_at"), "capacity evidence expires_at")
+    if expires_at <= created_at or current > expires_at:
+        raise PipelineError("capacity evidence is expired")
+    if (expires_at - created_at).total_seconds() > CAPACITY_EVIDENCE_MAX_AGE_SECONDS:
+        raise PipelineError("capacity evidence validity window is too long")
+    supervisor = receipt.get("supervisor")
+    if not isinstance(supervisor, dict):
+        raise PipelineError("capacity evidence supervisor binding is missing")
+    if (
+        Path(str(supervisor.get("path", ""))).expanduser().resolve()
+        != session_path.expanduser().resolve()
+        or supervisor.get("session_id") != session.get("session_id")
+    ):
+        raise PipelineError("capacity evidence is bound to another supervisor session")
+    if require_current_session_hash and supervisor.get("session_hash") != session.get(
+        "session_hash"
+    ):
+        raise PipelineError("capacity evidence supervisor session changed")
+    sources = receipt.get("sources")
+    if not isinstance(sources, dict):
+        raise PipelineError("capacity evidence source bindings are missing")
+    for key in (
+        "delivery_clock",
+        "efficiency_contract",
+        "phase_log",
+        "reservation_ledger",
+    ):
+        validate_bound_file(sources.get(key), f"capacity evidence {key}")
+    clock = load_json(Path(str(sources["delivery_clock"]["path"])))
+    lineage = capacity_episode_lineage(
+        repo_root=Path(str(receipt.get("repo_root", ""))),
+        session_path=session_path,
+        clock_path=Path(str(sources["delivery_clock"]["path"])),
+        efficiency_contract_path=Path(
+            str(sources["efficiency_contract"]["path"])
+        ),
+    )
+    if receipt.get("lineage") != lineage:
+        raise PipelineError("capacity evidence episode lineage is stale")
+    delivery = capacity_delivery_metrics(clock, now=current)
+    delivery_at_creation = capacity_delivery_metrics(clock, now=created_at)
+    contract_path = Path(str(sources["efficiency_contract"]["path"]))
+    cost_full = capacity_cost_metrics(contract_path)
+    cost = _serializable_capacity_cost(cost_full)
+    expected_phase_log = Path(cost_full["phase_log_path"]).resolve()
+    expected_ledger = Path(cost_full["reservation_ledger_path"]).resolve()
+    if (
+        Path(str(sources["phase_log"]["path"])).resolve() != expected_phase_log
+        or Path(str(sources["reservation_ledger"]["path"])).resolve()
+        != expected_ledger
+    ):
+        raise PipelineError("capacity evidence uses noncanonical efficiency sources")
+    stored_delivery = receipt.get("delivery")
+    stored_cost = receipt.get("cost")
+    if not isinstance(stored_delivery, dict) or not isinstance(stored_cost, dict):
+        raise PipelineError("capacity evidence metrics are missing")
+    for field in (
+        "delivery_clock_hash",
+        "current_stage",
+        "max_production_agents",
+        "candidate_queue_depth",
+        "reviewer_idle_since",
+    ):
+        if stored_delivery.get(field) != delivery.get(field):
+            raise PipelineError(f"capacity evidence delivery metric {field} is stale")
+    try:
+        stored_wait = float(stored_delivery.get("reviewer_wait_minutes"))
+        stored_headroom = float(stored_cost.get("cost_headroom_fraction"))
+    except (TypeError, ValueError) as exc:
+        raise PipelineError("capacity evidence numeric metrics are invalid") from exc
+    if not math.isfinite(stored_wait) or not math.isfinite(stored_headroom):
+        raise PipelineError("capacity evidence numeric metrics must be finite")
+    if abs(
+        stored_wait
+        - float(delivery_at_creation.get("reviewer_wait_minutes", 0.0))
+    ) > 0.002:
+        raise PipelineError("capacity evidence reviewer-wait metric was not derived")
+    if stored_cost != cost:
+        raise PipelineError("capacity evidence cost metrics are stale or not derived")
+    return {
+        "receipt_hash": stored_hash,
+        "created_at": created_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "candidate_queue_depth": int(delivery["candidate_queue_depth"]),
+        "max_production_agents": int(delivery["max_production_agents"]),
+        "reviewer_idle_since": delivery["reviewer_idle_since"],
+        "reviewer_wait_minutes": float(delivery["reviewer_wait_minutes"]),
+        "cost_headroom_fraction": float(cost["cost_headroom_fraction"]),
+        "delivery_clock_hash": delivery["delivery_clock_hash"],
+        "efficiency_contract_hash": cost["efficiency_contract_hash"],
+        "reservation_ledger_hash": cost["reservation_ledger_hash"],
+    }
+
+
+def seal_capacity_evidence(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).expanduser().resolve()
+    session_path = Path(args.session).expanduser().resolve()
+    session = load_json(session_path)
+    validate_session(session)
+    require_v2(session)
+    if session.get("closed_at"):
+        raise PipelineError("cannot compile capacity evidence for a closed session")
+    clock_path = Path(args.delivery_clock).expanduser().resolve()
+    contract_path = Path(args.efficiency_contract).expanduser().resolve()
+    now = datetime.now(timezone.utc)
+    lineage = capacity_episode_lineage(
+        repo_root=repo_root,
+        session_path=session_path,
+        clock_path=clock_path,
+        efficiency_contract_path=contract_path,
+    )
+    delivery = capacity_delivery_metrics(load_json(clock_path), now=now)
+    cost_full = capacity_cost_metrics(contract_path)
+    cost = _serializable_capacity_cost(cost_full)
+    receipt = {
+        "schema": CAPACITY_EVIDENCE_SCHEMA,
+        "repo_root": str(repo_root),
+        "created_at": now.isoformat(),
+        "expires_at": (
+            now + timedelta(seconds=CAPACITY_EVIDENCE_MAX_AGE_SECONDS)
+        ).isoformat(),
+        "supervisor": {
+            "path": str(session_path),
+            "session_id": session.get("session_id"),
+            "session_hash": session.get("session_hash"),
+        },
+        "sources": {
+            "delivery_clock": bound_file(clock_path),
+            "efficiency_contract": bound_file(contract_path),
+            "phase_log": bound_file(Path(cost_full["phase_log_path"])),
+            "reservation_ledger": bound_file(
+                Path(cost_full["reservation_ledger_path"])
+            ),
+        },
+        "lineage": lineage,
+        "delivery": delivery,
+        "cost": cost,
+    }
+    receipt["receipt_hash"] = object_hash(receipt)
+    validate_capacity_evidence(
+        receipt,
+        session_path=session_path,
+        session=session,
+        require_current_session_hash=True,
+        now=now,
+    )
+    output = Path(args.output).expanduser().resolve()
+    with locked_paths([output]):
+        atomic_write_json_unlocked(output, receipt)
+    print(json.dumps(receipt, ensure_ascii=False, indent=2))
+    return 0
 
 
 def validate_session(session: dict[str, Any]) -> None:
@@ -135,8 +581,10 @@ def validate_session(session: dict[str, Any]) -> None:
             raise PipelineError(f"assignment {agent_id} requires role and scope")
     if schema == SCHEMA:
         maximum = int(session.get("max_subagents", 0) or 0)
-        if maximum < 1:
-            raise PipelineError("supervisor max_subagents must be positive")
+        if not 1 <= maximum <= MAX_SUBAGENTS:
+            raise PipelineError(
+                f"supervisor max_subagents must be in 1..{MAX_SUBAGENTS}"
+            )
         if len(assignments) > maximum:
             raise PipelineError("supervisor roster exceeds max_subagents")
         if maximum > DEFAULT_MAX_SUBAGENTS and not str(session.get("capacity_override_reason", "")).strip():
@@ -149,6 +597,57 @@ def validate_session(session: dict[str, Any]) -> None:
         authorizations = session.get("replacement_authorizations")
         if not isinstance(authorizations, dict):
             raise PipelineError("supervisor replacement_authorizations must be an object")
+        capacity_authorizations = session.get("capacity_authorizations", {})
+        if not isinstance(capacity_authorizations, dict):
+            raise PipelineError("supervisor capacity_authorizations must be an object")
+        for authorization_id, authorization in capacity_authorizations.items():
+            if not str(authorization_id).strip() or not isinstance(
+                authorization, dict
+            ):
+                raise PipelineError(
+                    "supervisor capacity authorizations must be structured"
+                )
+            if authorization.get("status") not in CAPACITY_AUTHORIZATION_STATUSES:
+                raise PipelineError(
+                    f"capacity authorization {authorization_id} has invalid status"
+                )
+            try:
+                reviewer_wait_minutes = float(
+                    authorization.get("reviewer_wait_minutes")
+                )
+                cost_headroom_fraction = float(
+                    authorization.get("cost_headroom_fraction")
+                )
+            except (TypeError, ValueError) as exc:
+                raise PipelineError(
+                    f"capacity authorization {authorization_id} has invalid numeric evidence"
+                ) from exc
+            if not math.isfinite(reviewer_wait_minutes) or reviewer_wait_minutes < 5.0:
+                raise PipelineError(
+                    f"capacity authorization {authorization_id} has invalid reviewer-wait evidence"
+                )
+            if (
+                not math.isfinite(cost_headroom_fraction)
+                or not 0.0 < cost_headroom_fraction <= 1.0
+            ):
+                raise PipelineError(
+                    f"capacity authorization {authorization_id} has invalid cost-headroom evidence"
+                )
+            evidence_binding = authorization.get("capacity_evidence")
+            availability_binding = authorization.get("availability_snapshot")
+            if (
+                not isinstance(evidence_binding, dict)
+                or not str(evidence_binding.get("path", "")).strip()
+                or not str(evidence_binding.get("sha256", "")).strip()
+                or not str(authorization.get("capacity_evidence_receipt_hash", "")).strip()
+                or not isinstance(availability_binding, dict)
+                or not str(availability_binding.get("path", "")).strip()
+                or not str(availability_binding.get("sha256", "")).strip()
+                or not str(authorization.get("availability_snapshot_hash", "")).strip()
+            ):
+                raise PipelineError(
+                    f"capacity authorization {authorization_id} lacks compiled evidence"
+                )
         task_queue = session.get("task_queue")
         if not isinstance(task_queue, dict) or not task_queue:
             raise PipelineError("supervisor task_queue must contain the sealed episode work")
@@ -363,6 +862,11 @@ def event_log_path(session_path: Path, session: dict[str, Any]) -> Path:
 
 def begin(args: argparse.Namespace) -> int:
     output = Path(args.output).resolve()
+    restart_candidate = bool(args.replace and output.is_file())
+    if args.replace and not restart_candidate:
+        raise PipelineError(
+            "--replace requires an existing closed supervisor session"
+        )
     assignments: dict[str, dict[str, Any]] = {}
     for raw in args.assignment:
         agent_id, assignment = parse_assignment(raw)
@@ -390,10 +894,15 @@ def begin(args: argparse.Namespace) -> int:
     mode = "explicit_verbose_override" if args.verbose_override else "continuous_low_noise"
     if args.verbose_override and not str(args.override_reason or "").strip():
         raise PipelineError("verbose supervision requires an explicit override reason")
-    if args.max_subagents < 1:
-        raise PipelineError("--max-subagents must be positive")
-    if len(assignments) > args.max_subagents:
+    if not 1 <= args.max_subagents <= MAX_SUBAGENTS:
+        raise PipelineError(f"--max-subagents must be in 1..{MAX_SUBAGENTS}")
+    if len(assignments) > args.max_subagents and not restart_candidate:
         raise PipelineError("initial roster exceeds --max-subagents")
+    if len(assignments) > DEFAULT_MAX_SUBAGENTS and not restart_candidate:
+        raise PipelineError(
+            "initial roster cannot exceed three identities; seal a higher ceiling "
+            "and use compiled capacity evidence before each additive spawn"
+        )
     if args.max_subagents > DEFAULT_MAX_SUBAGENTS and len(str(args.capacity_override_reason or "").strip()) < 24:
         raise PipelineError("more than three subagents requires a concrete --capacity-override-reason")
     if args.max_replacements < 0:
@@ -421,12 +930,18 @@ def begin(args: argparse.Namespace) -> int:
             "identity_history": sorted(assignments),
             "replacement_count": 0,
             "replacement_authorizations": {},
+            "capacity_expansion_count": 0,
+            "capacity_authorizations": {},
             "review_todos": {},
             "retired_identities": [],
             "acknowledged_event_ids": [],
         }
     )
     with locked_paths([output]):
+        if args.replace and not output.is_file():
+            raise PipelineError(
+                "--replace requires an existing closed supervisor session"
+            )
         if output.exists():
             current = load_json_unlocked(output)
             validate_session(current)
@@ -436,6 +951,108 @@ def begin(args: argparse.Namespace) -> int:
                 raise PipelineError("cannot replace an active supervisor session; reuse or explicitly replace one roster member")
             if len(str(args.replace_reason or "").strip()) < 24:
                 raise PipelineError("restarting a closed supervisor session requires a concrete --replace-reason")
+            if current.get("schema") == SCHEMA:
+                current_maximum = int(current.get("max_subagents", 0) or 0)
+                if len(assignments) > current_maximum:
+                    raise PipelineError(
+                        "closed-session restart roster exceeds its preserved "
+                        "max_subagents"
+                    )
+                # Restart restores the already authorized pool; it never
+                # renegotiates capacity from parser defaults or caller prose.
+                session["max_subagents"] = current_maximum
+                session["capacity_override_reason"] = current.get(
+                    "capacity_override_reason"
+                )
+                session["max_replacements"] = int(
+                    current.get("max_replacements", DEFAULT_MAX_REPLACEMENTS)
+                    or 0
+                )
+                historical_ids = set(
+                    map(str, current.get("identity_history", []))
+                )
+                new_ids = sorted(set(assignments) - historical_ids)
+                if new_ids:
+                    raise PipelineError(
+                        "closed-session restart must reuse preserved identities; "
+                        "new ids require capacity/replacement authorization before finish: "
+                        + ", ".join(new_ids)
+                    )
+                current_assignments = current.get("assignments", {})
+                reusable_current_ids = {
+                    agent_id
+                    for agent_id, previous in current_assignments.items()
+                    if isinstance(previous, dict)
+                    and previous.get("state") in REUSABLE_STATES
+                }
+                omitted_ids = sorted(reusable_current_ids - set(assignments))
+                if omitted_ids:
+                    raise PipelineError(
+                        "closed-session restart must restore the complete current identity pool; "
+                        "probe and formally replace unavailable identities after restart: "
+                        + ", ".join(omitted_ids)
+                    )
+                retired_ids = {
+                    str(row.get("agent_id"))
+                    for row in current.get("retired_identities", [])
+                    if isinstance(row, dict)
+                    and str(row.get("agent_id", "")).strip()
+                }
+                for agent_id, assignment in assignments.items():
+                    previous = current_assignments.get(agent_id)
+                    if not isinstance(previous, dict):
+                        if agent_id in retired_ids:
+                            raise PipelineError(
+                                "closed-session restart cannot directly revive retired identity "
+                                f"{agent_id}; use restore-original-identity with fresh availability evidence"
+                            )
+                        raise PipelineError(
+                            f"closed-session restart lacks a current preserved profile for {agent_id}"
+                        )
+                    if previous.get("state") not in REUSABLE_STATES:
+                        raise PipelineError(
+                            f"closed-session restart identity {agent_id} is not reusable"
+                        )
+                    if (
+                        str(assignment.get("role", ""))
+                        != str(previous.get("role", ""))
+                        or str(assignment.get("model", ""))
+                        != str(previous.get("model", ""))
+                    ):
+                        raise PipelineError(
+                            "closed-session restart must preserve each reused identity's role and model; "
+                            f"{agent_id} was {previous.get('role')}|{previous.get('model')}"
+                        )
+                session["identity_history"] = list(
+                    map(str, current.get("identity_history", []))
+                )
+                session["replacement_count"] = int(
+                    current.get("replacement_count", 0) or 0
+                )
+                session["replacement_authorizations"] = dict(
+                    current.get("replacement_authorizations", {})
+                )
+                session["capacity_expansion_count"] = int(
+                    current.get("capacity_expansion_count", 0) or 0
+                )
+                session["capacity_authorizations"] = dict(
+                    current.get("capacity_authorizations", {})
+                )
+                session["retired_identities"] = [
+                    row
+                    for row in current.get("retired_identities", [])
+                    if isinstance(row, dict)
+                    and row.get("agent_id") not in assignments
+                ]
+                session["restart_history"] = [
+                    *current.get("restart_history", []),
+                    {
+                        "session_id": current.get("session_id"),
+                        "closed_at": current.get("closed_at"),
+                        "restarted_at": utc_now(),
+                        "reason": args.replace_reason,
+                    },
+                ]
             session["restart_of_session_id"] = current.get("session_id")
             session["restart_reason"] = args.replace_reason
             session = seal(session)
@@ -475,11 +1092,33 @@ def record(args: argparse.Namespace) -> int:
         }
         log_path = event_log_path(session_path, session)
         with locked_paths([log_path]):
-            existing_ids = {row.get("event_id") for row in read_jsonl_unlocked(log_path)} if log_path.exists() else set()
-            if event["event_id"] not in existing_ids:
+            existing_rows = (
+                read_jsonl_unlocked(log_path) if log_path.exists() else []
+            )
+            existing = next(
+                (
+                    row
+                    for row in existing_rows
+                    if row.get("event_id") == event["event_id"]
+                ),
+                None,
+            )
+            if existing is not None:
+                event = {**existing, "idempotent": True}
+            else:
                 append_jsonl_unlocked(log_path, event)
-        session["updated_at"] = utc_now()
-        atomic_write_json_unlocked(session_path, seal(session))
+                if args.event_type == "agent_heartbeat" and args.agent_id:
+                    assignment = session["assignments"][args.agent_id]
+                    assignment["last_heartbeat_at"] = event["created_at"]
+                    assignment["updated_at"] = event["created_at"]
+                    task = session.get("task_queue", {}).get(
+                        str(assignment.get("task_key", ""))
+                    )
+                    if isinstance(task, dict):
+                        task["last_heartbeat_at"] = event["created_at"]
+                        task["updated_at"] = event["created_at"]
+                session["updated_at"] = utc_now()
+                atomic_write_json_unlocked(session_path, seal(session))
     print(json.dumps(event, ensure_ascii=False, indent=2))
     return 0
 
@@ -489,16 +1128,41 @@ def set_assignment(args: argparse.Namespace) -> int:
     with locked_paths([session_path]):
         session = load_json_unlocked(session_path)
         validate_session(session)
+        if session.get("closed_at"):
+            raise PipelineError("cannot mutate assignments in a closed supervisor session")
+        if args.state == "retired":
+            raise PipelineError(
+                "retired is an internal evidence-bound replacement state; "
+                "use authorize-replacement and register-replacement"
+            )
         assignment = session["assignments"].get(args.agent_id)
         if assignment is None:
             raise PipelineError("assignment agent id is outside the sealed session")
+        previous_state = assignment.get("state")
+        if (
+            previous_state in REUSABLE_STATES
+            and args.state in {"active", "blocked"}
+        ):
+            raise PipelineError(
+                "a reusable identity cannot reopen work through set-assignment; "
+                "use assign-task so task history, reason, and reuse accounting "
+                "remain complete"
+            )
         assignment["state"] = args.state
         assignment["updated_at"] = utc_now()
         assignment["note"] = args.note
         if session.get("schema") == SCHEMA:
             task = session.get("task_queue", {}).get(str(assignment.get("task_key")))
-            if isinstance(task, dict) and args.state in {"active", "completed", "blocked", "cancelled"}:
-                task["state"] = args.state
+            if isinstance(task, dict) and args.state in {
+                "active",
+                "idle",
+                "completed",
+                "blocked",
+                "cancelled",
+            }:
+                task["state"] = (
+                    "completed" if args.state == "idle" else args.state
+                )
                 task["current_agent_id"] = args.agent_id
                 task["updated_at"] = utc_now()
         session["updated_at"] = utc_now()
@@ -562,7 +1226,10 @@ def assign_task(args: argparse.Namespace) -> int:
                 "an active or blocked batch task cannot be reopened; finish the current cycle first"
             )
         if assignment.get("state") not in REUSABLE_STATES:
-            raise PipelineError("agent must be idle or completed before it receives another task")
+            raise PipelineError(
+                "agent must be idle, completed, or task-cancelled before it "
+                "receives another task"
+            )
         if assignment.get("role") != args.role:
             raise PipelineError("reuse must preserve the roster role; replace the roster member only if the role is incompatible")
         task = session.get("task_queue", {}).get(args.task_key)
@@ -1095,6 +1762,389 @@ def acknowledge_review_delivery(args: argparse.Namespace) -> int:
     return 0
 
 
+def compatible_reusable_agent_ids(
+    session: dict[str, Any], *, role: str, model: str, exclude: set[str] | None = None
+) -> list[str]:
+    excluded = exclude or set()
+    normalized_role = str(role).strip()
+    normalized_model = str(model).strip()
+    return sorted(
+        agent_id
+        for agent_id, item in session.get("assignments", {}).items()
+        if agent_id not in excluded
+        and str(item.get("role", "")).strip() == normalized_role
+        and str(item.get("model", "")).strip() == normalized_model
+        and item.get("state") in REUSABLE_STATES
+    )
+
+
+def validate_capacity_reuse_snapshot(
+    session: dict[str, Any],
+    snapshot: dict[str, Any],
+    *,
+    role: str,
+    model: str,
+) -> None:
+    normalized_role = str(role).strip()
+    normalized_model = str(model).strip()
+    reusable_ids = set(map(str, snapshot.get("reusable_agent_ids", [])))
+    followups = snapshot.get("followup_attempts", {})
+    for agent_id, assignment in session.get("assignments", {}).items():
+        if (
+            isinstance(assignment, dict)
+            and str(assignment.get("role", "")).strip() == normalized_role
+            and str(assignment.get("model", "")).strip() == normalized_model
+            and agent_id in reusable_ids
+        ):
+            raise PipelineError(
+                "availability snapshot reports a compatible current identity reusable; "
+                f"restore and assign-task {agent_id}"
+            )
+    for retired in session.get("retired_identities", []):
+        if not isinstance(retired, dict):
+            continue
+        agent_id = str(retired.get("agent_id", "")).strip()
+        if (
+            not agent_id
+            or str(retired.get("role", "")).strip() != normalized_role
+            or str(retired.get("model", "")).strip() != normalized_model
+        ):
+            continue
+        attempt = followups.get(agent_id) if isinstance(followups, dict) else None
+        if agent_id in reusable_ids or (
+            isinstance(attempt, dict) and attempt.get("outcome") == "restored"
+        ):
+            raise PipelineError(
+                "a compatible retired identity was restored; use "
+                f"restore-original-identity for {agent_id} before adding capacity"
+            )
+        if not isinstance(attempt, dict) or attempt.get("outcome") not in {
+            "target_not_found",
+            "target_unavailable",
+            "unrecoverable_error",
+        }:
+            raise PipelineError(
+                "capacity expansion requires a direct failed followup probe for "
+                f"compatible retired identity {agent_id}"
+            )
+
+
+def authorize_capacity(args: argparse.Namespace) -> int:
+    """Authorize one bounded roster expansion after proving reuse is unavailable."""
+
+    session_path = Path(args.session).resolve()
+    with locked_paths([session_path]):
+        session = load_json_unlocked(session_path)
+        validate_session(session)
+        require_v2(session)
+        if session.get("closed_at"):
+            raise PipelineError("cannot expand a closed supervisor session")
+        requested_role = str(args.role).strip()
+        requested_model = str(args.model).strip()
+        requested_task_key = str(args.task_key).strip()
+        requested_scope = str(args.scope).strip()
+        if not all(
+            (requested_role, requested_model, requested_task_key, requested_scope)
+        ):
+            raise PipelineError("capacity expansion fields cannot be blank")
+        if requested_role != "animation_author":
+            raise PipelineError(
+                "additive capacity is reserved for bounded animation-author production"
+            )
+        if len(session["assignments"]) >= int(session.get("max_subagents", 0)):
+            raise PipelineError("sealed supervisor capacity is already full")
+        reusable = compatible_reusable_agent_ids(
+            session, role=requested_role, model=requested_model
+        )
+        if reusable:
+            raise PipelineError(
+                "a compatible roster member is reusable; assign-task one of: "
+                + ", ".join(reusable)
+            )
+        availability_path = Path(args.availability_snapshot).expanduser().resolve()
+        availability = load_availability_snapshot(availability_path)
+        validate_capacity_reuse_snapshot(
+            session,
+            availability,
+            role=requested_role,
+            model=requested_model,
+        )
+        task = session.get("task_queue", {}).get(requested_task_key)
+        if not isinstance(task, dict):
+            raise PipelineError(
+                "capacity expansion requires a task from the sealed pending queue"
+            )
+        if (
+            task.get("state") != "pending"
+            or str(task.get("role", "")).strip() != requested_role
+            or str(task.get("scope", "")).strip() != requested_scope
+        ):
+            raise PipelineError(
+                "capacity expansion must exactly match one pending sealed task"
+            )
+        evidence_path = Path(args.capacity_evidence).expanduser().resolve()
+        evidence_receipt = load_json(evidence_path)
+        evidence_metrics = validate_capacity_evidence(
+            evidence_receipt,
+            session_path=session_path,
+            session=session,
+            require_current_session_hash=True,
+        )
+        active_producer_count = sum(
+            1
+            for assignment in session.get("assignments", {}).values()
+            if isinstance(assignment, dict)
+            and assignment.get("role") == "animation_author"
+            and assignment.get("state") not in {"cancelled", "retired"}
+        )
+        if active_producer_count >= int(
+            evidence_metrics["max_production_agents"]
+        ):
+            raise PipelineError(
+                "capacity expansion would exceed the delivery clock's producer ceiling"
+            )
+        reviewer_wait_minutes = float(
+            evidence_metrics["reviewer_wait_minutes"]
+        )
+        if not math.isfinite(reviewer_wait_minutes) or reviewer_wait_minutes < 5.0:
+            raise PipelineError(
+                "capacity expansion requires at least five measured reviewer-wait minutes"
+            )
+        candidate_queue_depth = int(evidence_metrics["candidate_queue_depth"])
+        if candidate_queue_depth != 0:
+            raise PipelineError(
+                "capacity expansion is forbidden while a candidate already waits for review"
+            )
+        cost_headroom = float(evidence_metrics["cost_headroom_fraction"])
+        if not math.isfinite(cost_headroom) or not 0.0 < cost_headroom <= 1.0:
+            raise PipelineError(
+                "capacity expansion requires positive cumulative cost headroom"
+            )
+        if len(str(args.reason or "").strip()) < 24:
+            raise PipelineError(
+                "capacity expansion requires a concrete production reason"
+            )
+        authorizations = session.setdefault("capacity_authorizations", {})
+        if any(
+            isinstance(row, dict) and row.get("status") == "authorized"
+            for row in authorizations.values()
+        ):
+            raise PipelineError(
+                "consume or cancel the pending capacity authorization first"
+            )
+        now = utc_now()
+        authorization_id = args.authorization_id or "capacity:" + hashlib.sha1(
+            (
+                f"{session['session_id']}|{requested_task_key}|{requested_role}|"
+                f"{requested_model}|{now}"
+            ).encode()
+        ).hexdigest()[:16]
+        authorizations[authorization_id] = {
+            "authorization_id": authorization_id,
+            "status": "authorized",
+            "created_at": now,
+            "role": requested_role,
+            "task_key": requested_task_key,
+            "scope": requested_scope,
+            "model": requested_model,
+            "reviewer_wait_minutes": reviewer_wait_minutes,
+            "reviewer_idle_since": evidence_metrics["reviewer_idle_since"],
+            "candidate_queue_depth": candidate_queue_depth,
+            "cost_headroom_fraction": cost_headroom,
+            "reason": args.reason,
+            "availability_snapshot": bound_file(availability_path),
+            "availability_snapshot_hash": availability.get("snapshot_hash"),
+            "capacity_evidence": bound_file(evidence_path),
+            "capacity_evidence_receipt_hash": evidence_metrics["receipt_hash"],
+            "delivery_clock_hash": evidence_metrics["delivery_clock_hash"],
+            "efficiency_contract_hash": evidence_metrics[
+                "efficiency_contract_hash"
+            ],
+            "reservation_ledger_hash": evidence_metrics[
+                "reservation_ledger_hash"
+            ],
+            "sealed_max_subagents": int(session.get("max_subagents", 0)),
+        }
+        session["updated_at"] = now
+        atomic_write_json_unlocked(session_path, seal(session))
+    print(json.dumps(authorizations[authorization_id], ensure_ascii=False, indent=2))
+    return 0
+
+
+def register_capacity(args: argparse.Namespace) -> int:
+    """Consume one capacity authorization after the new child identity exists."""
+
+    session_path = Path(args.session).resolve()
+    with locked_paths([session_path]):
+        session = load_json_unlocked(session_path)
+        validate_session(session)
+        require_v2(session)
+        authorization = session.get("capacity_authorizations", {}).get(
+            args.authorization_id
+        )
+        if not isinstance(authorization, dict) or authorization.get(
+            "status"
+        ) != "authorized":
+            raise PipelineError(
+                "capacity authorization is missing, stale, or already consumed"
+            )
+        if len(session["assignments"]) >= int(session.get("max_subagents", 0)):
+            raise PipelineError("sealed supervisor capacity became full")
+        availability_binding = authorization.get("availability_snapshot")
+        validate_bound_file(
+            availability_binding, "capacity authorization availability snapshot"
+        )
+        availability = load_availability_snapshot(
+            Path(str(availability_binding.get("path", "")))
+        )
+        if availability.get("snapshot_hash") != authorization.get(
+            "availability_snapshot_hash"
+        ):
+            raise PipelineError(
+                "capacity authorization availability snapshot changed"
+            )
+        validate_capacity_reuse_snapshot(
+            session,
+            availability,
+            role=str(authorization.get("role", "")),
+            model=str(authorization.get("model", "")),
+        )
+        evidence_binding = authorization.get("capacity_evidence")
+        validate_bound_file(
+            evidence_binding, "capacity authorization evidence receipt"
+        )
+        evidence_receipt = load_json(
+            Path(str(evidence_binding.get("path", "")))
+        )
+        evidence_metrics = validate_capacity_evidence(
+            evidence_receipt,
+            session_path=session_path,
+            session=session,
+            require_current_session_hash=False,
+        )
+        if (
+            evidence_metrics["receipt_hash"]
+            != authorization.get("capacity_evidence_receipt_hash")
+            or int(evidence_metrics["candidate_queue_depth"]) != 0
+            or float(evidence_metrics["reviewer_wait_minutes"]) < 5.0
+            or float(evidence_metrics["cost_headroom_fraction"]) <= 0.0
+            or evidence_metrics["delivery_clock_hash"]
+            != authorization.get("delivery_clock_hash")
+            or evidence_metrics["efficiency_contract_hash"]
+            != authorization.get("efficiency_contract_hash")
+            or evidence_metrics["reservation_ledger_hash"]
+            != authorization.get("reservation_ledger_hash")
+        ):
+            raise PipelineError(
+                "capacity authorization evidence changed before registration"
+            )
+        if args.new_agent_id in session["assignments"] or args.new_agent_id in set(
+            map(str, session.get("identity_history", []))
+        ):
+            raise PipelineError(
+                "new capacity agent id is already known; reuse the preserved identity"
+            )
+        reusable = compatible_reusable_agent_ids(
+            session,
+            role=str(authorization.get("role", "")),
+            model=str(authorization.get("model", "")),
+        )
+        if reusable:
+            raise PipelineError(
+                "a compatible roster member became reusable; assign-task one of: "
+                + ", ".join(reusable)
+            )
+        task_key = str(authorization.get("task_key", ""))
+        task = session.get("task_queue", {}).get(task_key)
+        if (
+            not isinstance(task, dict)
+            or task.get("state") != "pending"
+            or task.get("role") != authorization.get("role")
+            or task.get("scope") != authorization.get("scope")
+        ):
+            raise PipelineError(
+                "capacity authorization no longer matches its pending task"
+            )
+        now = utc_now()
+        session["assignments"][args.new_agent_id] = {
+            "role": authorization.get("role"),
+            "task_key": task_key,
+            "scope": authorization.get("scope"),
+            "model": authorization.get("model"),
+            "state": "active",
+            "task_count": 1,
+            "reuse_count": 0,
+            "replacement_of": None,
+            "assignment_history": [
+                {
+                    "task_key": task_key,
+                    "scope": authorization.get("scope"),
+                    "assigned_at": now,
+                    "kind": "capacity_expansion",
+                    "authorization_id": args.authorization_id,
+                }
+            ],
+            "updated_at": now,
+        }
+        session["identity_history"].append(args.new_agent_id)
+        task.update(
+            {
+                "state": "active",
+                "current_agent_id": args.new_agent_id,
+                "updated_at": now,
+            }
+        )
+        authorization.update(
+            {
+                "status": "consumed",
+                "consumed_at": now,
+                "new_agent_id": args.new_agent_id,
+            }
+        )
+        session["capacity_expansion_count"] = int(
+            session.get("capacity_expansion_count", 0) or 0
+        ) + 1
+        session["updated_at"] = now
+        atomic_write_json_unlocked(session_path, seal(session))
+    print(
+        json.dumps(
+            status_payload(session_path, load_json(session_path)),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cancel_capacity_authorization(args: argparse.Namespace) -> int:
+    session_path = Path(args.session).resolve()
+    if len(str(args.reason or "").strip()) < 24:
+        raise PipelineError(
+            "capacity authorization cancellation requires a concrete reason"
+        )
+    with locked_paths([session_path]):
+        session = load_json_unlocked(session_path)
+        validate_session(session)
+        require_v2(session)
+        authorization = session.get("capacity_authorizations", {}).get(
+            args.authorization_id
+        )
+        if not isinstance(authorization, dict) or authorization.get(
+            "status"
+        ) != "authorized":
+            raise PipelineError(
+                "capacity authorization is missing, stale, or already consumed"
+            )
+        now = utc_now()
+        authorization.update(
+            {"status": "cancelled", "cancelled_at": now, "reason": args.reason}
+        )
+        session["updated_at"] = now
+        atomic_write_json_unlocked(session_path, seal(session))
+    print(json.dumps(authorization, ensure_ascii=False, indent=2))
+    return 0
+
+
 def authorize_replacement(args: argparse.Namespace) -> int:
     """Authorize one exceptional new identity only after reuse has been ruled out."""
     session_path = Path(args.session).resolve()
@@ -1107,13 +2157,15 @@ def authorize_replacement(args: argparse.Namespace) -> int:
         old = session["assignments"].get(args.old_agent_id)
         if old is None:
             raise PipelineError("old agent id is outside the current roster")
-        reusable = [
-            agent_id
-            for agent_id, item in session["assignments"].items()
-            if agent_id != args.old_agent_id
-            and item.get("role") == old.get("role")
-            and item.get("state") in REUSABLE_STATES
-        ]
+        requested_model = str(
+            args.new_model or old.get("model", "")
+        ).strip()
+        reusable = compatible_reusable_agent_ids(
+            session,
+            role=str(old.get("role", "")),
+            model=requested_model,
+            exclude={args.old_agent_id},
+        )
         if reusable:
             raise PipelineError(
                 "a compatible roster member is reusable; assign-task one of: " + ", ".join(sorted(reusable))
@@ -1125,7 +2177,6 @@ def authorize_replacement(args: argparse.Namespace) -> int:
                 raise PipelineError(f"{reason} requires --availability-snapshot")
             snapshot = validate_availability_snapshot(Path(args.availability_snapshot), args.old_agent_id)
             availability_hash = snapshot.get("snapshot_hash")
-        requested_model = str(args.new_model or old.get("model", "")).strip()
         if reason == "model_change_required":
             if not requested_model or requested_model == str(old.get("model", "")).strip():
                 raise PipelineError("model_change_required needs --new-model different from the current model")
@@ -1401,6 +2452,32 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
     acknowledged = set(map(str, session.get("acknowledged_event_ids", [])))
     pending = [row for row in rows if row.get("user_visible") and str(row.get("event_id")) not in acknowledged]
     active = [agent_id for agent_id, item in session["assignments"].items() if item.get("state") == "active"]
+    now = datetime.now(timezone.utc)
+    health_probe_required: list[str] = []
+    health_probe_deadlines: dict[str, str] = {}
+    for agent_id in active:
+        assignment = session["assignments"][agent_id]
+        heartbeat_raw = str(
+            assignment.get("last_heartbeat_at")
+            or assignment.get("updated_at")
+            or session.get("updated_at")
+            or ""
+        )
+        try:
+            heartbeat_at = datetime.fromisoformat(heartbeat_raw)
+            if heartbeat_at.tzinfo is None:
+                heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+            stale_seconds = max(0.0, (now - heartbeat_at).total_seconds())
+        except (TypeError, ValueError):
+            stale_seconds = DEFAULT_HEARTBEAT_STALE_SECONDS + 1
+        if stale_seconds > DEFAULT_HEARTBEAT_STALE_SECONDS:
+            health_probe_required.append(agent_id)
+            health_probe_deadlines[agent_id] = (
+                heartbeat_at
+                + timedelta(
+                    seconds=DEFAULT_HEARTBEAT_STALE_SECONDS + 5 * 60
+                )
+            ).isoformat(timespec="seconds")
     blocked = [agent_id for agent_id, item in session["assignments"].items() if item.get("state") == "blocked"]
     reusable = [agent_id for agent_id, item in session["assignments"].items() if item.get("state") in REUSABLE_STATES]
     task_count = len(session.get("task_queue", {})) if session.get("schema") == SCHEMA else sum(
@@ -1421,8 +2498,18 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
     blocked_tasks = sorted(
         key for key, row in task_queue.items() if isinstance(row, dict) and row.get("state") == "blocked"
     )
+    active_tasks = sorted(
+        task_key
+        for task_key, item in session.get("task_queue", {}).items()
+        if isinstance(item, dict) and item.get("state") == "active"
+    )
     pending_authorizations = [
         key for key, row in session.get("replacement_authorizations", {}).items()
+        if isinstance(row, dict) and row.get("status") == "authorized"
+    ]
+    pending_capacity_authorizations = [
+        key
+        for key, row in session.get("capacity_authorizations", {}).items()
         if isinstance(row, dict) and row.get("status") == "authorized"
     ]
     review_todos = session.get("review_todos", {}) if session.get("schema") == SCHEMA else {}
@@ -1467,14 +2554,22 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
         warnings.append("AGENT_IDENTITY_CHURN_ABNORMAL")
     if pending_authorizations and reusable:
         warnings.append("REUSABLE_AGENT_EXISTS_DURING_REPLACEMENT")
+    if pending_capacity_authorizations:
+        warnings.append("CAPACITY_AUTHORIZATION_PENDING")
+    if health_probe_required:
+        warnings.append("STALE_ACTIVE_ASSIGNMENT_REQUIRES_RECONCILIATION")
     return {
         "schema": "lecture-animation-supervisor-status-v1",
         "session_id": session["session_id"],
         "communication_mode": session["communication_mode"],
         "active_assignments": active,
+        "health_probe_required_assignments": sorted(health_probe_required),
+        "health_probe_deadlines": health_probe_deadlines,
+        "heartbeat_stale_seconds": DEFAULT_HEARTBEAT_STALE_SECONDS,
         "blocked_assignments": blocked,
         "reusable_assignments": reusable,
         "pending_tasks": pending_tasks,
+        "active_tasks": active_tasks,
         "blocked_tasks": blocked_tasks,
         "deferred_review_todos": deferred_review_todos,
         "ready_review_todos": ready_review_todos,
@@ -1484,6 +2579,7 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
         ),
         "should_continue_monitoring": bool(
             active
+            or active_tasks
             or pending_tasks
             or blocked_tasks
             or deferred_review_todos
@@ -1500,18 +2596,26 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
             "task_assignment_count": task_count,
             "reuse_count": reuse_count,
             "replacement_count": replacement_count,
+            "capacity_expansion_count": int(
+                session.get("capacity_expansion_count", 0) or 0
+            ),
             "active_replacement_count": active_replacement_count,
             "identity_churn_ratio": round(churn_ratio, 4),
             "pending_replacement_authorizations": pending_authorizations,
+            "pending_capacity_authorizations": pending_capacity_authorizations,
         },
         "roster_warnings": warnings,
-        "roster_clean": not warnings and not pending_authorizations,
+        "roster_clean": not warnings
+        and not pending_authorizations
+        and not pending_capacity_authorizations,
         "may_finish": not active
+        and not active_tasks
         and not blocked
         and not pending_tasks
         and not blocked_tasks
         and not pending
         and not pending_authorizations
+        and not pending_capacity_authorizations
         and not deferred_review_todos
         and not ready_review_todos
         and not interrupt_required_review_todos,
@@ -1534,6 +2638,8 @@ def finish(args: argparse.Namespace) -> int:
         payload = status_payload(session_path, session)
         if payload["active_assignments"]:
             raise PipelineError("cannot finish supervision while assignments remain active")
+        if payload["active_tasks"]:
+            raise PipelineError("cannot finish supervision while task rows remain active")
         if payload["blocked_assignments"]:
             raise PipelineError("cannot finish supervision while assignments remain blocked")
         if payload["pending_tasks"]:
@@ -1552,6 +2658,8 @@ def finish(args: argparse.Namespace) -> int:
             )
         if payload["roster_metrics"]["pending_replacement_authorizations"]:
             raise PipelineError("cannot finish supervision with an unused replacement authorization")
+        if payload["roster_metrics"]["pending_capacity_authorizations"]:
+            raise PipelineError("cannot finish supervision with an unused capacity authorization")
         session["closed_at"] = utc_now()
         session["updated_at"] = utc_now()
         atomic_write_json_unlocked(session_path, seal(session))
@@ -1611,7 +2719,9 @@ def build_parser() -> argparse.ArgumentParser:
     assignment_parser = commands.add_parser("set-assignment")
     assignment_parser.add_argument("--session", required=True)
     assignment_parser.add_argument("--agent-id", required=True)
-    assignment_parser.add_argument("--state", choices=sorted(ASSIGNMENT_STATES), required=True)
+    assignment_parser.add_argument(
+        "--state", choices=sorted(ASSIGNMENT_STATES - {"retired"}), required=True
+    )
     assignment_parser.add_argument("--note")
     assignment_parser.set_defaults(func=set_assignment)
 
@@ -1724,6 +2834,63 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_parser.add_argument("--delivery-note", required=True)
     delivery_parser.set_defaults(func=acknowledge_review_delivery)
+
+    capacity_evidence_parser = commands.add_parser(
+        "seal-capacity-evidence",
+        help=(
+            "compile reviewer-starvation, candidate-queue, and cumulative-cost "
+            "evidence from the current canonical clock and efficiency ledgers"
+        ),
+    )
+    capacity_evidence_parser.add_argument("--repo-root", default=".")
+    capacity_evidence_parser.add_argument("--session", required=True)
+    capacity_evidence_parser.add_argument("--delivery-clock", required=True)
+    capacity_evidence_parser.add_argument("--efficiency-contract", required=True)
+    capacity_evidence_parser.add_argument("--output", required=True)
+    capacity_evidence_parser.set_defaults(func=seal_capacity_evidence)
+
+    capacity_parser = commands.add_parser(
+        "authorize-capacity",
+        help=(
+            "authorize one additive identity inside the sealed roster cap only "
+            "after measured reviewer starvation and reuse checks"
+        ),
+    )
+    capacity_parser.add_argument("--session", required=True)
+    capacity_parser.add_argument("--role", required=True)
+    capacity_parser.add_argument("--task-key", required=True)
+    capacity_parser.add_argument("--scope", required=True)
+    capacity_parser.add_argument("--model", required=True)
+    capacity_parser.add_argument(
+        "--availability-snapshot",
+        required=True,
+        help=(
+            "fresh sealed list_agents/followup evidence proving that no "
+            "compatible current or retired identity can be reused"
+        ),
+    )
+    capacity_parser.add_argument("--capacity-evidence", required=True)
+    capacity_parser.add_argument("--reason", required=True)
+    capacity_parser.add_argument("--authorization-id")
+    capacity_parser.set_defaults(func=authorize_capacity)
+
+    register_capacity_parser = commands.add_parser(
+        "register-capacity",
+        help="consume a capacity authorization after the additive agent is spawned",
+    )
+    register_capacity_parser.add_argument("--session", required=True)
+    register_capacity_parser.add_argument("--authorization-id", required=True)
+    register_capacity_parser.add_argument("--new-agent-id", required=True)
+    register_capacity_parser.set_defaults(func=register_capacity)
+
+    cancel_capacity_parser = commands.add_parser(
+        "cancel-capacity-authorization",
+        help="cancel an unused additive-capacity authorization",
+    )
+    cancel_capacity_parser.add_argument("--session", required=True)
+    cancel_capacity_parser.add_argument("--authorization-id", required=True)
+    cancel_capacity_parser.add_argument("--reason", required=True)
+    cancel_capacity_parser.set_defaults(func=cancel_capacity_authorization)
 
     authorize_parser = commands.add_parser(
         "authorize-replacement",

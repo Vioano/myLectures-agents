@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
+from datetime import datetime, timedelta
 import hashlib
 import importlib.util
 import io
@@ -14,6 +16,12 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 import wave
+
+from pipeline_v2_lib.episode_ops import (
+    _canonical_formal_occurrence_count,
+    _formal_occurrence_count,
+    run_episode_preflight,
+)
 
 
 MODULE_PATH = Path(__file__).with_name("pipeline_v2.py")
@@ -59,6 +67,320 @@ class PipelineV2Tests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_rule_registry_blocks_incomplete_final_media_coverage(self) -> None:
+        rules = {
+            rule["rule_id"]: rule
+            for rule in pipeline.load_rules()["rules"]
+        }
+        rule = rules["ART-002"]
+        self.assertEqual(rule["severity"], "blocker")
+        self.assertIn("last aligned word", rule["requirement"])
+        self.assertIn("Decoder EOF", rule["requirement"])
+        self.assertIn(
+            "final_assembly_video_stream_truncated_after_scene",
+            rule["source_patterns"],
+        )
+
+    def test_git_state_consolidation_trigger_keeps_canonical_media_contract(
+        self,
+    ) -> None:
+        skill_root = Path(__file__).resolve().parents[1]
+        skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        handoff_text = (
+            skill_root
+            / "references/preflight-portability-and-handoffs.md"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "整理 Git 状态",
+            "/Volumes/bocchi/myLectures",
+            "audit-portability --require-clean",
+            "remove the current task's producer and integration worktrees",
+            "does not authorize push",
+        ):
+            self.assertIn(required, skill_text)
+        self.assertIn("temporary worktree", handoff_text)
+        self.assertIn("not the canonical", handoff_text)
+
+    def test_skill_entrypoint_is_compact_phase_router_with_cold_history(self) -> None:
+        skill_root = Path(__file__).resolve().parents[1]
+        skill_path = skill_root / "SKILL.md"
+        skill_text = skill_path.read_text(encoding="utf-8")
+        self.assertLessEqual(skill_path.stat().st_size, 24 * 1024)
+        for required in (
+            "Load Only The Active Phase",
+            "Eight-Hour Delivery Contract",
+            "quality_gates",
+            "user_review",
+            "references/eight-hour-production.md",
+            "references/historical-episode-continuations.md",
+        ):
+            self.assertIn(required, skill_text)
+        self.assertNotIn("For the historical Episode 8", skill_text)
+        self.assertNotIn("Episode 9 has one evidence-preserving", skill_text)
+        for reference in (
+            "orchestration-and-supervision.md",
+            "progressive-planning-and-audio.md",
+            "autopilot-efficiency.md",
+            "historical-episode-continuations.md",
+            "scene-production-and-review.md",
+            "finalization-evolution-retrospective.md",
+            "eight-hour-production.md",
+        ):
+            self.assertTrue((skill_root / "references" / reference).is_file())
+
+    def test_pronunciation_count_keeps_adjacent_unicode_greek_tokens(self) -> None:
+        narration = r"e^{iθ} dθ，θ，theta，\theta；alphabet 不应命中。"
+        self.assertEqual(_formal_occurrence_count(narration, "theta"), 5)
+        self.assertEqual(_formal_occurrence_count(narration, "alpha"), 0)
+
+    def test_registry_longest_match_keeps_composite_pronunciation_identities(self) -> None:
+        registry = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "references/tts-pronunciation-registry.json"
+            ).read_text(encoding="utf-8")
+        )
+        narration = "Res f 与 f 同时出现；i d theta 和 theta 各出现一次。"
+        self.assertEqual(
+            _canonical_formal_occurrence_count(narration, "res f", registry),
+            1,
+        )
+        self.assertEqual(
+            _canonical_formal_occurrence_count(narration, "f", registry),
+            1,
+        )
+        self.assertEqual(
+            _canonical_formal_occurrence_count(narration, "i d theta", registry),
+            1,
+        )
+        self.assertEqual(
+            _canonical_formal_occurrence_count(narration, "theta", registry),
+            1,
+        )
+
+    def test_episode_preflight_requires_per_scene_pronunciation_bindings(self) -> None:
+        scene_rows = []
+        registry_source = (
+            Path(__file__).resolve().parents[1]
+            / "references/tts-pronunciation-registry.json"
+        )
+        registry_path = (
+            self.root
+            / ".agents/skills/lecture-animation-pipeline/references/tts-pronunciation-registry.json"
+        )
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(
+            registry_source.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        route_id = "indextts2-mlx8-zaojian-takagi-seed3407"
+        for slug, narration_text in (
+            ("g001", "令参数 θ 从零开始。"),
+            ("g002", "再让 θ 走完一圈。小圈积分究竟读取了什么？"),
+        ):
+            scene_root = self.episode / "src" / slug
+            source = scene_root / "scene.py"
+            narration = self.episode / "review" / "v2" / slug / "narration.txt"
+            tts_input = self.episode / "review" / "v2" / slug / "tts_input.txt"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.parent.mkdir(parents=True, exist_ok=True)
+            narration.write_text(narration_text, encoding="utf-8")
+            tts_input.write_text(narration_text.replace("θ", "theta"), encoding="utf-8")
+            mapping = narration.with_name("tts_input_mapping.json")
+            theta_start = narration_text.index("θ")
+            mapping.write_text(
+                json.dumps(
+                    {
+                        "schema": "lecture-animation-tts-input-mapping-v2",
+                        "scene_slug": slug,
+                        "route_id": route_id,
+                        "formal_script_path": pipeline.relative_or_absolute(
+                            narration, self.root
+                        ),
+                        "formal_script_sha256": hashlib.sha256(
+                            narration.read_bytes()
+                        ).hexdigest(),
+                        "tts_input_path": pipeline.relative_or_absolute(
+                            tts_input, self.root
+                        ),
+                        "tts_input_sha256": hashlib.sha256(
+                            tts_input.read_bytes()
+                        ).hexdigest(),
+                        "occurrences": [
+                            {
+                                "token_key": "theta",
+                                "formal_start": theta_start,
+                                "formal_end": theta_start + 1,
+                                "formal_surface": "θ",
+                                "occurrence_index": 1,
+                                "spoken_form": "theta",
+                                "replacement_applied": True,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            scene_rows.append(
+                {
+                    "scene_slug": slug,
+                    "scene_source_path": pipeline.relative_or_absolute(source, self.root),
+                    "scene_source_root": pipeline.relative_or_absolute(scene_root, self.root),
+                    "narration_path": pipeline.relative_or_absolute(narration, self.root),
+                    "tts_input_path": pipeline.relative_or_absolute(tts_input, self.root),
+                    "tts_input_mapping_path": pipeline.relative_or_absolute(
+                        mapping, self.root
+                    ),
+                    "duration_seconds": 8.0,
+                }
+            )
+        contract = {
+            "schema": "lecture-animation-episode-readiness-v2",
+            "readiness_stage": "pre_tts",
+            "author_id": "pronunciation-author",
+            "tts_route_id": route_id,
+            "pronunciation_registry_path": pipeline.relative_or_absolute(
+                registry_path, self.root
+            ),
+            "fixed_ending": "小圈积分究竟读取了什么？",
+            "fixed_ending_contract": {
+                "role": "learner_facing_math_question",
+                "learner_job": "Leave the learner with one precise unresolved mathematical question.",
+                "math_anchor": "small-contour integral",
+                "externalizes_production_intent": False,
+            },
+            "sensitive_tokens": ["theta"],
+            "pronunciation_map": {
+                "theta": {
+                    "bindings": [
+                        {
+                            "scene_slug": row["scene_slug"],
+                            "spoken_form": "theta",
+                            "tts_input_path": pipeline.relative_or_absolute(
+                                self.episode / "review" / "v2" / row["scene_slug"] / "tts_input.txt",
+                                self.root,
+                            ),
+                            "occurrences": 1,
+                            "route_id": route_id,
+                        }
+                        for row in scene_rows
+                    ]
+                }
+            },
+            "scenes": scene_rows,
+        }
+        result = run_episode_preflight(self.root, self.episode, contract)
+        self.assertEqual(result["status"], "pass", result["errors"])
+        self.assertEqual(
+            [row["scene_slug"] for row in result["pronunciation_evidence"]["theta"]["bindings"]],
+            ["g001", "g002"],
+        )
+
+        single_binding = dict(contract)
+        single_binding["pronunciation_map"] = {
+            "theta": contract["pronunciation_map"]["theta"]["bindings"][0]
+        }
+        blocked = run_episode_preflight(self.root, self.episode, single_binding)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertTrue(
+            any(
+                "spans multiple scenes and requires one evidence object per scene" in error
+                for error in blocked["errors"]
+            )
+        )
+
+    def test_post_tts_episode_preflight_requires_exact_screen_text_semantics(self) -> None:
+        scene_root = self.episode / "src" / "g001"
+        source = scene_root / "scene.py"
+        narration = self.episode / "review" / "v2" / "g001" / "narration.txt"
+        semantics = (
+            self.episode
+            / "review"
+            / "v2"
+            / "g001"
+            / "screen_text_semantic_contract.json"
+        )
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text(
+            'from manim import *\nquestion = Text("积分读取什么？")\n',
+            encoding="utf-8",
+        )
+        narration.parent.mkdir(parents=True, exist_ok=True)
+        narration.write_text(
+            "围道已经缩到奇点附近。积分究竟读取了什么？",
+            encoding="utf-8",
+        )
+        base_contract = {
+            "schema": "lecture-animation-episode-readiness-v2",
+            "readiness_stage": "post_tts",
+            "author_id": "screen-text-author",
+            "fixed_ending": "积分究竟读取了什么？",
+            "fixed_ending_contract": {
+                "role": "learner_facing_math_question",
+                "learner_job": "Leave the learner with one precise mathematical question.",
+                "math_anchor": "small-contour integral",
+                "externalizes_production_intent": False,
+            },
+            "scenes": [
+                {
+                    "scene_slug": "g001",
+                    "scene_source_path": pipeline.relative_or_absolute(source, self.root),
+                    "scene_source_root": pipeline.relative_or_absolute(scene_root, self.root),
+                    "narration_path": pipeline.relative_or_absolute(narration, self.root),
+                    "duration_seconds": 12.0,
+                    "screen_text_inventory": [
+                        {
+                            "text": "积分读取什么？",
+                            "source_path": pipeline.relative_or_absolute(source, self.root),
+                        }
+                    ],
+                    "screen_text_count": 1,
+                }
+            ],
+        }
+        missing = run_episode_preflight(self.root, self.episode, base_contract)
+        self.assertEqual(missing["status"], "blocked")
+        self.assertTrue(
+            any(
+                "screen_text_semantic_contract_path" in error
+                for error in missing["errors"]
+            )
+        )
+
+        self.write_json(
+            semantics,
+            {
+                "schema": "lecture-animation-screen-text-semantic-contract-v1",
+                "semantic_items": [
+                    {
+                        "constructor": "Text",
+                        "payload": "积分读取什么？",
+                        "count": 1,
+                        "role": "transient_question",
+                        "unique_visual_job": "Name the unresolved quantity beside the small contour.",
+                        "necessity": "The learner needs one explicit target while the contour contracts.",
+                        "removal_failure": "Without it the final unknown is detached from the visible contour.",
+                        "learner_question_anchor": "small-contour integral",
+                        "clearance_condition": "Hold to scene end.",
+                        "duplicates_narration": False,
+                        "externalizes_production_intent": False,
+                    }
+                ],
+            },
+        )
+        exact_contract = json.loads(json.dumps(base_contract))
+        exact_contract["scenes"][0]["screen_text_semantic_contract_path"] = (
+            pipeline.relative_or_absolute(semantics, self.root)
+        )
+        passed = run_episode_preflight(self.root, self.episode, exact_contract)
+        self.assertEqual(passed["status"], "pass", passed["errors"])
+
+        drifted = json.loads(json.dumps(exact_contract))
+        drifted["scenes"][0]["screen_text_inventory"][0]["text"] = "另一句话"
+        blocked = run_episode_preflight(self.root, self.episode, drifted)
+        self.assertEqual(blocked["status"], "blocked")
 
     def test_strict_self_review_probes_span_full_scene_and_claim_sequence(self) -> None:
         duration = 110.0
@@ -553,21 +875,74 @@ class PipelineV2Tests(unittest.TestCase):
         ):
             path = episode / "final" / f"{key}.artifact"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{key}\n", encoding="utf-8")
+            if key == "final_word_alignment":
+                self.write_json(
+                    path,
+                    {
+                        "schema": "test-alignment",
+                        "aligned_tokens": [
+                            {"text": "数", "start": 0.0, "end": 0.2},
+                            {"text": "学", "start": 0.2, "end": 0.4},
+                        ],
+                    },
+                )
+            else:
+                path.write_text(f"{key}\n", encoding="utf-8")
             final_paths[key] = path
+        finalization_manifest = episode / "final" / "finalization_manifest.json"
+        self.write_json(
+            finalization_manifest,
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "upload_mp4": pipeline.relative_or_absolute(
+                    final_paths["final_video"],
+                    self.root,
+                ),
+                "upload_mp4_sha256": hashlib.sha256(
+                    final_paths["final_video"].read_bytes()
+                ).hexdigest(),
+                "sprite_overlays": [],
+                "sprite_rhythm_omissions": [
+                    {
+                        "role": role,
+                        "reason": "The twelve-second fixture has no safe editorial beat.",
+                        "collision_evidence": f"fixture://{role}",
+                    }
+                    for role in ("confused", "aha", "thinking")
+                ],
+                "sprite_pixel_qc": [],
+            },
+        )
         narration = episode / "final" / "g001_narration.txt"
         narration.write_text(
-            "先完成当前场景。我是结束乐队的键盘手，下个视频见。",
+            "先完成当前场景。小圈积分究竟读取奇点附近的什么信息？",
             encoding="utf-8",
         )
         scene_source = episode / "final" / "g001_scene.py"
         scene_source.write_text("from manim import *\n", encoding="utf-8")
+        screen_text_semantics = (
+            episode / "final" / "g001_screen_text_semantic_contract.json"
+        )
+        self.write_json(
+            screen_text_semantics,
+            {
+                "schema": "lecture-animation-screen-text-semantic-contract-v1",
+                "semantic_items": [],
+            },
+        )
         readiness_contract = episode / "review" / "v2" / "episode_readiness.json"
         self.write_json(
             readiness_contract,
             {
                 "schema": "lecture-animation-episode-readiness-v2",
                 "author_id": "author-test",
+                "fixed_ending": "小圈积分究竟读取奇点附近的什么信息？",
+                "fixed_ending_contract": {
+                    "role": "learner_facing_math_question",
+                    "learner_job": "Leave the learner with the exact unresolved mathematical question.",
+                    "math_anchor": "small-contour local information",
+                    "externalizes_production_intent": False,
+                },
                 "scenes": [
                     {
                         "scene_slug": "g001_finalize",
@@ -579,6 +954,11 @@ class PipelineV2Tests(unittest.TestCase):
                         ),
                         "narration_path": pipeline.relative_or_absolute(narration, self.root),
                         "duration_seconds": 12.0,
+                        "screen_text_semantic_contract_path": (
+                            pipeline.relative_or_absolute(
+                                screen_text_semantics, self.root
+                            )
+                        ),
                     }
                 ],
             },
@@ -609,6 +989,7 @@ class PipelineV2Tests(unittest.TestCase):
                         episode_spine=None,
                         batch=[],
                         event_log=str(event_log),
+                        finalization_manifest=str(finalization_manifest),
                         output=str(receipt_path),
                         **{key: str(path) for key, path in final_paths.items()},
                     )
@@ -619,6 +1000,387 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertEqual(finalized["scenes"][0]["state"], "assembled")
         self.assertEqual(finalized["assembly"]["status"], "assembled")
         self.assertTrue(pipeline.validate_hashed_record(pipeline.load_json(receipt_path), "completion_hash"))
+        completion = pipeline.load_json(receipt_path)
+        self.assertEqual(
+            completion["finalization_manifest"]["sprite_overlay_count"],
+            0,
+        )
+
+    def test_finalization_manifest_rejects_spoken_identity_without_sumino(self) -> None:
+        final_dir = self.episode / "final-signoff"
+        final_dir.mkdir(parents=True)
+        video = final_dir / "final.mp4"
+        video.write_bytes(b"fixture-video")
+        srt = final_dir / "final.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\n数学问题\n",
+            encoding="utf-8",
+        )
+        phrase = "我是结束乐队的键盘手"
+        alignment = final_dir / "alignment.json"
+        self.write_json(
+            alignment,
+            {
+                "schema": "test-alignment",
+                "aligned_tokens": [
+                    {
+                        "text": character,
+                        "start": index * 0.1,
+                        "end": (index + 1) * 0.1,
+                    }
+                    for index, character in enumerate(phrase)
+                ],
+            },
+        )
+        manifest = final_dir / "manifest.json"
+        self.write_json(
+            manifest,
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "upload_mp4": pipeline.relative_or_absolute(video, self.root),
+                "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+                "sprite_overlays": [],
+                "sprite_rhythm_omissions": [
+                    {
+                        "role": role,
+                        "reason": "Fixture omission.",
+                        "collision_evidence": f"fixture://{role}",
+                    }
+                    for role in ("confused", "aha", "thinking")
+                ],
+                "sprite_pixel_qc": [],
+            },
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "requires exactly one mandatory sign-off sprite",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                manifest,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+            )
+
+    def test_finalization_manifest_accepts_registered_sumino_action_without_override(self) -> None:
+        final_dir = self.episode / "final-signoff-action-override"
+        final_dir.mkdir(parents=True)
+        video = final_dir / "final.mp4"
+        video.write_bytes(b"fixture-video")
+        srt = final_dir / "final.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\n数学问题\n",
+            encoding="utf-8",
+        )
+        phrase = "我是结束乐队的键盘手"
+        alignment = final_dir / "alignment.json"
+        self.write_json(
+            alignment,
+            {
+                "schema": "test-alignment",
+                "aligned_tokens": [
+                    {
+                        "text": character,
+                        "start": index * 0.1,
+                        "end": (index + 1) * 0.1,
+                    }
+                    for index, character in enumerate(phrase)
+                ],
+            },
+        )
+        clip = final_dir / "peek_rise.mov"
+        clip.write_bytes(b"fixture-peek-rise-clip")
+        asset_root = final_dir / "sprite-assets"
+        asset_root.mkdir()
+        (asset_root / "peek_rise.png").write_bytes(b"fixture-peek-rise-frame")
+        self.write_json(
+            asset_root / "metadata.json",
+            {"actions": {"peek_rise": {"frames": ["peek_rise.png"]}}},
+        )
+        phrase_end = len(phrase) * 0.1
+        manifest = final_dir / "manifest.json"
+        self.write_json(
+            manifest,
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "upload_mp4": pipeline.relative_or_absolute(video, self.root),
+                "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+                "sprite_overlays": [
+                    {
+                        "character": "sumino",
+                        "action": "peek_rise",
+                        "semantic_anchor": "spoken keyboard-player identity",
+                        "mandatory_signoff": True,
+                        "word_anchor_start": 0.0,
+                        "word_anchor_end": phrase_end,
+                        "global_start": 0.0,
+                        "global_end": phrase_end + 0.2,
+                        "clip": pipeline.relative_or_absolute(clip, self.root),
+                        "clip_sha256": hashlib.sha256(clip.read_bytes()).hexdigest(),
+                        "asset_root": pipeline.relative_or_absolute(
+                            asset_root, self.root
+                        ),
+                        "asset_root_sha256": pipeline.artifact_snapshot(
+                            asset_root, self.root
+                        )["sha256"],
+                        "protected_rect": [48, 1400, 450, 1830],
+                        "subtitle_occlusion_policy": "above subtitle lane",
+                    }
+                ],
+                "sprite_rhythm_omissions": [
+                    {
+                        "role": role,
+                        "reason": "Fixture omission.",
+                        "collision_evidence": f"fixture://{role}",
+                    }
+                    for role in ("confused", "aha", "thinking")
+                ],
+                "sprite_pixel_qc": [
+                    {
+                        "overlay_index": 1,
+                        "before_difference_yavg": 0.0,
+                        "on_difference_yavg": 20.0,
+                        "status": "pass",
+                    }
+                ],
+            },
+        )
+        override = final_dir / "override.json"
+        self.write_json(
+            override,
+            {
+                "schema": "lecture-animation-finalization-human-override-v1",
+                "episode": pipeline.relative_or_absolute(self.episode, self.root),
+                "issued_by": "user",
+                "status": "authorized",
+                "scope": "final_editorial_sprite_policy_only",
+                "authorization_source": {
+                    "kind": "explicit_user_instruction_in_current_codex_task",
+                    "instructions": ["Sumino action follows scene semantics."],
+                },
+                "constraints": {
+                    "maximum_sprite_overlay_records": 12,
+                    "mathematical_attention_priority": "hard_gate",
+                    "identity_phrase": phrase,
+                    "identity_character": "sumino",
+                    "identity_character_count": 1,
+                    "identity_action": "any_existing_semantically_appropriate_action",
+                    "identity_action_talking_required": False,
+                    "identity_window_coverage": "complete_word_aligned_phrase",
+                    "identity_and_farewell_in_subtitles": False,
+                    "identity_and_farewell_in_screen_text": False,
+                },
+            },
+        )
+        validated_without_override = pipeline.validate_finalization_manifest_contract(
+            manifest,
+            self.root,
+            final_video=video,
+            final_srt=srt,
+            final_word_alignment=alignment,
+            episode=self.episode,
+        )
+        self.assertEqual(
+            validated_without_override["mandatory_signoff_action"],
+            "peek_rise",
+        )
+        self.assertIsNone(
+            validated_without_override["human_finalization_override"]
+        )
+        validated_with_historical_override = pipeline.validate_finalization_manifest_contract(
+            manifest,
+            self.root,
+            final_video=video,
+            final_srt=srt,
+            final_word_alignment=alignment,
+            episode=self.episode,
+            finalization_override=override,
+        )
+        self.assertEqual(
+            validated_with_historical_override["mandatory_signoff_action"],
+            "peek_rise",
+        )
+        self.assertEqual(
+            validated_with_historical_override["human_finalization_override"]["identity_action_policy"],
+            "any_existing_semantically_appropriate_action",
+        )
+
+        unregistered = json.loads(manifest.read_text(encoding="utf-8"))
+        unregistered["sprite_overlays"][0]["action"] = "not_registered"
+        unregistered_path = final_dir / "manifest-unregistered.json"
+        self.write_json(unregistered_path, unregistered)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "not registered in the bound asset metadata",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                unregistered_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+
+    def test_finalization_manifest_rejects_pointing_away_from_target(self) -> None:
+        final_dir = self.episode / "final-pointing"
+        final_dir.mkdir(parents=True)
+        video = final_dir / "final.mp4"
+        video.write_bytes(b"fixture-video")
+        srt = final_dir / "final.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\n数学问题\n",
+            encoding="utf-8",
+        )
+        alignment = final_dir / "alignment.json"
+        self.write_json(
+            alignment,
+            {
+                "schema": "test-alignment",
+                "aligned_tokens": [
+                    {"text": "数", "start": 0.0, "end": 0.2},
+                    {"text": "学", "start": 0.2, "end": 0.4},
+                ],
+            },
+        )
+        clip = final_dir / "point.mov"
+        clip.write_bytes(b"fixture-pointing-clip")
+        asset_root = final_dir / "sprite-assets"
+        asset_root.mkdir()
+        (asset_root / "frame.png").write_bytes(b"fixture-frame")
+        manifest = final_dir / "manifest.json"
+        self.write_json(
+            manifest,
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "upload_mp4": pipeline.relative_or_absolute(video, self.root),
+                "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+                "sprite_overlays": [
+                    {
+                        "character": "sumino",
+                        "action": "point_right",
+                        "semantic_anchor": "point to the mathematical target",
+                        "word_anchor_start": 0.0,
+                        "word_anchor_end": 0.4,
+                        "global_start": 0.0,
+                        "global_end": 0.8,
+                        "clip": pipeline.relative_or_absolute(clip, self.root),
+                        "clip_sha256": hashlib.sha256(clip.read_bytes()).hexdigest(),
+                        "asset_root": pipeline.relative_or_absolute(
+                            asset_root, self.root
+                        ),
+                        "asset_root_sha256": pipeline.artifact_snapshot(
+                            asset_root, self.root
+                        )["sha256"],
+                        "protected_rect": [48, 1400, 450, 1830],
+                        "subtitle_occlusion_policy": "above subtitle lane",
+                        "asset_facing_direction": "left",
+                        "mirrored_horizontally": False,
+                        "rendered_gesture_direction": "left",
+                        "gesture_target_rect": [520, 450, 2600, 1500],
+                    }
+                ],
+                "sprite_rhythm_omissions": [
+                    {
+                        "role": role,
+                        "reason": "Fixture omission.",
+                        "collision_evidence": f"fixture://{role}",
+                    }
+                    for role in ("confused", "aha", "thinking")
+                ],
+                "sprite_pixel_qc": [
+                    {
+                        "overlay_index": 1,
+                        "before_difference_yavg": 0.0,
+                        "on_difference_yavg": 20.0,
+                        "status": "pass",
+                    }
+                ],
+            },
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "points away from its declared mathematical target",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                manifest,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+            )
+
+    def test_finalization_manifest_rejects_appledouble_in_delivery(self) -> None:
+        final_dir = self.episode / "final-appledouble"
+        final_dir.mkdir(parents=True)
+        video = final_dir / "final.mp4"
+        video.write_bytes(b"fixture-video")
+        srt = final_dir / "final.srt"
+        srt.write_text(
+            "1\n00:00:00,000 --> 00:00:01,000\n数学问题\n",
+            encoding="utf-8",
+        )
+        alignment = final_dir / "alignment.json"
+        self.write_json(
+            alignment,
+            {
+                "schema": "test-alignment",
+                "aligned_tokens": [
+                    {"text": "数", "start": 0.0, "end": 0.2},
+                    {"text": "学", "start": 0.2, "end": 0.4},
+                ],
+            },
+        )
+        manifest = final_dir / "manifest.json"
+        self.write_json(
+            manifest,
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "upload_mp4": pipeline.relative_or_absolute(video, self.root),
+                "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+                "sprite_overlays": [],
+                "sprite_rhythm_omissions": [
+                    {
+                        "role": role,
+                        "reason": "Fixture omission.",
+                        "collision_evidence": f"fixture://{role}",
+                    }
+                    for role in ("confused", "aha", "thinking")
+                ],
+                "sprite_pixel_qc": [],
+            },
+        )
+        (final_dir / "._foreign-sidecar").write_bytes(b"appledouble")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "contains AppleDouble files",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                manifest,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+
+        (final_dir / "._foreign-sidecar").unlink()
+        review_dir = self.episode / "review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / "._review-sidecar").write_bytes(b"appledouble")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "contains AppleDouble files",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                manifest,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
 
     @staticmethod
     def write_json(path: Path, value: object) -> None:
@@ -934,6 +1696,11 @@ class PipelineV2Tests(unittest.TestCase):
                 "dynamic_payload_count": 0,
                 "narration_duplicate_payloads": [],
                 "producer_intent_payloads": [],
+                "registration_contract_version": 1,
+                "registration_registry_path": "videos/0002-limit/review/v2/g002c_riemann_sum_limit/screen_text_registry_test.json",
+                "registration_registry_hash": "c" * 64,
+                "registration_attempt_log_path": "videos/0002-limit/review/evolution/screen_text_registration_attempts.jsonl",
+                "profile_hash": profile["profile_hash"],
             },
             "narrated_action_contracts": [],
             "design_chain": {
@@ -1740,7 +2507,7 @@ class PipelineV2Tests(unittest.TestCase):
             base_profile, policy, policy_path, self.root
         )
         self.assertTrue(pipeline.validate_profile_hash(profile))
-        self.assertEqual(profile["autopilot_contract_version"], 7)
+        self.assertEqual(profile["autopilot_contract_version"], 8)
         self.assertIn("limit_process", profile["tags"])
         self.assertNotIn("history_hits", profile)
         self.assertEqual(profile["regressions"][0]["pattern_key"], "riemann_sum_named_but_not_visualized")
@@ -3135,12 +3902,421 @@ class PipelineV2Tests(unittest.TestCase):
             },
         ]
         metrics = pipeline.phase_metrics(rows)
-        self.assertEqual(len(metrics["unique_events"]), 3)
-        self.assertEqual(metrics["aggregate_agent_seconds"], 40.0)
+        self.assertEqual(len(metrics["unique_events"]), 4)
+        self.assertEqual(metrics["aggregate_agent_seconds"], 50.0)
         self.assertEqual(metrics["critical_path_seconds"], 30.0)
-        self.assertEqual(metrics["concurrency_overlap_seconds"], 10.0)
-        self.assertEqual(metrics["token_usage"]["input_tokens"], 350)
+        self.assertEqual(metrics["concurrency_overlap_seconds"], 20.0)
+        self.assertEqual(metrics["token_usage"]["input_tokens"], 400)
         self.assertEqual(len(metrics["probable_shared_duplicates"]), 1)
+        self.assertFalse(
+            metrics["probable_shared_duplicates"][0]["deduplicated"]
+        )
+
+    def test_probable_shared_signature_without_state_is_diagnostic_only(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "event_id": f"legacy-{scene}",
+                "phase_instance_id": f"legacy-instance-{scene}",
+                "run_id": "same-run",
+                "scene_slug": scene,
+                "phase": "repair",
+                "phase_purpose": "legacy-repair",
+                "actor_model": "model",
+                "actor_role": "author",
+                "reasoning_effort": "high",
+                "started_at": "2026-07-30T00:00:00+00:00",
+                "ended_at": "2026-07-30T00:00:10+00:00",
+                "duration_seconds": 10.0,
+                "input_tokens": 100,
+                "token_observed": True,
+            }
+            for scene in ("g001", "g002")
+        ]
+        metrics = pipeline.phase_metrics(rows)
+        self.assertEqual(len(metrics["unique_events"]), 2)
+        self.assertEqual(metrics["token_usage"]["input_tokens"], 200)
+        self.assertEqual(
+            len(metrics["probable_shared_duplicates"]),
+            1,
+        )
+
+    def test_shared_accounting_observability_merge_is_order_independent(
+        self,
+    ) -> None:
+        base = {
+            "accounting_identity": "phase-accounting:shared:test",
+            "phase": "review",
+            "started_at": "2026-07-30T00:00:00+00:00",
+            "ended_at": "2026-07-30T00:00:10+00:00",
+            "duration_seconds": 10.0,
+            "input_tokens": 100,
+        }
+        missing = {
+            **base,
+            "event_id": "event-b",
+            "phase_instance_id": "legacy-b",
+            "token_observed": False,
+            "token_source_kind": "unavailable",
+        }
+        observed = {
+            **base,
+            "event_id": "event-a",
+            "phase_instance_id": "legacy-a",
+            "token_observed": True,
+            "token_source_kind": "manual",
+        }
+        forward = pipeline.phase_metrics([missing, observed])
+        reverse = pipeline.phase_metrics([observed, missing])
+        self.assertEqual(
+            forward["token_observability"],
+            reverse["token_observability"],
+        )
+        self.assertEqual(
+            forward["token_observability"],
+            {
+                "applicable": True,
+                "expected_events": 1,
+                "observed_events": 1,
+                "coverage": 1.0,
+                "missing_event_ids": [],
+            },
+        )
+        self.assertEqual(
+            forward["unique_events"][0]["token_source_kind"],
+            "manual",
+        )
+        self.assertEqual(
+            forward["unique_events"],
+            reverse["unique_events"],
+        )
+
+    def test_shared_accounting_active_intervals_union_without_spanning_gaps(
+        self,
+    ) -> None:
+        identity = "phase-accounting:shared:interval-test"
+        rows = [
+            {
+                "event_id": "event-a",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-30T00:00:00+00:00",
+                "ended_at": "2026-07-30T00:00:10+00:00",
+                "duration_seconds": 10.0,
+                "input_tokens": 100,
+                "token_observed": True,
+            },
+            {
+                "event_id": "event-b",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-30T00:00:05+00:00",
+                "ended_at": "2026-07-30T00:00:15+00:00",
+                "duration_seconds": 10.0,
+                "input_tokens": 100,
+                "token_observed": True,
+            },
+            {
+                "event_id": "event-c",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-31T00:00:00+00:00",
+                "ended_at": "2026-07-31T00:00:05+00:00",
+                "duration_seconds": 5.0,
+                "input_tokens": 100,
+                "token_observed": True,
+            },
+            {
+                "event_id": "event-d",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-31T00:01:00+00:00",
+                "ended_at": None,
+                "duration_seconds": 7.0,
+                "input_tokens": 100,
+                "token_observed": True,
+            },
+        ]
+        metrics = pipeline.phase_metrics(rows)
+        self.assertEqual(len(metrics["unique_events"]), 1)
+        # 15 seconds for the overlapping pair, 5 for the next-day task,
+        # and 7 conservatively unplaced seconds for the missing endpoint.
+        self.assertEqual(metrics["aggregate_agent_seconds"], 27.0)
+        self.assertEqual(metrics["critical_path_seconds"], 27.0)
+        self.assertEqual(
+            metrics["phase_wall_seconds"]["repair"],
+            27.0,
+        )
+        self.assertEqual(metrics["token_usage"]["input_tokens"], 100)
+
+    def test_single_shared_event_missing_endpoint_counts_unplaced_time(
+        self,
+    ) -> None:
+        metrics = pipeline.phase_metrics(
+            [
+                {
+                    "event_id": "missing-endpoint",
+                    "accounting_identity": (
+                        "phase-accounting:shared:missing-endpoint"
+                    ),
+                    "phase": "repair",
+                    "started_at": "2026-07-31T00:01:00+00:00",
+                    "ended_at": None,
+                    "duration_seconds": 7.0,
+                    "input_tokens": 10,
+                    "token_observed": True,
+                }
+            ]
+        )
+        self.assertEqual(metrics["aggregate_agent_seconds"], 7.0)
+        self.assertEqual(metrics["critical_path_seconds"], 7.0)
+        self.assertEqual(metrics["phase_wall_seconds"]["repair"], 7.0)
+        event = metrics["unique_events"][0]
+        self.assertEqual(event["accounting_intervals"], [])
+        self.assertEqual(
+            event["accounting_unplaced_duration_seconds"],
+            7.0,
+        )
+
+    def test_projected_active_seconds_uses_completed_accounting_intervals(
+        self,
+    ) -> None:
+        identity = "phase-accounting:shared:projection-test"
+        completed = [
+            {
+                "event_id": "completed-a",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-30T00:00:00+00:00",
+                "ended_at": "2026-07-30T00:00:10+00:00",
+                "duration_seconds": 10.0,
+            },
+            {
+                "event_id": "completed-b",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-31T00:00:00+00:00",
+                "ended_at": "2026-07-31T00:00:05+00:00",
+                "duration_seconds": 5.0,
+            },
+            {
+                "event_id": "completed-c",
+                "accounting_identity": identity,
+                "phase": "repair",
+                "started_at": "2026-07-31T00:01:00+00:00",
+                "ended_at": None,
+                "duration_seconds": 7.0,
+            },
+        ]
+        self.assertEqual(
+            pipeline.projected_active_seconds(
+                completed,
+                {"reservations": {}},
+                new_phase="human_wait",
+                new_phase_purpose="",
+                new_started_at="2026-07-31T00:02:00+00:00",
+                new_active_seconds=0.0,
+            ),
+            22.0,
+        )
+
+    def test_shared_accounting_identity_separates_required_dimensions(
+        self,
+    ) -> None:
+        base = {
+            "episode": "videos/0008-mpm-8-cauchy_integral",
+            "phase": "repair",
+            "phase_purpose": "animatic_repair",
+            "actor_model": "gpt-5.6-sol",
+            "actor_role": "animation_author",
+            "shared_work_key": "batch-a-animatic-repair",
+        }
+        expected = pipeline.shared_phase_accounting_identity(**base)
+        variants = []
+        for field, value in (
+            ("episode", "videos/0009-other"),
+            ("phase", "review"),
+            ("phase_purpose", "repair_rerender"),
+            ("actor_model", "gpt-5.6"),
+            ("actor_role", "independent_reviewer"),
+            ("shared_work_key", "batch-b-animatic-repair"),
+        ):
+            changed = dict(base)
+            changed[field] = value
+            variants.append(
+                pipeline.shared_phase_accounting_identity(**changed)
+            )
+        self.assertEqual(len(set(variants)), len(variants))
+        self.assertNotIn(expected, variants)
+
+    def test_episode8_legacy_shared_repair_accounting_uses_state_paths(
+        self,
+    ) -> None:
+        contract = pipeline.load_json(self.efficiency_contract)
+        ledger = pipeline.empty_efficiency_reservation_ledger(contract)
+        reservations = {}
+        events = []
+        batches = (
+            ("ep8-batch-a-animatic-v02-repair", 4, 111),
+            ("ep8-batch-b-animatic-v02-repair", 4, 222),
+            ("ep8-batch-c-animatic-v02-repair", 4, 333),
+        )
+        for batch_index, (
+            shared_key,
+            scene_count,
+            input_tokens,
+        ) in enumerate(batches):
+            for scene_index in range(scene_count):
+                scene_slug = (
+                    f"g{batch_index * 4 + scene_index + 1:03d}_ep8"
+                )
+                phase_instance_id = (
+                    "phase-instance:shared:legacy-"
+                    f"{batch_index}-{scene_index}"
+                )
+                state_path = (
+                    self.episode
+                    / "review"
+                    / "v2"
+                    / scene_slug
+                    / "repair_phase_active.json"
+                )
+                self.write_json(
+                    state_path,
+                    {
+                        "schema": "lecture-animation-phase-timer-v2",
+                        "run_id": f"{scene_slug}-repair-run",
+                        "scene_slug": scene_slug,
+                        "phase": "repair",
+                        "phase_purpose": "animatic_repair",
+                        "actor_model": f"producer-{batch_index}",
+                        "actor_role": "animation_author",
+                        "shared_work_key": shared_key,
+                        "phase_instance_id": phase_instance_id,
+                    },
+                )
+                reservation_id = (
+                    f"reservation:legacy-{batch_index}-{scene_index}"
+                )
+                reservations[reservation_id] = {
+                    "reservation_id": reservation_id,
+                    "status": "released",
+                    "state_path": str(state_path),
+                    "run_id": f"{scene_slug}-repair-run",
+                    "scene_slug": scene_slug,
+                    "phase": "repair",
+                    "phase_instance_id": phase_instance_id,
+                    "allocation": {
+                        "raw_input_plus_output_tokens": input_tokens,
+                        "uncached_input_tokens": input_tokens,
+                        "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                    },
+                }
+                second = batch_index * 20
+                events.append(
+                    {
+                        "schema": "lecture-animation-phase-event-v2",
+                        "event_id": (
+                            f"phase:legacy-{batch_index}-{scene_index}"
+                        ),
+                        "run_id": f"{scene_slug}-repair-run",
+                        "scene_slug": scene_slug,
+                        "phase": "repair",
+                        "phase_purpose": "animatic_repair",
+                        "actor_model": f"producer-{batch_index}",
+                        "actor_role": "animation_author",
+                        "phase_instance_id": phase_instance_id,
+                        "started_at": (
+                            "2026-07-30T00:00:"
+                            f"{second:02d}+00:00"
+                        ),
+                        "ended_at": (
+                            "2026-07-30T00:00:"
+                            f"{second + 10:02d}+00:00"
+                        ),
+                        "duration_seconds": 10.0,
+                        "input_tokens": input_tokens,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 0,
+                        "reasoning_tokens": 0,
+                        "token_observed": True,
+                        "result": "completed",
+                    }
+                )
+        ledger["reservations"] = reservations
+        ledger["revision"] = len(reservations)
+        ledger.pop("ledger_hash")
+        ledger["ledger_hash"] = pipeline.object_hash(ledger)
+        self.write_json(
+            pipeline.episode_efficiency_reservation_ledger(contract),
+            ledger,
+        )
+
+        original_phase_ids = [
+            event["phase_instance_id"] for event in events
+        ]
+        status = pipeline.efficiency_status_from_rows(
+            contract,
+            events,
+        )
+        unique_repairs = [
+            event
+            for event in status["measured"]["unique_events"]
+            if event["phase"] == "repair"
+        ]
+        self.assertEqual(len(unique_repairs), 3)
+        self.assertEqual(
+            status["measured"]["token_usage"]["input_tokens"],
+            111 + 222 + 333,
+        )
+        enriched = pipeline.phase_rows_with_accounting(
+            events,
+            contract=contract,
+            reservation_ledger=ledger,
+        )
+        self.assertEqual(
+            len(
+                {
+                    event["accounting_identity"]
+                    for event in enriched
+                }
+            ),
+            3,
+        )
+        self.assertEqual(
+            [event["phase_instance_id"] for event in enriched],
+            original_phase_ids,
+        )
+        self.assertTrue(
+            all("shared_work_key" not in event for event in events)
+        )
+        central_log = pipeline.episode_efficiency_central_log(
+            contract
+        )
+        for event in events:
+            pipeline.append_jsonl(central_log, event)
+        production = pipeline.production_metrics(self.episode)
+        self.assertEqual(production["phase_events"], 3)
+        self.assertEqual(
+            production["phase_agent_seconds"]["repair"],
+            30.0,
+        )
+        self.assertEqual(
+            production["token_usage"]["input_tokens"],
+            111 + 222 + 333,
+        )
+        retrospective = pipeline.retrospective_evidence_data(
+            self.root,
+            self.episode,
+        )
+        self.assertEqual(
+            retrospective["metrics"]["phase_agent_seconds"][
+                "repair"
+            ],
+            30.0,
+        )
 
     def test_token_observability_includes_render_tts_and_asr(self) -> None:
         rows = [
@@ -3275,13 +4451,16 @@ class PipelineV2Tests(unittest.TestCase):
                 "begin-episode-efficiency",
                 "--episode",
                 str(self.episode),
+                "--delivery-clock",
+                "delivery-clock.json",
                 "--output",
                 "efficiency.json",
             ]
         )
-        self.assertEqual(parsed.episode_target_hours, 8.0)
+        self.assertIsNone(parsed.episode_target_hours)
+        self.assertIsNone(parsed.delivery_target_hours)
         self.assertEqual(parsed.retrospective_reserve_minutes, 45.0)
-        self.assertEqual(parsed.closure_reserve_minutes, 195.0)
+        self.assertIsNone(parsed.closure_reserve_minutes)
         self.assertEqual(
             parsed.closure_token_reserve_fraction,
             0.32,
@@ -3292,16 +4471,640 @@ class PipelineV2Tests(unittest.TestCase):
         )
         self.assertEqual(
             sum(pipeline.DEFAULT_PHASE_ACTIVE_SECONDS.values()),
-            8 * 3600,
+            8.75 * 3600,
         )
         self.assertAlmostEqual(
-            sum(pipeline.DEFAULT_PHASE_TOKEN_FRACTIONS.values()),
+            sum(
+                pipeline.DEFAULT_PHASE_TOKEN_FRACTIONS_BY_FIELD[
+                    "reasoning_tokens"
+                ].values()
+            ),
             1.0,
+        )
+
+    def test_delivery_target_keeps_retrospective_outside_eight_hours(self) -> None:
+        parsed = pipeline.build_parser().parse_args(
+            [
+                "begin-episode-efficiency",
+                "--episode",
+                str(self.episode),
+                "--delivery-clock",
+                "delivery-clock.json",
+                "--delivery-target-hours",
+                "8",
+                "--retrospective-reserve-minutes",
+                "45",
+                "--output",
+                "efficiency.json",
+            ]
+        )
+        budget = pipeline.efficiency_budget_data(parsed)
+        self.assertEqual(budget["delivery_active_seconds"], 8 * 3600)
+        self.assertEqual(budget["episode_active_seconds"], 8.75 * 3600)
+        self.assertEqual(
+            pipeline.validate_efficiency_budget_data(budget),
+            [],
+        )
+        contract = {"budget": budget}
+        self.assertEqual(
+            pipeline.effective_efficiency_limits(
+                contract, "finalization", "episode_assembly"
+            )["active_seconds"],
+            8 * 3600,
+        )
+        self.assertEqual(
+            pipeline.effective_efficiency_limits(
+                contract, "retrospective", "episode_postmortem"
+            )["active_seconds"],
+            8.75 * 3600,
+        )
+        self.assertEqual(
+            pipeline.DEFAULT_PHASE_TOKEN_FRACTIONS_BY_FIELD[
+                "reasoning_tokens"
+            ]["planning"],
+            0.05,
+        )
+        self.assertEqual(
+            pipeline.DEFAULT_PHASE_TOKEN_FRACTIONS_BY_FIELD[
+                "reasoning_tokens"
+            ][pipeline.PLANNING_QUALITY_REPAIR_BUCKET],
+            0.08,
+        )
+        self.assertEqual(
+            pipeline.DEFAULT_PHASE_TOKEN_FRACTIONS_BY_FIELD[
+                "reasoning_tokens"
+            ]["render"],
+            0.12,
         )
         self.assertEqual(parsed.raw_token_budget, 50_000_000)
         self.assertEqual(parsed.uncached_input_token_budget, 2_000_000)
         self.assertEqual(parsed.output_token_budget, 300_000)
         self.assertEqual(parsed.reasoning_token_budget, 100_000)
+
+    def test_planning_quality_repair_contract_is_sealed_and_fresh(
+        self,
+    ) -> None:
+        baseline = self.episode / "lecture.md"
+        quality_gate = self.episode / "quality-gate.json"
+        defect_manifest = self.episode / "planning-defects.json"
+        baseline.write_text("first pass", encoding="utf-8")
+        self.write_json(quality_gate, {"verdict": "revise"})
+        self.write_json(
+            defect_manifest,
+            {
+                "defects": [
+                    {
+                        "id": "scope-001",
+                        "category": "scope",
+                        "evidence": "the draft crosses the approved boundary",
+                        "acceptance_checks": [
+                            "forbidden next-episode topics are absent"
+                        ],
+                    }
+                ]
+            },
+        )
+        contract = pipeline.planning_quality_repair_contract_data(
+            self.root,
+            self.episode,
+            baseline_path=baseline,
+            quality_gate_path=quality_gate,
+            defect_manifest_path=defect_manifest,
+            allowed_paths=[
+                pipeline.relative_or_absolute(baseline, self.root)
+            ],
+        )
+        self.assertEqual(
+            pipeline.validate_planning_quality_repair_contract(
+                contract,
+                self.root,
+                self.episode,
+            ),
+            [],
+        )
+        baseline.write_text("mutated after sealing", encoding="utf-8")
+        self.assertIn(
+            "planning quality repair baseline_artifact hash is stale",
+            pipeline.validate_planning_quality_repair_contract(
+                contract,
+                self.root,
+                self.episode,
+            ),
+        )
+
+    def test_planning_quality_repair_has_13k_completion_envelope(
+        self,
+    ) -> None:
+        budget = pipeline.default_efficiency_budget()
+        first_pass = pipeline.phase_token_limits(
+            budget,
+            "planning",
+        )
+        protected_repair = pipeline.phase_token_limits(
+            budget,
+            pipeline.PLANNING_QUALITY_REPAIR_BUCKET,
+        )
+        completion = pipeline.planning_completion_token_limits(
+            budget,
+        )
+        self.assertEqual(first_pass["reasoning_tokens"], 5_000)
+        self.assertEqual(
+            protected_repair["reasoning_tokens"],
+            8_000,
+        )
+        self.assertEqual(completion["reasoning_tokens"], 13_000)
+
+    def test_discretionary_planning_cannot_spend_quality_repair_reserve(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "planning token envelope",
+        ):
+            pipeline.command_phase_start(
+                SimpleNamespace(
+                    repo_root=str(self.root),
+                    episode=str(self.episode),
+                    efficiency_contract=str(self.efficiency_contract),
+                    run_id="planning-over-first-pass",
+                    scene_slug="episode",
+                    phase="planning",
+                    phase_purpose=None,
+                    actor_model="test-planner",
+                    active_seconds_allocation=60,
+                    raw_token_allocation=1,
+                    uncached_input_token_allocation=0,
+                    output_token_allocation=0,
+                    reasoning_token_allocation=5_001,
+                    state=str(
+                        self.episode
+                        / "planning-over-first-pass.json"
+                    ),
+                )
+            )
+
+    def test_episode_nine_design_continuation_preserves_failure_and_admits_exact_scope(
+        self,
+    ) -> None:
+        episode = (
+            self.root
+            / "videos"
+            / "0009-mpm-9-singularities_residues"
+        )
+        episode.mkdir(parents=True)
+        efficiency_path = (
+            episode
+            / "review"
+            / "evolution"
+            / "episode_efficiency_contract.json"
+        )
+        efficiency = pipeline.episode_efficiency_contract_data(
+            self.root,
+            episode,
+            SimpleNamespace(
+                episode_target_hours=8.0,
+                retrospective_reserve_minutes=45.0,
+                raw_token_budget=50_000_000,
+                uncached_input_token_budget=2_000_000,
+                output_token_budget=300_000,
+                reasoning_token_budget=100_000,
+                token_budget_warning_fraction=0.75,
+                max_false_passes=0,
+                max_known_regression_recurrences=0,
+                max_human_issue_scene_rate=0.25,
+            ),
+        )
+        self.write_json(efficiency_path, efficiency)
+        central_log = pipeline.episode_efficiency_central_log(
+            efficiency
+        )
+        failure_event = {
+            "schema": "lecture-animation-phase-event-v2",
+            "event_id": "phase:ep9-global-design-overrun",
+            "phase_instance_id": "phase-instance:ep9-global-design",
+            "scene_slug": "episode",
+            "phase": "design",
+            "phase_purpose": "global_spine_and_batch_handoffs",
+            "result": "completed",
+            "started_at": "2026-07-31T00:00:00+00:00",
+            "ended_at": "2026-07-31T00:00:10+00:00",
+            "duration_seconds": 10.0,
+            "input_tokens": 100,
+            "cached_input_tokens": 100,
+            "output_tokens": 35_967,
+            "reasoning_tokens": 0,
+            "token_observed": True,
+            "token_allocation_exceeded": ["output_tokens"],
+        }
+        pipeline.append_jsonl(central_log, failure_event)
+        authority_path = episode / "review" / "evolution" / "authority.json"
+        self.write_json(
+            authority_path,
+            {
+                "schema": "lecture-animation-user-authority-v1",
+                "decision": "authorize",
+                "scope": "episode_9_design_budget_continuation",
+                "episode": pipeline.relative_or_absolute(
+                    episode,
+                    self.root,
+                ),
+                "exact_user_text": "授权继续。",
+                "preserve_existing_overage_evidence": True,
+                "quality_gates_unchanged": True,
+            },
+        )
+        blocker_path = episode / "review" / "evolution" / "blocker.json"
+        self.write_json(
+            blocker_path,
+            {
+                "schema": "lecture-animation-major-delivery-blocker-v1",
+                "blocked_phase": "design",
+                "gate_result": "rejected",
+                "exact_error": (
+                    "phase-start allocation exceeds the design token "
+                    "envelope: output_tokens"
+                ),
+            },
+        )
+        scene_groups = {
+            "batch_a": ["g001", "g002", "g003"],
+            "batch_b": ["g004", "g005", "g006"],
+            "batch_c": ["g007", "g008", "g009"],
+        }
+        spine_path = episode / "episode_visual_spine.json"
+        spine = {
+            "production_mode": "parallel_batches",
+            "scenes": [
+                {"scene_slug": scene}
+                for scenes in scene_groups.values()
+                for scene in scenes
+            ],
+        }
+        spine["spine_hash"] = pipeline.object_hash(spine)
+        self.write_json(spine_path, spine)
+        plan_paths = []
+        assignments = {}
+        for index, (batch_id, scenes) in enumerate(
+            scene_groups.items(),
+            start=1,
+        ):
+            plan_path = (
+                episode
+                / "review"
+                / "v2"
+                / batch_id
+                / "batch_visual_plan.json"
+            )
+            plan = {
+                "batch_id": batch_id,
+                "scenes": [
+                    {"scene_slug": scene} for scene in scenes
+                ],
+            }
+            plan["batch_plan_hash"] = pipeline.object_hash(plan)
+            self.write_json(plan_path, plan)
+            plan_paths.append(plan_path)
+            assignments[f"/root/ep9-author-{index}"] = {
+                "task_key": batch_id,
+                "state": "active",
+            }
+        supervisor_path = episode / "review" / "v2" / "supervisor.json"
+        supervisor = {
+            "session_id": "ep9-supervisor-r01",
+            "supervisor_agent_id": "/root",
+            "assignments": assignments,
+        }
+        supervisor["session_hash"] = pipeline.object_hash(supervisor)
+        self.write_json(supervisor_path, supervisor)
+        continuation = pipeline.design_budget_continuation_data(
+            self.root,
+            episode,
+            efficiency_contract_path=efficiency_path,
+            blocker_path=blocker_path,
+            user_authority_path=authority_path,
+            episode_spine_path=spine_path,
+            batch_plan_paths=plan_paths,
+            supervisor_session_path=supervisor_path,
+            expires_hours=1,
+        )
+        self.assertEqual(
+            pipeline.validate_design_budget_continuation(
+                continuation,
+                repo_root=self.root,
+                episode=episode,
+                efficiency_contract=efficiency,
+            ),
+            [],
+        )
+        continuation_path = (
+            episode
+            / "review"
+            / "evolution"
+            / "design_continuation.json"
+        )
+        self.write_json(continuation_path, continuation)
+        batch_plan = pipeline.load_json(plan_paths[0])
+        batch_path = (
+            episode
+            / "review"
+            / "v2"
+            / "batch_a"
+            / "production_batch.json"
+        )
+        batch = {
+            "schema": "lecture-animation-production-batch-v2",
+            "episode": pipeline.relative_or_absolute(
+                episode,
+                self.root,
+            ),
+            "batch_id": "batch_a",
+            "scenes": scene_groups["batch_a"],
+            "batch_plan_hash": batch_plan["batch_plan_hash"],
+            "episode_spine_hash": spine["spine_hash"],
+            "author_id": "/root/ep9-author-1",
+        }
+        batch["batch_hash"] = pipeline.object_hash(batch)
+        self.write_json(batch_path, batch)
+        common = {
+            "repo_root": str(self.root),
+            "episode": str(episode),
+            "efficiency_contract": str(efficiency_path),
+            "production_batch": str(batch_path),
+            "run_id": "ep9-g001-design",
+            "scene_slug": "g001",
+            "phase": "design",
+            "phase_purpose": (
+                pipeline.DESIGN_BUDGET_CONTINUATION_PHASE_PURPOSE
+            ),
+            "actor_model": "test-author",
+            "actor_role": "animation_author",
+            "active_seconds_allocation": 60,
+            "raw_token_allocation": 300_000,
+            "uncached_input_token_allocation": 30_000,
+            "output_token_allocation": 5_000,
+            "reasoning_token_allocation": 1_000,
+            "prompt_bytes": 100,
+            "artifact_input_bytes": 1_000,
+            "files_read": 4,
+        }
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "design token envelope: output_tokens",
+        ):
+            pipeline.command_phase_start(
+                SimpleNamespace(
+                    **common,
+                    state=str(episode / "blocked-design.json"),
+                )
+            )
+        state_path = episode / "continued-design.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        **common,
+                        design_budget_continuation=str(
+                            continuation_path
+                        ),
+                        state=str(state_path),
+                    )
+                ),
+                0,
+            )
+        state = pipeline.load_json(state_path)
+        self.assertEqual(
+            state["base_phase_envelope_overflow_at_start"],
+            ["output_tokens"],
+        )
+        self.assertTrue(
+            state["design_budget_continuation_admission_applied"]
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = pipeline.command_phase_end(
+                SimpleNamespace(
+                    state=str(state_path),
+                    phase_log=str(episode / "continued-design.jsonl"),
+                    result="completed",
+                    manifest_hash="",
+                    usage_file=None,
+                    input_tokens=100,
+                    cached_input_tokens=100,
+                    output_tokens=100,
+                    reasoning_tokens=0,
+                )
+            )
+        self.assertEqual(result, 0)
+        ended = pipeline.load_json(state_path)
+        self.assertTrue(
+            ended["base_phase_envelope_status_at_end"]["exceeded"]
+        )
+        self.assertFalse(
+            ended["phase_envelope_status_at_end"]["exceeded"]
+        )
+
+        reconciliation_ids = []
+        for index, scene in enumerate(
+            pipeline.DESIGN_BUDGET_CONTINUATION_RECONCILIATION_SCENES,
+            start=1,
+        ):
+            event = {
+                "schema": "lecture-animation-phase-event-v2",
+                "event_id": f"phase:ep9-policy-restore-{index}",
+                "phase_instance_id": (
+                    f"phase-instance:ep9-policy-restore-{index}"
+                ),
+                "scene_slug": scene,
+                "phase": "design",
+                "phase_purpose": (
+                    pipeline.DESIGN_BUDGET_CONTINUATION_PHASE_PURPOSE
+                ),
+                "actor_role": "animation_author_policy_restore",
+                "result": "completed",
+                "input_tokens": 1_200_000,
+                "cached_input_tokens": 1_100_000,
+                "output_tokens": 5_000,
+                "reasoning_tokens": 1_000,
+                "token_allocation_exceeded": [
+                    "raw_input_plus_output_tokens",
+                    "output_tokens",
+                ],
+            }
+            pipeline.append_jsonl(central_log, event)
+            reconciliation_ids.append(event["event_id"])
+        reconciled = pipeline.design_budget_continuation_data(
+            self.root,
+            episode,
+            efficiency_contract_path=efficiency_path,
+            blocker_path=blocker_path,
+            user_authority_path=authority_path,
+            episode_spine_path=spine_path,
+            batch_plan_paths=plan_paths,
+            supervisor_session_path=supervisor_path,
+            expires_hours=1,
+            parent_continuation_path=continuation_path,
+            reconciliation_event_ids=reconciliation_ids,
+        )
+        self.assertEqual(
+            reconciled["additional_design_token_allowance"],
+            pipeline.DESIGN_BUDGET_CONTINUATION_RECONCILED_ALLOWANCE,
+        )
+        self.assertEqual(
+            pipeline.validate_design_budget_continuation(
+                reconciled,
+                repo_root=self.root,
+                episode=episode,
+                efficiency_contract=efficiency,
+            ),
+            [],
+        )
+        reconciled_path = episode / "review" / "evolution" / "reconciled.json"
+        self.write_json(reconciled_path, reconciled)
+        replacement_supervisor = pipeline.load_json(supervisor_path)
+        replacement_supervisor.pop("session_hash", None)
+        for index, assignment in enumerate(
+            replacement_supervisor["assignments"].values(),
+            start=1,
+        ):
+            assignment["replacement_of"] = f"/root/ep9_old_{index}"
+        replacement_supervisor["session_hash"] = pipeline.object_hash(
+            replacement_supervisor
+        )
+        self.write_json(supervisor_path, replacement_supervisor)
+        compact_ids = []
+        for index, scene in enumerate(
+            pipeline.DESIGN_BUDGET_CONTINUATION_RECONCILIATION_SCENES,
+            start=1,
+        ):
+            event = {
+                "schema": "lecture-animation-phase-event-v2",
+                "event_id": f"phase:ep9-compact-revision-{index}",
+                "phase_instance_id": (
+                    f"phase-instance:ep9-compact-revision-{index}"
+                ),
+                "scene_slug": scene,
+                "phase": "design",
+                "phase_purpose": (
+                    pipeline.DESIGN_BUDGET_CONTINUATION_PHASE_PURPOSE
+                ),
+                "actor_role": "animation_author_scene_designer",
+                "result": "completed",
+                "input_tokens": 1_000_000,
+                "cached_input_tokens": 950_000,
+                "output_tokens": 5_000,
+                "reasoning_tokens": 1_000,
+                "token_allocation_exceeded": [
+                    "raw_input_plus_output_tokens",
+                ],
+            }
+            pipeline.append_jsonl(central_log, event)
+            compact_ids.append(event["event_id"])
+        compact_replan = pipeline.design_budget_continuation_data(
+            self.root,
+            episode,
+            efficiency_contract_path=efficiency_path,
+            blocker_path=blocker_path,
+            user_authority_path=authority_path,
+            episode_spine_path=spine_path,
+            batch_plan_paths=plan_paths,
+            supervisor_session_path=supervisor_path,
+            expires_hours=1,
+            parent_continuation_path=reconciled_path,
+            compact_replan_event_ids=compact_ids,
+        )
+        self.assertEqual(
+            compact_replan["additional_design_token_allowance"],
+            pipeline.DESIGN_BUDGET_CONTINUATION_COMPACT_REPLAN_ALLOWANCE,
+        )
+        self.assertEqual(
+            pipeline.validate_design_budget_continuation(
+                compact_replan,
+                repo_root=self.root,
+                episode=episode,
+                efficiency_contract=efficiency,
+            ),
+            [],
+        )
+
+    def test_planning_quality_repair_requires_sealed_contract(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "requires --quality-repair-contract",
+        ):
+            pipeline.command_phase_start(
+                SimpleNamespace(
+                    repo_root=str(self.root),
+                    episode=str(self.episode),
+                    efficiency_contract=str(self.efficiency_contract),
+                    run_id="unsealed-quality-repair",
+                    scene_slug="episode",
+                    phase="planning",
+                    phase_purpose="quality_gate_repair",
+                    actor_model="test-planner",
+                    active_seconds_allocation=60,
+                    raw_token_allocation=1,
+                    uncached_input_token_allocation=0,
+                    output_token_allocation=0,
+                    reasoning_token_allocation=1,
+                    state=str(
+                        self.episode
+                        / "unsealed-quality-repair.json"
+                    ),
+                )
+            )
+
+    def test_efficiency_v3_migration_preserves_contract_and_ledger(
+        self,
+    ) -> None:
+        old = pipeline.load_json(self.efficiency_contract)
+        old.pop("contract_hash", None)
+        old["schema"] = (
+            "lecture-animation-episode-efficiency-contract-v3"
+        )
+        old["budget"]["schema"] = (
+            "lecture-animation-efficiency-budget-v3"
+        )
+        old["budget"].pop("phase_token_fractions_by_field")
+        old["budget"]["phase_token_fractions"] = dict(
+            pipeline.DEFAULT_PHASE_TOKEN_FRACTIONS
+        )
+        old["contract_hash"] = pipeline.object_hash(old)
+        self.write_json(self.efficiency_contract, old)
+        ledger_path = pipeline.episode_efficiency_reservation_ledger(
+            old
+        )
+        self.write_json(
+            ledger_path,
+            pipeline.empty_efficiency_reservation_ledger(old),
+        )
+
+        pipeline.command_migrate_episode_efficiency_v4(
+            SimpleNamespace(input=str(self.efficiency_contract))
+        )
+
+        migrated = pipeline.load_json(self.efficiency_contract)
+        ledger = pipeline.load_json(ledger_path)
+        self.assertEqual(
+            migrated["schema"],
+            "lecture-animation-episode-efficiency-contract-v4",
+        )
+        self.assertEqual(
+            migrated["budget"]["schema"],
+            "lecture-animation-efficiency-budget-v4",
+        )
+        self.assertEqual(
+            migrated["migration"]["from_contract_hash"],
+            old["contract_hash"],
+        )
+        self.assertEqual(
+            ledger["efficiency_contract_hash"],
+            migrated["contract_hash"],
+        )
+        self.assertEqual(
+            pipeline.validate_episode_efficiency_contract(migrated),
+            [],
+        )
 
     def test_phase_start_rejects_unbounded_task_capsule_resources(
         self,
@@ -3576,6 +5379,20 @@ class PipelineV2Tests(unittest.TestCase):
             pipeline.phase_budget_bucket("render", "candidate"),
             "render",
         )
+        self.assertEqual(
+            pipeline.phase_budget_bucket(
+                "planning",
+                "quality_gate_repair",
+            ),
+            pipeline.PLANNING_QUALITY_REPAIR_BUCKET,
+        )
+        self.assertEqual(
+            pipeline.phase_active_budget_bucket(
+                "planning",
+                "quality_gate_repair",
+            ),
+            "planning",
+        )
         contract = {
             "budget": pipeline.default_efficiency_budget(),
         }
@@ -3586,6 +5403,301 @@ class PipelineV2Tests(unittest.TestCase):
                 "pronunciation_retry",
             )["stage"],
             "closure",
+        )
+
+    def test_local_synthesis_admission_is_zero_model_token_and_narrow(
+        self,
+    ) -> None:
+        sentinel = {
+            "raw_input_plus_output_tokens": 1,
+            "uncached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+        self.assertTrue(
+            pipeline.local_synthesis_admission(
+                "tts",
+                "local_synthesis",
+                "local:mlx-indextts2",
+                sentinel,
+            )
+        )
+        self.assertFalse(
+            pipeline.local_synthesis_admission(
+                "tts",
+                "local_synthesis",
+                "gpt-5.6-sol",
+                sentinel,
+            )
+        )
+        self.assertFalse(
+            pipeline.local_synthesis_admission(
+                "tts",
+                "local_synthesis",
+                "local:mlx-indextts2",
+                {**sentinel, "output_tokens": 1},
+            )
+        )
+        over_budget = {
+            "active_exceeded": False,
+            "token_status": {
+                "exceeded": ["raw_input_plus_output_tokens"]
+            },
+        }
+        self.assertFalse(
+            pipeline.phase_blocked_by_efficiency_budget(
+                "tts",
+                "local_synthesis",
+                over_budget,
+            )
+        )
+        self.assertTrue(
+            pipeline.phase_blocked_by_efficiency_budget(
+                "tts",
+                "initial",
+                over_budget,
+            )
+        )
+        self.assertTrue(
+            pipeline.local_alignment_admission(
+                "asr",
+                "local_alignment",
+                "local:qwen-srt",
+                sentinel,
+            )
+        )
+        self.assertFalse(
+            pipeline.local_alignment_admission(
+                "asr",
+                "local_alignment",
+                "qwen-srt-cloud",
+                sentinel,
+            )
+        )
+
+    def test_mandatory_retrospective_starts_after_outer_token_overrun(
+        self,
+    ) -> None:
+        contract = pipeline.load_json(self.efficiency_contract)
+        central_log = pipeline.episode_efficiency_central_log(contract)
+        central_log.parent.mkdir(parents=True, exist_ok=True)
+        central_log.write_text(
+            json.dumps(
+                {
+                    "schema": "lecture-animation-phase-event-v2",
+                    "event_id": "phase:historical-outer-overrun",
+                    "phase_instance_id": (
+                        "phase-instance:historical-outer-overrun"
+                    ),
+                    "scene_slug": "g001",
+                    "phase": "repair",
+                    "phase_purpose": "repair_rerender",
+                    "result": "completed",
+                    "started_at": "2026-07-28T00:00:00+00:00",
+                    "ended_at": "2026-07-28T00:00:10+00:00",
+                    "duration_seconds": 10.0,
+                    "input_tokens": 50_000_001,
+                    "cached_input_tokens": 50_000_001,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "token_observed": True,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "retrospective-after-overrun.json"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        run_id="retrospective-after-overrun",
+                        scene_slug="episode",
+                        phase="retrospective",
+                        phase_purpose="episode_evolution",
+                        actor_model="test-retrospective-agent",
+                        actor_role="main_producer",
+                        reasoning_effort="high",
+                        active_seconds_allocation=600,
+                        raw_token_allocation=1_000,
+                        uncached_input_token_allocation=100,
+                        output_token_allocation=100,
+                        reasoning_token_allocation=100,
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=0,
+                        usage_file=None,
+                        state=str(state),
+                    )
+                ),
+                0,
+            )
+        timer = pipeline.load_json(state)
+        self.assertTrue(
+            timer[
+                "mandatory_retrospective_overrun_admission_applied"
+            ]
+        )
+        self.assertIn(
+            "raw_input_plus_output_tokens",
+            timer["base_episode_reservation_overflow_at_start"],
+        )
+        self.assertEqual(timer["reserve_stage"], "retrospective")
+
+    def test_mandatory_retrospective_starts_after_outer_active_time_overrun(
+        self,
+    ) -> None:
+        contract = pipeline.load_json(self.efficiency_contract)
+        central_log = pipeline.episode_efficiency_central_log(contract)
+        central_log.parent.mkdir(parents=True, exist_ok=True)
+        central_log.write_text(
+            json.dumps(
+                {
+                    "schema": "lecture-animation-phase-event-v2",
+                    "event_id": "phase:historical-active-overrun",
+                    "phase_instance_id": (
+                        "phase-instance:historical-active-overrun"
+                    ),
+                    "scene_slug": "g001",
+                    "phase": "repair",
+                    "phase_purpose": "candidate_repair",
+                    "result": "completed",
+                    "started_at": "2026-07-28T00:00:00+00:00",
+                    "ended_at": "2026-07-28T08:00:01+00:00",
+                    "duration_seconds": 28_801.0,
+                    "input_tokens": 1,
+                    "cached_input_tokens": 1,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "token_observed": True,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        state = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "retrospective-after-active-overrun.json"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        run_id="retrospective-after-active-overrun",
+                        scene_slug="episode",
+                        phase="retrospective",
+                        phase_purpose="episode_evolution",
+                        actor_model="test-retrospective-agent",
+                        actor_role="main_producer",
+                        reasoning_effort="high",
+                        active_seconds_allocation=600,
+                        raw_token_allocation=1_000,
+                        uncached_input_token_allocation=100,
+                        output_token_allocation=100,
+                        reasoning_token_allocation=100,
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=0,
+                        usage_file=None,
+                        state=str(state),
+                    )
+                ),
+                0,
+            )
+        timer = pipeline.load_json(state)
+        self.assertTrue(
+            timer[
+                "mandatory_retrospective_overrun_admission_applied"
+            ]
+        )
+        self.assertTrue(timer["base_stage_active_overflow_at_start"])
+        self.assertEqual(timer["reserve_stage"], "retrospective")
+
+    def test_local_tts_active_time_replan_is_measured_and_narrow(
+        self,
+    ) -> None:
+        contract = pipeline.load_json(self.efficiency_contract)
+        projection_path = (
+            self.episode / "review" / "evolution" / "tts_projection.json"
+        )
+        projection_path.parent.mkdir(parents=True, exist_ok=True)
+        self.write_json(
+            projection_path,
+            {
+                "schema": "lecture-animation-local-tts-budget-projection-v1",
+                "quality_route_unchanged": True,
+                "recommended_budget_seconds": 2621,
+            },
+        )
+        replan = {
+            "schema": "lecture-animation-local-active-time-replan-v1",
+            "episode": pipeline.relative_or_absolute(
+                self.episode, self.root
+            ),
+            "phase": "tts",
+            "phase_purpose": "local_synthesis",
+            "efficiency_contract_hash": contract["contract_hash"],
+            "projection_path": pipeline.relative_or_absolute(
+                projection_path, self.root
+            ),
+            "projection_sha256": hashlib.sha256(
+                projection_path.read_bytes()
+            ).hexdigest(),
+            "baseline_active_seconds": contract["budget"][
+                "phase_active_seconds"
+            ]["tts"],
+            "extended_active_seconds": 2621,
+            "quality_parameters_unchanged": [
+                "voice",
+                "seed",
+                "diffusion_steps",
+                "cfg_rate",
+                "normalization",
+                "approved_narration",
+                "review_gates",
+            ],
+        }
+        replan["replan_hash"] = pipeline.object_hash(replan)
+        self.assertEqual(
+            pipeline.validate_local_active_time_replan(
+                replan,
+                repo_root=self.root,
+                episode=self.episode,
+                efficiency_contract=contract,
+            ),
+            [],
+        )
+        tampered = dict(replan)
+        tampered["extended_active_seconds"] = 1501
+        errors = pipeline.validate_local_active_time_replan(
+            tampered,
+            repo_root=self.root,
+            episode=self.episode,
+            efficiency_contract=contract,
+        )
+        self.assertIn("local active-time replan hash is invalid", errors)
+        self.assertTrue(
+            any(
+                "projection recommendation" in error
+                for error in errors
+            )
         )
 
     def test_phase_envelopes_cannot_consume_reserved_stages(self) -> None:
@@ -3599,11 +5711,15 @@ class PipelineV2Tests(unittest.TestCase):
         )
 
         budget = pipeline.default_efficiency_budget()
-        budget["phase_token_fractions"]["authoring"] += 0.01
-        budget["phase_token_fractions"]["finalization"] -= 0.01
+        budget["phase_token_fractions_by_field"]["reasoning_tokens"][
+            "authoring"
+        ] += 0.01
+        budget["phase_token_fractions_by_field"]["reasoning_tokens"][
+            "finalization"
+        ] -= 0.01
         errors = pipeline.validate_efficiency_budget_data(budget)
         self.assertIn(
-            "early phase token envelopes consume the closure reserve",
+            "reasoning_tokens early phase token envelopes consume the closure reserve",
             errors,
         )
 
@@ -3779,10 +5895,7 @@ class PipelineV2Tests(unittest.TestCase):
         ledger.pop("ledger_hash", None)
         ledger["ledger_hash"] = pipeline.object_hash(ledger)
         self.write_json(ledger_path, ledger)
-        with self.assertRaisesRegex(
-            pipeline.PipelineError,
-            "overdue active-time reservations",
-        ):
+        with contextlib.redirect_stdout(io.StringIO()):
             pipeline.command_phase_start(
                 SimpleNamespace(
                     repo_root=str(self.root),
@@ -3801,6 +5914,28 @@ class PipelineV2Tests(unittest.TestCase):
                     output_token_allocation=0,
                     reasoning_token_allocation=0,
                     state=str(self.episode / "overdue-second.json"),
+                )
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "unreconciled stale wrapper",
+        ):
+            pipeline.command_phase_start(
+                SimpleNamespace(
+                    repo_root=str(self.root),
+                    episode=str(self.episode),
+                    efficiency_contract=str(self.efficiency_contract),
+                    run_id="overdue-same-scene",
+                    scene_slug="g001",
+                    phase="authoring",
+                    phase_purpose=None,
+                    actor_model="test-worker",
+                    active_seconds_allocation=60,
+                    raw_token_allocation=1,
+                    uncached_input_token_allocation=0,
+                    output_token_allocation=0,
+                    reasoning_token_allocation=0,
+                    state=str(self.episode / "overdue-same-scene.json"),
                 )
             )
 
@@ -3946,11 +6081,3515 @@ class PipelineV2Tests(unittest.TestCase):
             ]
         )
 
-    def test_close_episode_efficiency_requires_full_measured_workflow(
+    def test_phase_end_enriches_legacy_shared_rows_before_envelope_check(
+        self,
+    ) -> None:
+        contract = pipeline.load_json(self.efficiency_contract)
+        contract["budget"]["raw_input_plus_output_tokens"] = (
+            2_000_000
+        )
+        contract.pop("contract_hash", None)
+        contract["contract_hash"] = pipeline.object_hash(contract)
+        self.write_json(self.efficiency_contract, contract)
+
+        shared_key = "legacy-two-wrapper-design"
+        legacy_state = (
+            self.episode
+            / "review"
+            / "v2"
+            / "g001"
+            / "legacy-design-state.json"
+        )
+        legacy_instance = "phase-instance:shared:legacy-g001"
+        self.write_json(
+            legacy_state,
+            {
+                "schema": "lecture-animation-phase-timer-v2",
+                "run_id": "legacy-g001-design",
+                "scene_slug": "g001",
+                "phase": "design",
+                "phase_purpose": "",
+                "actor_model": "test-author",
+                "actor_role": "batch-designer",
+                "shared_work_key": shared_key,
+                "phase_instance_id": legacy_instance,
+                "efficiency_contract_path": str(
+                    self.efficiency_contract
+                ),
+            },
+        )
+        central_log = pipeline.episode_efficiency_central_log(
+            contract
+        )
+        pipeline.append_jsonl(
+            central_log,
+            {
+                "schema": "lecture-animation-phase-event-v2",
+                "event_id": "phase:legacy-g001-design",
+                "run_id": "legacy-g001-design",
+                "scene_slug": "g001",
+                "phase": "design",
+                "phase_purpose": "",
+                "actor_model": "test-author",
+                "actor_role": "batch-designer",
+                "phase_instance_id": legacy_instance,
+                "started_at": "2026-07-30T00:00:00+00:00",
+                "ended_at": "2026-07-30T00:00:10+00:00",
+                "duration_seconds": 10.0,
+                "input_tokens": 150_000,
+                "cached_input_tokens": 150_000,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "token_observed": True,
+                "result": "completed",
+            },
+        )
+        ledger = pipeline.empty_efficiency_reservation_ledger(
+            contract
+        )
+        ledger["reservations"] = {
+            "reservation:legacy-g001": {
+                "reservation_id": "reservation:legacy-g001",
+                "status": "released",
+                "state_path": str(legacy_state),
+                "run_id": "legacy-g001-design",
+                "scene_slug": "g001",
+                "phase": "design",
+                "phase_instance_id": legacy_instance,
+                "allocation": {
+                    "raw_input_plus_output_tokens": 150_000,
+                    "uncached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                },
+            }
+        }
+        ledger["revision"] = 1
+        ledger.pop("ledger_hash")
+        ledger["ledger_hash"] = pipeline.object_hash(ledger)
+        self.write_json(
+            pipeline.episode_efficiency_reservation_ledger(
+                contract
+            ),
+            ledger,
+        )
+
+        current_state = (
+            self.episode
+            / "review"
+            / "v2"
+            / "g002"
+            / "current-design-state.json"
+        )
+        phase_log = (
+            self.episode
+            / "review"
+            / "v2"
+            / "g002"
+            / "phase_log.jsonl"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        run_id="current-g002-design",
+                        scene_slug="g002",
+                        phase="design",
+                        phase_purpose=None,
+                        actor_model="test-author",
+                        actor_role="batch-designer",
+                        reasoning_effort="high",
+                        active_seconds_allocation=60,
+                        raw_token_allocation=150_000,
+                        uncached_input_token_allocation=0,
+                        output_token_allocation=0,
+                        reasoning_token_allocation=0,
+                        phase_instance_id=None,
+                        shared_work_key=shared_key,
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=0,
+                        usage_file=None,
+                        state=str(current_state),
+                    )
+                ),
+                0,
+            )
+            self.assertEqual(
+                pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(current_state),
+                        phase_log=str(phase_log),
+                        result="completed",
+                        manifest_hash="",
+                        usage_file=None,
+                        input_tokens=150_000,
+                        cached_input_tokens=150_000,
+                        output_tokens=0,
+                        reasoning_tokens=0,
+                    )
+                ),
+                0,
+            )
+        accounted = pipeline.phase_rows_with_accounting(
+            pipeline.event_rows(central_log),
+            contract=contract,
+            reservation_ledger=pipeline.load_json(
+                pipeline.episode_efficiency_reservation_ledger(
+                    contract
+                )
+            ),
+        )
+        self.assertEqual(
+            pipeline.phase_bucket_token_usage(
+                accounted,
+                "design",
+            )["raw_input_plus_output_tokens"],
+            150_000,
+        )
+        self.assertAlmostEqual(
+            pipeline.phase_bucket_active_seconds(
+                accounted,
+                "design",
+            ),
+            10.0,
+            delta=1.0,
+        )
+
+    def test_phase_start_rejects_batch_slug_and_binds_exact_member_scene(
+        self,
+    ) -> None:
+        batch_path = (
+            self.episode
+            / "review"
+            / "v2"
+            / "batch_a"
+            / "production_batch.json"
+        )
+        batch = {
+            "schema": "lecture-animation-production-batch-v2",
+            "batch_id": "batch_a",
+            "episode": pipeline.relative_or_absolute(
+                self.episode,
+                self.root,
+            ),
+            "scenes": [
+                "g001_exact_member",
+                "g002_exact_member",
+            ],
+        }
+        batch["batch_hash"] = pipeline.object_hash(batch)
+        self.write_json(batch_path, batch)
+        rejected_state = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "batch-slug-rejected.json"
+        )
+        base = {
+            "repo_root": str(self.root),
+            "episode": str(self.episode),
+            "efficiency_contract": str(
+                self.efficiency_contract
+            ),
+            "production_batch": str(batch_path),
+            "run_id": "batch-a-shared-design",
+            "phase": "design",
+            "phase_purpose": None,
+            "actor_model": "test-author",
+            "actor_role": "animation_author",
+            "reasoning_effort": "high",
+            "active_seconds_allocation": 60,
+            "raw_token_allocation": 100,
+            "uncached_input_token_allocation": 50,
+            "output_token_allocation": 20,
+            "reasoning_token_allocation": 10,
+            "phase_instance_id": None,
+            "shared_work_key": "shared-design",
+            "prompt_bytes": 0,
+            "artifact_input_bytes": 0,
+            "files_read": 0,
+            "usage_file": None,
+        }
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "exact member",
+        ):
+            pipeline.command_phase_start(
+                SimpleNamespace(
+                    **base,
+                    scene_slug="batch_a",
+                    state=str(rejected_state),
+                )
+            )
+        self.assertFalse(rejected_state.exists())
+
+        accepted_state = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "exact-member-accepted.json"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        **base,
+                        scene_slug="g001_exact_member",
+                        state=str(accepted_state),
+                    )
+                ),
+                0,
+            )
+        state = pipeline.load_json(accepted_state)
+        self.assertEqual(
+            state["production_batch_id"],
+            "batch_a",
+        )
+        self.assertEqual(
+            state["production_batch_hash"],
+            batch["batch_hash"],
+        )
+        self.assertEqual(
+            state["scene_slug"],
+            "g001_exact_member",
+        )
+
+    def test_raw_budget_replan_is_raw_only_single_accounting_and_three_keys(
+        self,
+    ) -> None:
+        efficiency = pipeline.load_json(self.efficiency_contract)
+        reservation_path = (
+            pipeline.episode_efficiency_reservation_ledger(efficiency)
+        )
+        self.write_json(
+            reservation_path,
+            pipeline.empty_efficiency_reservation_ledger(efficiency),
+        )
+        central_log = pipeline.episode_efficiency_central_log(efficiency)
+        central_log.parent.mkdir(parents=True, exist_ok=True)
+        historical_overrun = {
+                    "schema": "lecture-animation-phase-event-v2",
+                    "event_id": "phase:raw-budget-already-failed",
+                    "run_id": "historical-overrun",
+                    "scene_slug": "g000_historical",
+                    "phase": "authoring",
+                    "started_at": "2026-07-30T00:00:00+00:00",
+                    "ended_at": "2026-07-30T00:01:00+00:00",
+                    "duration_seconds": 60,
+                    "input_tokens": 50_000_001,
+                    "cached_input_tokens": 50_000_001,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "token_observed": True,
+                    "result": "completed",
+                }
+        review_near_envelope = {
+            "schema": "lecture-animation-phase-event-v2",
+            "event_id": "phase:review-near-envelope",
+            "run_id": "review-near-envelope",
+            "scene_slug": "g000_review",
+            "phase": "review",
+            "phase_purpose": "standard-review",
+            "started_at": "2026-07-30T00:02:00+00:00",
+            "ended_at": "2026-07-30T00:03:00+00:00",
+            "duration_seconds": 60,
+            "input_tokens": 5_999_900,
+            "cached_input_tokens": 5_999_900,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "token_observed": True,
+            "result": "completed",
+        }
+        central_log.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in (
+                    historical_overrun,
+                    review_near_envelope,
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        scenes = [f"g00{index}_animatic" for index in range(1, 5)]
+        batch_path = (
+            self.episode / "review" / "v2" / "batch-a.json"
+        )
+        batch = {
+            "schema": "lecture-animation-production-batch-v2",
+            "efficiency_contract_version": 2,
+            "episode_efficiency_contract_hash": efficiency[
+                "contract_hash"
+            ],
+            "batch_id": "batch-a",
+            "episode": pipeline.relative_or_absolute(
+                self.episode,
+                self.root,
+            ),
+            "scenes": scenes,
+            "author_id": "author-a",
+        }
+        batch["batch_hash"] = pipeline.object_hash(batch)
+        self.write_json(batch_path, batch)
+        supervisor_path = (
+            self.episode / "review" / "v2" / "supervisor.json"
+        )
+        supervisor = {
+            "schema": "lecture-animation-supervisor-session-v2",
+            "session_id": "supervisor:test",
+            "supervisor_agent_id": "main-reviewer",
+            "closed_at": None,
+            "assignments": {
+                "author-a": {
+                    "state": "active",
+                    "role": "production_author",
+                    "task_key": "batch-a",
+                    "scope": "four animatic scenes",
+                    "model": "test-model",
+                },
+                "reviewer-a": {
+                    "state": "active",
+                    "role": "independent_reviewer",
+                    "task_key": "review-batch-a-animatic-v02",
+                    "scope": "independent review of batch-a",
+                    "model": "test-review-model",
+                }
+            },
+        }
+        supervisor["session_hash"] = pipeline.object_hash(supervisor)
+        self.write_json(supervisor_path, supervisor)
+
+        def authorize(key: str, allowance: int = 1_500_000) -> Path:
+            output = (
+                self.episode
+                / "review"
+                / "evolution"
+                / f"{key}.json"
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.command_authorize_raw_budget_replan(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        production_batch=str(batch_path),
+                        supervisor_session=str(supervisor_path),
+                        authorizing_supervisor_agent_id="main-reviewer",
+                        author_agent_id="author-a",
+                        reviewer_actor_agent_id="reviewer-a",
+                        scenes=",".join(scenes),
+                        shared_work_key=key,
+                        allowed_output_path=[
+                            str(
+                                self.episode
+                                / "review"
+                                / "v2"
+                                / "animatic-review"
+                            )
+                        ],
+                        raw_token_allowance=allowance,
+                        expires_hours=6.0,
+                        output=str(output),
+                    )
+                )
+            return output
+
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "1,500,000",
+        ):
+            authorize("too-large", 1_500_001)
+        concurrent_keys = [
+            "mandatory-review-a",
+            "mandatory-review-b",
+            "mandatory-review-c",
+        ]
+        concurrent_outputs = [
+            (
+                self.episode
+                / "review"
+                / "evolution"
+                / f"{key}.json"
+            )
+            for key in concurrent_keys
+        ]
+        processes = [
+            subprocess.Popen(
+                [
+                    "python3",
+                    str(MODULE_PATH),
+                    "authorize-raw-budget-replan",
+                    "--repo-root",
+                    str(self.root),
+                    "--episode",
+                    str(self.episode),
+                    "--efficiency-contract",
+                    str(self.efficiency_contract),
+                    "--production-batch",
+                    str(batch_path),
+                    "--supervisor-session",
+                    str(supervisor_path),
+                    "--authorizing-supervisor-agent-id",
+                    "main-reviewer",
+                    "--author-agent-id",
+                    "author-a",
+                    "--reviewer-actor-agent-id",
+                    "reviewer-a",
+                    "--scenes",
+                    ",".join(scenes),
+                    "--shared-work-key",
+                    key,
+                    "--allowed-output-path",
+                    str(
+                        self.episode
+                        / "review"
+                        / "v2"
+                        / "animatic-review"
+                    ),
+                    "--raw-token-allowance",
+                    "1500000",
+                    "--expires-hours",
+                    "6",
+                    "--output",
+                    str(output),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for key, output in zip(
+                concurrent_keys,
+                concurrent_outputs,
+            )
+        ]
+        process_results = [
+            process.communicate(timeout=10)
+            for process in processes
+        ]
+        self.assertEqual(
+            [process.returncode for process in processes],
+            [0, 0, 0],
+            process_results,
+        )
+        overlay = concurrent_outputs[0]
+        original_efficiency_hash = pipeline.load_json(
+            self.efficiency_contract
+        )["contract_hash"]
+        original_batch_hash = pipeline.load_json(batch_path)[
+            "batch_hash"
+        ]
+
+        def start(
+            scene: str,
+            *,
+            raw: int = 100,
+            phase: str = "review",
+            purpose: str = (
+                "mandatory_independent_animatic_review"
+            ),
+            actor: str = "reviewer-a",
+            shared_key: str = "mandatory-review-a",
+            active_seconds: float = 60,
+            uncached: int = 0,
+        ) -> Path:
+            state = (
+                self.episode
+                / "review"
+                / "evolution"
+                / f"{scene}-raw-review.json"
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        production_batch=str(batch_path),
+                        raw_budget_replan=str(overlay),
+                        actor_agent_id=actor,
+                        run_id=f"{scene}-review",
+                        scene_slug=scene,
+                        phase=phase,
+                        phase_purpose=purpose,
+                        actor_model="test-reviewer",
+                        actor_role="independent_reviewer",
+                        reasoning_effort="high",
+                        active_seconds_allocation=active_seconds,
+                        raw_token_allocation=raw,
+                        uncached_input_token_allocation=uncached,
+                        output_token_allocation=0,
+                        reasoning_token_allocation=0,
+                        phase_instance_id=None,
+                        shared_work_key=shared_key,
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=0,
+                        usage_file=None,
+                        state=str(state),
+                    )
+                )
+            return state
+
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "phase=review",
+        ):
+            start(scenes[0], phase="design")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "mandatory_independent_animatic_review",
+        ):
+            start(scenes[0], purpose="ordinary_review")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "actor-agent-id",
+        ):
+            start(scenes[0], actor="wrong-reviewer")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "shared-work-key",
+        ):
+            start(scenes[0], shared_key="wrong-key")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "exact member",
+        ):
+            start("g999_outside")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "active-time reservation",
+        ):
+            start(scenes[0], active_seconds=3_601)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "hard limit",
+        ):
+            start(scenes[0], uncached=100_001)
+        original_overlay = pipeline.load_json(overlay)
+        tampered_overlay = dict(original_overlay)
+        tampered_overlay["allowed_output_paths"] = [
+            pipeline.relative_or_absolute(
+                self.root / "outside",
+                self.root,
+            )
+        ]
+        self.write_json(overlay, tampered_overlay)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "hash is invalid",
+        ):
+            start(scenes[0])
+        expired_overlay = dict(original_overlay)
+        expired_overlay["expires_at"] = "2026-07-29T00:00:00+00:00"
+        expired_overlay.pop("replan_hash", None)
+        expired_overlay["replan_hash"] = pipeline.object_hash(
+            expired_overlay
+        )
+        self.write_json(overlay, expired_overlay)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "expired",
+        ):
+            start(scenes[0])
+        self.write_json(overlay, original_overlay)
+        review_over_envelope = dict(review_near_envelope)
+        review_over_envelope["event_id"] = (
+            "phase:review-over-envelope"
+        )
+        review_over_envelope["input_tokens"] = 6_000_001
+        review_over_envelope["cached_input_tokens"] = 6_000_001
+        central_log.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in (
+                    historical_overrun,
+                    review_over_envelope,
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "review token envelope",
+        ):
+            start(scenes[0])
+        central_log.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in (
+                    historical_overrun,
+                    review_near_envelope,
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "identical allocation",
+        ):
+            first_state = start(scenes[0])
+            start(scenes[1], raw=99)
+        states = [
+            first_state,
+            *[start(scene) for scene in scenes[1:]],
+        ]
+        ledger = pipeline.load_json(reservation_path)
+        overlay_reservations = [
+            row
+            for row in ledger["reservations"].values()
+            if row.get("raw_budget_replan_hash")
+        ]
+        self.assertEqual(len(overlay_reservations), 1)
+        self.assertEqual(
+            len(overlay_reservations[0]["wrapper_state_paths"]),
+            4,
+        )
+        phase_log = (
+            self.episode / "review" / "evolution" / "raw-review.jsonl"
+        )
+        review_output = (
+            self.episode
+            / "review"
+            / "v2"
+            / "animatic-review"
+            / "independent-review.json"
+        )
+        self.write_json(
+            review_output,
+            {
+                "verdict": "revise",
+                "evidence": "mandatory independent animatic review",
+            },
+        )
+        missing_output = review_output.with_name("missing.json")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "missing",
+        ):
+            pipeline.command_phase_end(
+                SimpleNamespace(
+                    state=str(states[0]),
+                    phase_log=str(phase_log),
+                    result="blocked",
+                    manifest_hash="",
+                    usage_file=None,
+                    input_tokens=100,
+                    cached_input_tokens=100,
+                    output_tokens=0,
+                    reasoning_tokens=0,
+                    review_output=[str(missing_output)],
+                )
+            )
+        outside_output = self.root / "outside-review.json"
+        self.write_json(outside_output, {"verdict": "revise"})
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "outside",
+        ):
+            pipeline.command_phase_end(
+                SimpleNamespace(
+                    state=str(states[0]),
+                    phase_log=str(phase_log),
+                    result="blocked",
+                    manifest_hash="",
+                    usage_file=None,
+                    input_tokens=100,
+                    cached_input_tokens=100,
+                    output_tokens=0,
+                    reasoning_tokens=0,
+                    review_output=[str(outside_output)],
+                )
+            )
+        late_review_token = dict(review_near_envelope)
+        late_review_token["event_id"] = "phase:late-review-token"
+        late_review_token["input_tokens"] = 1
+        late_review_token["cached_input_tokens"] = 1
+        with central_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(late_review_token) + "\n")
+        def end_overlay_state(state: Path, result: str) -> int:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(state),
+                        phase_log=str(phase_log),
+                        result=result,
+                        manifest_hash="",
+                        usage_file=None,
+                        input_tokens=100,
+                        cached_input_tokens=100,
+                        output_tokens=0,
+                        reasoning_tokens=0,
+                        review_output=[str(review_output)],
+                    )
+                )
+
+        results = ["blocked", "abandoned", "completed", "completed"]
+        self.assertEqual(
+            end_overlay_state(states[0], results[0]),
+            2,
+        )
+        self.write_json(
+            review_output,
+            {
+                "verdict": "pass",
+                "evidence": "tampered after the first wrapper",
+            },
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "tampered",
+        ):
+            end_overlay_state(states[1], results[1])
+        self.write_json(
+            review_output,
+            {
+                "verdict": "revise",
+                "evidence": "mandatory independent animatic review",
+            },
+        )
+        for state, result in zip(states[1:], results[1:]):
+            self.assertEqual(
+                end_overlay_state(state, result),
+                2,
+            )
+        ledger = pipeline.load_json(reservation_path)
+        overlay_reservations = [
+            row
+            for row in ledger["reservations"].values()
+            if row.get("raw_budget_replan_hash")
+        ]
+        self.assertEqual(len(overlay_reservations), 1)
+        self.assertEqual(
+            overlay_reservations[0]["actual"][
+                "raw_input_plus_output_tokens"
+            ],
+            100,
+        )
+        self.assertEqual(
+            ledger["raw_budget_replans"]["mandatory-review-a"][
+                "status"
+            ],
+            "consumed",
+        )
+        overlay_status = pipeline.raw_budget_replan_status(ledger)
+        self.assertEqual(
+            overlay_status["actual_raw_tokens"],
+            100,
+        )
+        output_sha = pipeline.artifact_snapshot(
+            review_output,
+            self.root,
+        )["sha256"]
+        self.assertTrue(
+            all(
+                pipeline.load_json(state)["review_outputs"][0][
+                    "sha256"
+                ]
+                == output_sha
+                for state in states
+            )
+        )
+        self.assertTrue(
+            all(
+                row["review_outputs"][0]["sha256"] == output_sha
+                for row in pipeline.event_rows(phase_log)
+            )
+        )
+        original_status = pipeline.efficiency_status_from_rows(
+            efficiency,
+            pipeline.event_rows(central_log),
+            reservation_ledger=ledger,
+        )
+        self.assertIn(
+            "raw_input_plus_output_tokens",
+            original_status["token_status"]["exceeded"],
+        )
+        close_evaluation = (
+            pipeline.episode_efficiency_close_evaluation(
+                efficiency,
+                pipeline.event_rows(central_log),
+                set(scenes),
+                {
+                    "missing_phase_pairs_by_scene": {},
+                    "false_passes": 0,
+                },
+                {
+                    "scene_rate": 0.0,
+                    "scenes": [],
+                    "scene_count": 0,
+                },
+                [],
+            )
+        )
+        self.assertIn(
+            "EPISODE_TOKEN_BUDGET_EXCEEDED",
+            close_evaluation["errors"],
+        )
+        self.assertFalse(close_evaluation["compliant"])
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "already exists|already authorized",
+        ):
+            authorize("mandatory-review-a")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "fourth",
+        ):
+            authorize("mandatory-review-d")
+        self.assertEqual(
+            pipeline.load_json(self.efficiency_contract)[
+                "contract_hash"
+            ],
+            original_efficiency_hash,
+        )
+        self.assertEqual(
+            pipeline.load_json(batch_path)["batch_hash"],
+            original_batch_hash,
+        )
+
+    def test_animatic_repair_binds_open_issue_and_completion_artifacts(
+        self,
+    ) -> None:
+        scene_slug = "g001_animatic_repair"
+        batch_path = (
+            self.episode
+            / "review"
+            / "v2"
+            / "batch_a"
+            / "production_batch.json"
+        )
+        batch = {
+            "schema": "lecture-animation-production-batch-v2",
+            "batch_id": "batch_a",
+            "episode": pipeline.relative_or_absolute(
+                self.episode,
+                self.root,
+            ),
+            "scenes": [scene_slug],
+        }
+        batch["batch_hash"] = pipeline.object_hash(batch)
+        self.write_json(batch_path, batch)
+        issue_path = (
+            self.episode
+            / "review"
+            / "issues"
+            / "animatic-causality.json"
+        )
+        issue = {
+            "schema": "lecture-animation-review-issue-v1",
+            "issue_id": "animatic-causality",
+            "scene_slug": scene_slug,
+            "source": "independent_review",
+            "severity": "critical",
+            "verdict": "revise",
+            "status": "open",
+        }
+        self.write_json(issue_path, issue)
+        state_path = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "animatic-repair-active.json"
+        )
+        phase_log = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "animatic-repair.jsonl"
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        production_batch=str(batch_path),
+                        run_id="animatic-repair-v02",
+                        scene_slug=scene_slug,
+                        phase="repair",
+                        phase_purpose="animatic_repair",
+                        actor_model="test-author",
+                        actor_role="animation_author",
+                        reasoning_effort="high",
+                        active_seconds_allocation=60,
+                        raw_token_allocation=100,
+                        uncached_input_token_allocation=50,
+                        output_token_allocation=20,
+                        reasoning_token_allocation=10,
+                        phase_instance_id=None,
+                        shared_work_key=None,
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=1,
+                        usage_file=None,
+                        animatic_issue=[str(issue_path)],
+                        previous_review=None,
+                        repair_contract=None,
+                        repair_execution_mode="same_author",
+                        repair_actor_agent_id="author-a",
+                        planned_verifier_agent_id="reviewer-b",
+                        handoff_count=1,
+                        state=str(state_path),
+                    )
+                ),
+                0,
+            )
+        state = pipeline.load_json(state_path)
+        self.assertTrue(state["animatic_repair"])
+        self.assertEqual(
+            state["animatic_repair_issue_ids"],
+            ["animatic-causality"],
+        )
+
+        animatic = self.episode / "exports" / "animatic-v02.mp4"
+        animatic.parent.mkdir(parents=True)
+        animatic.write_bytes(b"animatic-v02")
+        self_review = (
+            self.episode
+            / "review"
+            / "audits"
+            / scene_slug
+            / "animatic-v02-self-review.md"
+        )
+        self_review.parent.mkdir(parents=True)
+        self_review.write_text(
+            "The repaired causal transform is visible frame by frame.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+                pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(state_path),
+                        phase_log=str(phase_log),
+                        result="completed",
+                        manifest_hash="",
+                        usage_file=None,
+                        input_tokens=0,
+                        cached_input_tokens=0,
+                        output_tokens=0,
+                        reasoning_tokens=0,
+                        animatic_output=str(animatic),
+                        animatic_self_review=str(self_review),
+                    )
+                ),
+                0,
+            )
+        event = pipeline.event_rows(phase_log)[0]
+        self.assertEqual(
+            event["animatic_repair_issue_ids"],
+            ["animatic-causality"],
+        )
+        self.assertEqual(
+            event["animatic_output"]["sha256"],
+            pipeline.artifact_snapshot(
+                animatic,
+                self.root,
+            )["sha256"],
+        )
+        self.assertEqual(
+            event["animatic_self_review"]["sha256"],
+            pipeline.artifact_snapshot(
+                self_review,
+                self.root,
+            )["sha256"],
+        )
+
+    def test_animatic_repair_budget_continuation_is_exact_outer_only_and_consumed(
+        self,
+    ) -> None:
+        efficiency = pipeline.load_json(self.efficiency_contract)
+        reservation_path = (
+            pipeline.episode_efficiency_reservation_ledger(efficiency)
+        )
+        self.write_json(
+            reservation_path,
+            pipeline.empty_efficiency_reservation_ledger(efficiency),
+        )
+        central_log = pipeline.episode_efficiency_central_log(
+            efficiency
+        )
+        central_log.parent.mkdir(parents=True, exist_ok=True)
+        original_failure = {
+            "schema": "lecture-animation-phase-event-v2",
+            "event_id": "phase:raw-output-already-failed",
+            "run_id": "historical-overrun",
+            "scene_slug": "g000_historical",
+            "phase": "authoring",
+            "started_at": "2026-07-30T00:00:00+00:00",
+            "ended_at": "2026-07-30T00:01:00+00:00",
+            "duration_seconds": 60,
+            # Episode 8 totals immediately before the honestly settled
+            # batch-B repair.  Together with repair_envelope_failure below,
+            # these reproduce the real pre-B ledger rather than a synthetic
+            # single-dimension overrun.
+            "input_tokens": 66_743_275,
+            "cached_input_tokens": 65_238_152,
+            "output_tokens": 292_441,
+            "reasoning_tokens": 55_279,
+            "token_observed": True,
+            "result": "completed",
+        }
+        repair_envelope_failure = {
+            "schema": "lecture-animation-phase-event-v2",
+            "event_id": "phase:repair-envelope-already-failed",
+            "run_id": "historical-repair-overrun",
+            "scene_slug": "g000_historical_repair",
+            "phase": "repair",
+            "phase_purpose": "animatic_repair",
+            "started_at": "2026-07-30T00:02:00+00:00",
+            "ended_at": "2026-07-30T00:03:00+00:00",
+            "duration_seconds": 60,
+            "input_tokens": 4_000_001,
+            "cached_input_tokens": 3_840_000,
+            "output_tokens": 24_001,
+            "reasoning_tokens": 8_001,
+            "token_observed": True,
+            "result": "completed",
+        }
+        central_log.write_text(
+            "\n".join(
+                json.dumps(row)
+                for row in (
+                    original_failure,
+                    repair_envelope_failure,
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        supervisor_path = (
+            self.episode / "review" / "v3" / "supervisor.json"
+        )
+        supervisor = {
+            "schema": "lecture-animation-supervisor-session-v2",
+            "session_id": "supervisor:ep8-repair-v03",
+            "supervisor_agent_id": "/root",
+            "closed_at": None,
+            "assignments": {
+                "/root/ep8_repair_v03_batch_b": {
+                    "state": "active",
+                    "role": "production_author",
+                    "task_key": "batch_b",
+                    "scope": "repair G006 and G008 animatics",
+                    "model": "test-author",
+                },
+                "/root/ep8_repair_v03_batch_c": {
+                    "state": "active",
+                    "role": "production_author",
+                    "task_key": "batch_c",
+                    "scope": "repair G012 animatic",
+                    "model": "test-author",
+                },
+            },
+        }
+        supervisor["session_hash"] = pipeline.object_hash(supervisor)
+        self.write_json(supervisor_path, supervisor)
+        batch_specs = {
+            "batch_b": {
+                "author": "/root/ep8_repair_v03_batch_b",
+                "verifier": "/root/ep8_repair_v03_verifier_b",
+                "batch_scenes": [
+                    "g005_constant_function_calibration",
+                    "g006_conjugate_path_dependence",
+                    "g007_primitive_and_path_independence",
+                    "g008_cauchy_theorem_local_rectangle",
+                ],
+                "scenes": [
+                    "g006_conjugate_path_dependence",
+                    "g008_cauchy_theorem_local_rectangle",
+                ],
+                "output_allowance": 16_000,
+            },
+            "batch_c": {
+                "author": "/root/ep8_repair_v03_batch_c",
+                "verifier": "/root/ep8_review_batch_c",
+                "batch_scenes": [
+                    "g009_mosaic_global_cancellation",
+                    "g010_contour_deformation",
+                    "g011_one_over_z_arrow_alignment",
+                    "g012_singularity_winding_synthesis",
+                ],
+                "scenes": [
+                    "g012_singularity_winding_synthesis",
+                ],
+                "output_allowance": 8_000,
+            },
+        }
+        batch_paths: dict[str, Path] = {}
+        issue_paths: dict[str, Path] = {}
+        extra_issue_paths: dict[str, list[Path]] = {}
+        output_roots: dict[str, Path] = {}
+        for batch_id, spec in batch_specs.items():
+            batch_path = (
+                self.episode
+                / "review"
+                / "v3"
+                / batch_id
+                / "production_batch_repair_v03.json"
+            )
+            batch = {
+                "schema": "lecture-animation-production-batch-v2",
+                "efficiency_contract_version": 2,
+                "episode_efficiency_contract_hash": efficiency[
+                    "contract_hash"
+                ],
+                "batch_id": batch_id,
+                "episode": pipeline.relative_or_absolute(
+                    self.episode,
+                    self.root,
+                ),
+                "scenes": spec["batch_scenes"],
+                "author_id": spec["author"],
+            }
+            batch["batch_hash"] = pipeline.object_hash(batch)
+            self.write_json(batch_path, batch)
+            batch_paths[batch_id] = batch_path
+            for scene in spec["scenes"]:
+                issue_path = (
+                    self.episode
+                    / "review"
+                    / "issues"
+                    / f"{scene}-animatic-v02.json"
+                )
+                issue = {
+                    "schema": "lecture-animation-review-issue-v1",
+                    "id": f"{scene}-animatic-v02",
+                    "scene": scene,
+                    "source": "independent_review",
+                    "severity": "critical",
+                    "status": "open",
+                }
+                self.write_json(issue_path, issue)
+                issue_paths[scene] = issue_path
+                output_root = (
+                    self.episode
+                    / "review"
+                    / "v3"
+                    / batch_id
+                    / scene
+                    / "repair_v03"
+                )
+                output_roots[scene] = output_root
+        second_g012_issue = (
+            self.episode
+            / "review"
+            / "issues"
+            / "g012-squashed-contour-animatic-v02.json"
+        )
+        self.write_json(
+            second_g012_issue,
+            {
+                "schema": "lecture-animation-review-issue-v1",
+                "id": "g012-squashed-contour-animatic-v02",
+                "scene": "g012_singularity_winding_synthesis",
+                "source": "independent_review",
+                "severity": "critical",
+                "status": "open",
+            },
+        )
+        extra_issue_paths[
+            "g012_singularity_winding_synthesis"
+        ] = [second_g012_issue]
+
+        def authorize(
+            batch_id: str,
+            *,
+            output_allowance: int | None = None,
+            key: str | None = None,
+            scenes: list[str] | None = None,
+        ) -> Path:
+            spec = batch_specs[batch_id]
+            continuation_path = (
+                self.episode
+                / "review"
+                / "v3"
+                / batch_id
+                / f"{key or batch_id}-continuation.json"
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.command_authorize_animatic_repair_budget_continuation(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        production_batch=str(batch_paths[batch_id]),
+                        supervisor_session=str(supervisor_path),
+                        authorizing_supervisor_agent_id="/root",
+                        author_agent_id=spec["author"],
+                        planned_verifier_agent_id=spec["verifier"],
+                        scenes=",".join(
+                            spec["scenes"] if scenes is None else scenes
+                        ),
+                        shared_work_key=key or f"ep8:{batch_id}:repair-v03",
+                        animatic_issue=[
+                            str(issue_paths[scene])
+                            for scene in spec["scenes"]
+                        ]
+                        + [
+                            str(path)
+                            for scene in spec["scenes"]
+                            for path in extra_issue_paths.get(scene, [])
+                        ],
+                        allowed_output_root=[
+                            f"{scene}={output_roots[scene]}"
+                            for scene in spec["scenes"]
+                        ],
+                        raw_token_allowance=1_500_000,
+                        output_token_allowance=(
+                            spec["output_allowance"]
+                            if output_allowance is None
+                            else output_allowance
+                        ),
+                        expires_hours=6.0,
+                        output=str(continuation_path),
+                    )
+                )
+            return continuation_path
+
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "output allowance",
+        ):
+            authorize(
+                "batch_b",
+                output_allowance=16_001,
+                key="too-much-output",
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "fixed Episode 8 repair scope",
+        ):
+            authorize(
+                "batch_b",
+                key="missing-scope-scene",
+                scenes=["g006_conjugate_path_dependence"],
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "fixed Episode 8 repair scope",
+        ):
+            authorize(
+                "batch_c",
+                key="extra-scope-scene",
+                scenes=[
+                    "g011_one_over_z_arrow_alignment",
+                    "g012_singularity_winding_synthesis",
+                ],
+            )
+        continuation_b = authorize("batch_b")
+        continuation_c = authorize("batch_c")
+        ledger = pipeline.load_json(reservation_path)
+        continuation_rows = ledger[
+            "animatic_repair_budget_continuations"
+        ]
+        self.assertEqual(len(continuation_rows), 2)
+        self.assertEqual(
+            sum(
+                row["raw_allowance_tokens"]
+                for row in continuation_rows.values()
+            ),
+            3_000_000,
+        )
+        self.assertEqual(
+            sum(
+                row["output_allowance_tokens"]
+                for row in continuation_rows.values()
+            ),
+            24_000,
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "already authorized|third key",
+        ):
+            authorize("batch_c", key="third-key")
+        extension_paths: dict[str, Path] = {}
+        for batch_id, parent in (
+            ("batch_b", continuation_b),
+            ("batch_c", continuation_c),
+        ):
+            extension_path = (
+                self.episode
+                / "review"
+                / "v3"
+                / batch_id
+                / "animatic-repair-token-extension.json"
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    pipeline.command_authorize_animatic_repair_token_extension(
+                        SimpleNamespace(
+                            repo_root=str(self.root),
+                            episode=str(self.episode),
+                            parent_continuation=str(parent),
+                            output=str(extension_path),
+                        )
+                    ),
+                    0,
+                )
+            extension_paths[batch_id] = extension_path
+
+        def start(
+            batch_id: str,
+            scene: str,
+            *,
+            actor: str | None = None,
+            issue_path: Path | None = None,
+            use_extension: bool = True,
+            allocation_overrides: dict[str, int] | None = None,
+            active_seconds: float = 60,
+            state_suffix: str = "",
+            continuation_override: Path | None = None,
+            extension_override: Path | None = None,
+            batch_override: Path | None = None,
+            recovery: Path | None = None,
+            shared_key_override: str | None = None,
+        ) -> Path:
+            spec = batch_specs[batch_id]
+            allocations = {
+                "raw_token_allocation": 1_500_000,
+                "uncached_input_token_allocation": 60_000,
+                "output_token_allocation": spec["output_allowance"],
+                "reasoning_token_allocation": 4_000,
+            }
+            allocations.update(allocation_overrides or {})
+            state_root = (
+                batch_override.parent / "phase-states"
+                if batch_override is not None
+                else output_roots[scene]
+                if batch_id == "batch_c"
+                else self.episode / "review" / "v3" / batch_id
+            )
+            state_path = (
+                state_root
+                / f"{scene}{state_suffix}-repair-active.json"
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        production_batch=str(
+                            batch_override or batch_paths[batch_id]
+                        ),
+                        raw_budget_replan=None,
+                        animatic_repair_budget_continuation=str(
+                            continuation_override
+                            or (
+                                continuation_b
+                                if batch_id == "batch_b"
+                                else continuation_c
+                            )
+                        ),
+                        animatic_repair_token_extension=(
+                            str(
+                                extension_override
+                                or extension_paths[batch_id]
+                            )
+                            if use_extension
+                            else None
+                        ),
+                        animatic_repair_recovery=(
+                            str(recovery) if recovery else None
+                        ),
+                        actor_agent_id=None,
+                        run_id=f"{batch_id}-{scene}-repair-v03",
+                        scene_slug=scene,
+                        phase="repair",
+                        phase_purpose="animatic_repair",
+                        actor_model="test-author",
+                        actor_role="production_author",
+                        reasoning_effort="high",
+                        active_seconds_allocation=active_seconds,
+                        **allocations,
+                        phase_instance_id=None,
+                        shared_work_key=(
+                            shared_key_override
+                            or f"ep8:{batch_id}:repair-v03"
+                        ),
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=1,
+                        usage_file=None,
+                        animatic_issue=[
+                            str(issue_path or issue_paths[scene])
+                        ]
+                        + (
+                            []
+                            if issue_path is not None
+                            else [
+                                str(path)
+                                for path in extra_issue_paths.get(
+                                    scene,
+                                    [],
+                                )
+                            ]
+                        ),
+                        previous_review=None,
+                        repair_contract=None,
+                        repair_execution_mode="same_author",
+                        repair_actor_agent_id=actor or spec["author"],
+                        planned_verifier_agent_id=spec["verifier"],
+                        handoff_count=1,
+                        state=str(state_path),
+                    )
+                )
+            return state_path
+
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "repair actor",
+        ):
+            start(
+                "batch_b",
+                batch_specs["batch_b"]["scenes"][0],
+                actor="wrong-author",
+                state_suffix="-wrong-author",
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "repair token envelope",
+        ):
+            start(
+                "batch_b",
+                batch_specs["batch_b"]["scenes"][0],
+                use_extension=False,
+                state_suffix="-no-companion",
+            )
+        for field, value in {
+            "raw_token_allocation": 1_500_001,
+            "uncached_input_token_allocation": 60_001,
+            "output_token_allocation": 16_001,
+            "reasoning_token_allocation": 4_001,
+        }.items():
+            with self.assertRaisesRegex(
+                pipeline.PipelineError,
+                "hard limit|key cap|local token extension",
+            ):
+                start(
+                    "batch_b",
+                    batch_specs["batch_b"]["scenes"][0],
+                    allocation_overrides={field: value},
+                    state_suffix=f"-over-{field}",
+                )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "600-second",
+        ):
+            start(
+                "batch_b",
+                batch_specs["batch_b"]["scenes"][0],
+                active_seconds=1500,
+                state_suffix="-active-not-extended",
+            )
+        issue_g006 = pipeline.load_json(
+            issue_paths["g006_conjugate_path_dependence"]
+        )
+        issue_g006["status"] = "closed"
+        self.write_json(
+            issue_paths["g006_conjugate_path_dependence"],
+            issue_g006,
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "stale|closed",
+        ):
+            start(
+                "batch_b",
+                "g006_conjugate_path_dependence",
+                state_suffix="-closed-issue",
+            )
+        issue_g006["status"] = "open"
+        self.write_json(
+            issue_paths["g006_conjugate_path_dependence"],
+            issue_g006,
+        )
+        original_continuation_b = pipeline.load_json(continuation_b)
+        tampered_continuation_b = dict(original_continuation_b)
+        tampered_continuation_b["future_output_allowance_tokens"] = 16_001
+        self.write_json(continuation_b, tampered_continuation_b)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "hash is invalid",
+        ):
+            start(
+                "batch_b",
+                "g006_conjugate_path_dependence",
+                state_suffix="-tampered",
+            )
+        self.write_json(continuation_b, original_continuation_b)
+        original_extension_b = pipeline.load_json(
+            extension_paths["batch_b"]
+        )
+        tampered_extension_b = dict(original_extension_b)
+        tampered_extension_b["local_token_allowance"] = {
+            **tampered_extension_b["local_token_allowance"],
+            "reasoning_tokens": 4_001,
+        }
+        self.write_json(
+            extension_paths["batch_b"],
+            tampered_extension_b,
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "hash is invalid",
+        ):
+            start(
+                "batch_b",
+                "g006_conjugate_path_dependence",
+                state_suffix="-tampered-extension",
+            )
+        self.write_json(
+            extension_paths["batch_b"],
+            original_extension_b,
+        )
+
+        states_b = [
+            start("batch_b", scene)
+            for scene in batch_specs["batch_b"]["scenes"]
+        ]
+        state_c = start(
+            "batch_c",
+            "g012_singularity_winding_synthesis",
+        )
+        ledger = pipeline.load_json(reservation_path)
+        continuation_reservations = [
+            row
+            for row in ledger["reservations"].values()
+            if row.get(
+                "animatic_repair_budget_continuation_hash"
+            )
+        ]
+        self.assertEqual(len(continuation_reservations), 2)
+        self.assertEqual(
+            len(
+                continuation_reservations[0].get(
+                    "wrapper_state_paths",
+                    {},
+                )
+            )
+            + len(
+                continuation_reservations[1].get(
+                    "wrapper_state_paths",
+                    {},
+                )
+            ),
+            3,
+        )
+        phase_log = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "animatic-repair-continuation.jsonl"
+        )
+
+        def artifacts(scene: str) -> tuple[Path, Path]:
+            root = output_roots[scene]
+            root.mkdir(parents=True, exist_ok=True)
+            animatic = root / "animatic-repair-v03.mp4"
+            animatic.write_bytes(b"repair-v03")
+            self_review = root / "animatic-repair-v03-self-review.md"
+            self_review.write_text(
+                "The bounded repair remains pending independent review.\n",
+                encoding="utf-8",
+            )
+            return animatic, self_review
+
+        def end(
+            state: Path,
+            result: str,
+            animatic: Path | None,
+            self_review: Path | None,
+            *,
+            input_tokens: int = 100,
+            cached_input_tokens: int = 100,
+            output_tokens: int = 10,
+            reasoning_tokens: int = 0,
+        ) -> int:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(state),
+                        phase_log=str(phase_log),
+                        result=result,
+                        manifest_hash="",
+                        usage_file=None,
+                        input_tokens=input_tokens,
+                        cached_input_tokens=cached_input_tokens,
+                        output_tokens=output_tokens,
+                        reasoning_tokens=reasoning_tokens,
+                        animatic_output=(
+                            str(animatic) if animatic else None
+                        ),
+                        animatic_self_review=(
+                            str(self_review) if self_review else None
+                        ),
+                        review_output=[],
+                    )
+                )
+
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "animatic-output",
+        ):
+            end(states_b[0], "blocked", None, None)
+        outside = self.root / "outside"
+        outside.mkdir()
+        outside_animatic = outside / "animatic.mp4"
+        outside_animatic.write_bytes(b"outside")
+        inside_self_review = artifacts(
+            "g006_conjugate_path_dependence"
+        )[1]
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "outside the sealed scene output root",
+        ):
+            end(
+                states_b[0],
+                "blocked",
+                outside_animatic,
+                inside_self_review,
+            )
+        artifacts_b = [
+            artifacts(scene)
+            for scene in batch_specs["batch_b"]["scenes"]
+        ]
+        real_batch_b_actual = {
+            "input_tokens": 12_005_157,
+            "cached_input_tokens": 11_735_296,
+            "output_tokens": 44_620,
+            "reasoning_tokens": 11_860,
+        }
+        self.assertEqual(
+            end(
+                states_b[0],
+                "blocked",
+                *artifacts_b[0],
+                **real_batch_b_actual,
+            ),
+            2,
+        )
+        completed_b0 = pipeline.load_json(states_b[0])
+        self.assertTrue(
+            completed_b0["phase_envelope_status_at_end"]["exceeded"]
+        )
+        self.assertFalse(
+            completed_b0["phase_envelope_completion_exceeded"]
+        )
+        self.assertTrue(
+            completed_b0[
+                "animatic_repair_token_extension_status_at_end"
+            ]["exceeded"]
+        )
+        self.assertIn(
+            "PHASE_BUDGET_ENVELOPE_EXCEEDED",
+            completed_b0["efficiency_status_at_end"]["alerts"],
+        )
+        ledger = pipeline.load_json(reservation_path)
+        row_b = ledger[
+            "animatic_repair_budget_continuations"
+        ]["ep8:batch_b:repair-v03"]
+        self.assertEqual(row_b["status"], "reserved")
+        extension_row_b = ledger[
+            "animatic_repair_token_extensions"
+        ]["ep8:batch_b:repair-v03"]
+        self.assertEqual(extension_row_b["status"], "reserved")
+        self.assertEqual(
+            extension_row_b["reservation_id"],
+            row_b["reservation_id"],
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "not active",
+        ):
+            end(states_b[0], "blocked", *artifacts_b[0])
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "same actual token usage",
+        ):
+            end(
+                states_b[1],
+                "completed",
+                *artifacts_b[1],
+                input_tokens=12_005_158,
+                cached_input_tokens=11_735_296,
+                output_tokens=44_620,
+                reasoning_tokens=11_860,
+            )
+        self.assertEqual(
+            end(
+                states_b[1],
+                "completed",
+                *artifacts_b[1],
+                **real_batch_b_actual,
+            ),
+            2,
+        )
+        ledger_after_b = pipeline.load_json(reservation_path)
+        settled_b_row = ledger_after_b[
+            "animatic_repair_budget_continuations"
+        ]["ep8:batch_b:repair-v03"]
+        settled_b_reservation = ledger_after_b["reservations"][
+            settled_b_row["reservation_id"]
+        ]
+        self.assertEqual(settled_b_reservation["status"], "released")
+        self.assertEqual(
+            settled_b_reservation["actual"],
+            {
+                "raw_input_plus_output_tokens": 12_049_777,
+                "uncached_input_tokens": 269_861,
+                "output_tokens": 44_620,
+                "reasoning_tokens": 11_860,
+            },
+        )
+        active_c_row = ledger_after_b[
+            "animatic_repair_budget_continuations"
+        ]["ep8:batch_c:repair-v03"]
+        active_c_reservation = ledger_after_b["reservations"][
+            active_c_row["reservation_id"]
+        ]
+        self.assertIsNone(active_c_reservation.get("actual"))
+
+        # Match Episode 8's already-exhausted 4,912-second repair envelope.
+        # The two B wrappers retain one accounting identity and therefore one
+        # 4,852-second shared interval, added to the 60-second historical
+        # repair interval above.
+        central_rows = [
+            json.loads(line)
+            for line in central_log.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        for row in central_rows:
+            if row.get("accounting_identity") == completed_b0.get(
+                "accounting_identity"
+            ):
+                row["started_at"] = "2026-07-30T00:04:00+00:00"
+                row["ended_at"] = "2026-07-30T01:24:52+00:00"
+                row["duration_seconds"] = 4_852
+        central_log.write_text(
+            "\n".join(json.dumps(row) for row in central_rows) + "\n",
+            encoding="utf-8",
+        )
+        supervisor = pipeline.load_json(supervisor_path)
+        supervisor["assignments"][
+            "/root/ep8_repair_v03_batch_c"
+        ]["state"] = "blocked"
+        supervisor.pop("session_hash", None)
+        supervisor["session_hash"] = pipeline.object_hash(supervisor)
+        self.write_json(supervisor_path, supervisor)
+        health_paths: list[Path] = []
+        for sequence in (1, 2, 3):
+            health_path = (
+                self.episode
+                / "review"
+                / "v3"
+                / "batch_c"
+                / f"health-{sequence}.json"
+            )
+            self.write_json(
+                health_path,
+                {
+                    "schema_version": (
+                        "lecture-animation-worker-health-check-evidence-v1"
+                    ),
+                    "sequence": sequence,
+                    "agent_id": "/root/ep8_repair_v03_batch_c",
+                    "result": "no_response",
+                    "requested_action": f"health probe {sequence}",
+                    "artifact_progress": False,
+                    "recorded_by": "/root",
+                },
+            )
+            health_paths.append(health_path)
+        feedback_path = (
+            self.episode
+            / "review"
+            / "agent-feedback"
+            / "g012-unresponsive.md"
+        )
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        feedback_path.write_text(
+            "Three probes found no response or artifact progress.\n",
+            encoding="utf-8",
+        )
+        accepted_issue_path = (
+            self.episode
+            / "review"
+            / "issues"
+            / "g012-unresponsive.json"
+        )
+        self.write_json(
+            accepted_issue_path,
+            {
+                "schema": "lecture-animation-review-issue-v1",
+                "issue_id": "g012-unresponsive",
+                "source": "accepted_agent_feedback",
+                "scene_slug": "g012_singularity_winding_synthesis",
+                "status": "open",
+                "pattern_key": (
+                    "repair_author_identity_unresponsive_without_artifact_progress"
+                ),
+            },
+        )
+        abandonment_path = (
+            self.episode
+            / "review"
+            / "v3"
+            / "batch_c"
+            / "g012-abandonment.json"
+        )
+        abandon_args = SimpleNamespace(
+            repo_root=str(self.root),
+            state=str(state_c),
+            blocked_supervisor=str(supervisor_path),
+            health_check=[str(path) for path in health_paths],
+            accepted_feedback=str(feedback_path),
+            accepted_issue=str(accepted_issue_path),
+            output=str(abandonment_path),
+        )
+        self.write_json(
+            output_roots["g012_singularity_winding_synthesis"]
+            / "rollout_totals_start.json",
+            {"input_tokens": 0},
+        )
+        inside_health = (
+            output_roots["g012_singularity_winding_synthesis"]
+            / "abandonment-health-1.json"
+        )
+        self.write_json(
+            inside_health,
+            pipeline.load_json(health_paths[0]),
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "governance evidence must remain outside",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                SimpleNamespace(
+                    **{
+                        **vars(abandon_args),
+                        "health_check": [
+                            str(inside_health),
+                            str(health_paths[1]),
+                            str(health_paths[2]),
+                        ],
+                    }
+                )
+            )
+        inside_health.unlink()
+        author_self_review = (
+            output_roots["g012_singularity_winding_synthesis"]
+            / "author_self_review.md"
+        )
+        author_self_review.write_text(
+            "Claimed author progress.\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "attributable production progress",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                abandon_args
+            )
+        author_self_review.unlink()
+        old_progress = (
+            output_roots["g012_singularity_winding_synthesis"]
+            / "old-output.mp4"
+        )
+        old_progress.parent.mkdir(parents=True, exist_ok=True)
+        old_progress.write_bytes(b"attributable-progress")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "attributable production progress",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                abandon_args
+            )
+        old_progress.unlink()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+            abandonment_results = list(
+                executor.map(
+                    lambda _: (
+                        pipeline.command_abandon_unresponsive_animatic_repair(
+                            abandon_args
+                        )
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual(abandonment_results, [0, 0])
+        abandonment = pipeline.load_json(abandonment_path)
+        self.assertFalse(abandonment["token_observed"])
+        self.assertIsNone(abandonment["actual"])
+        self.assertFalse(abandonment["refund"])
+        self.assertEqual(
+            pipeline.event_rows(central_log)[-1]["token_source_kind"],
+            "unresponsive_worker_unobservable",
+        )
+        alternate_health = health_paths[0].with_name(
+            "health-1-alternate.json"
+        )
+        self.write_json(
+            alternate_health,
+            pipeline.load_json(health_paths[0]),
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "complete identical commit",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                SimpleNamespace(
+                    **{
+                        **vars(abandon_args),
+                        "health_check": [
+                            str(alternate_health),
+                            str(health_paths[1]),
+                            str(health_paths[2]),
+                        ],
+                    }
+                )
+            )
+        feedback_original = feedback_path.read_text(encoding="utf-8")
+        feedback_path.write_text(
+            feedback_original + "mismatched retry\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "complete identical commit",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                abandon_args
+            )
+        feedback_path.write_text(feedback_original, encoding="utf-8")
+        central_log_original = central_log.read_text(encoding="utf-8")
+        central_lines = central_log_original.splitlines()
+        central_log.write_text(
+            "\n".join(central_lines[:-1]) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "exactly one committed abandonment event",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                abandon_args
+            )
+        central_log.write_text(
+            central_log_original,
+            encoding="utf-8",
+        )
+        ledger_committed = pipeline.load_json(reservation_path)
+        ledger_partial = json.loads(json.dumps(ledger_committed))
+        ledger_partial["animatic_repair_budget_continuations"][
+            "ep8:batch_c:repair-v03"
+        ]["status"] = "reserved"
+        ledger_partial.pop("ledger_hash", None)
+        ledger_partial["ledger_hash"] = pipeline.object_hash(
+            ledger_partial
+        )
+        self.write_json(reservation_path, ledger_partial)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "parent consumption write",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                abandon_args
+            )
+        self.write_json(reservation_path, ledger_committed)
+        state_committed = pipeline.load_json(state_c)
+        state_partial = dict(state_committed)
+        state_partial["status"] = "active"
+        state_partial.pop("timer_hash", None)
+        state_partial["timer_hash"] = pipeline.object_hash(state_partial)
+        self.write_json(state_c, state_partial)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "sealed state is incomplete",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair(
+                abandon_args
+            )
+        self.write_json(state_c, state_committed)
+        ledger = pipeline.load_json(reservation_path)
+        old_c_row = ledger[
+            "animatic_repair_budget_continuations"
+        ]["ep8:batch_c:repair-v03"]
+        old_c_reservation = ledger["reservations"][
+            old_c_row["reservation_id"]
+        ]
+        self.assertEqual(old_c_reservation["status"], "released")
+        self.assertIsNone(old_c_reservation["actual"])
+        self.assertFalse(old_c_reservation["token_observed"])
+        self.assertTrue(
+            all(
+                row["status"] == "consumed"
+                for row in ledger[
+                    "animatic_repair_budget_continuations"
+                ].values()
+            )
+        )
+        self.assertTrue(
+            all(
+                row["status"] == "consumed"
+                for row in ledger[
+                    "animatic_repair_token_extensions"
+                ].values()
+            )
+        )
+        self.assertEqual(
+            len(
+                [
+                    row
+                    for row in ledger["reservations"].values()
+                    if row.get(
+                        "animatic_repair_token_extension_hash"
+                    )
+                ]
+            ),
+            2,
+        )
+        self.assertTrue(
+            all(
+                issue.get("status") == "open"
+                for issue in (
+                    pipeline.load_json(path)
+                    for path in issue_paths.values()
+                )
+            )
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "consumed|already has a wrapper|active supervisor assignment",
+        ):
+            start(
+                "batch_c",
+                "g012_singularity_winding_synthesis",
+                state_suffix="-no-refund",
+            )
+        status = pipeline.efficiency_status_from_rows(
+            efficiency,
+            pipeline.event_rows(central_log),
+            reservation_ledger=ledger,
+        )
+        self.assertEqual(
+            status["token_status"]["observed"],
+            {
+                "raw_input_plus_output_tokens": 83_109_495,
+                "uncached_input_tokens": 1_934_985,
+                "output_tokens": 361_062,
+                "reasoning_tokens": 75_140,
+            },
+        )
+        accounted_rows = pipeline.phase_rows_with_accounting(
+            pipeline.event_rows(central_log),
+            contract=efficiency,
+            reservation_ledger=ledger,
+        )
+        self.assertGreaterEqual(
+            pipeline.phase_bucket_active_seconds(
+                accounted_rows,
+                "repair",
+            ),
+            4_912,
+        )
+        self.assertIn(
+            "raw_input_plus_output_tokens",
+            status["token_status"]["exceeded"],
+        )
+        self.assertIn(
+            "output_tokens",
+            status["token_status"]["exceeded"],
+        )
+        close_evaluation = (
+            pipeline.episode_efficiency_close_evaluation(
+                efficiency,
+                pipeline.event_rows(central_log),
+                set(
+                    batch_specs["batch_b"]["scenes"]
+                    + batch_specs["batch_c"]["scenes"]
+                ),
+                {
+                    "missing_phase_pairs_by_scene": {},
+                    "false_passes": 0,
+                },
+                {
+                    "scene_rate": 0.0,
+                    "scenes": [],
+                    "scene_count": 0,
+                },
+                [],
+            )
+        )
+        self.assertIn(
+            "EPISODE_TOKEN_BUDGET_EXCEEDED",
+            close_evaluation["errors"],
+        )
+        self.assertFalse(close_evaluation["compliant"])
+
+        replacement_root = (
+            self.episode
+            / "review"
+            / "v3"
+            / "batch_c_replacement"
+            / "g012"
+        )
+        replacement_supervisor = (
+            self.episode
+            / "review"
+            / "v3"
+            / "batch_c_replacement"
+            / "supervisor.json"
+        )
+        replacement_batch = replacement_supervisor.with_name(
+            "production-batch.json"
+        )
+        replacement_continuation = replacement_supervisor.with_name(
+            "continuation.json"
+        )
+        replacement_extension = replacement_supervisor.with_name(
+            "extension.json"
+        )
+        replacement_args = SimpleNamespace(
+            repo_root=str(self.root),
+            episode=str(self.episode),
+            abandonment=str(abandonment_path),
+            replacement_author="/root/ep8_g012_replacement_author",
+            planned_verifier="/root/ep8_review_batch_c",
+            shared_work_key=(
+                "ep8:g012-animatic-repair:replacement-01"
+            ),
+            allowed_output_root=str(replacement_root),
+            supervisor_output=str(replacement_supervisor),
+            production_batch_output=str(replacement_batch),
+            continuation_output=str(replacement_continuation),
+            extension_output=str(replacement_extension),
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "replacement author",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_args),
+                        "replacement_author": "/root/wrong",
+                    }
+                )
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "replacement verifier",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_args),
+                        "planned_verifier": "/root/wrong-verifier",
+                    }
+                )
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "shared-work-key",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_args),
+                        "shared_work_key": "replacement-02",
+                    }
+                )
+            )
+        replacement_root.mkdir(parents=True)
+        preexisting_dir = replacement_root / "preexisting-directory"
+        preexisting_dir.mkdir()
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "must not exist or must be an empty directory",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_args
+            )
+        preexisting_dir.rmdir()
+        self.write_json(replacement_supervisor, {"partial": True})
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "output already exists",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_args
+            )
+        replacement_supervisor.unlink()
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+            replacement_results = list(
+                executor.map(
+                    lambda _: (
+                        pipeline.command_authorize_animatic_repair_replacement(
+                            replacement_args
+                        )
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual(replacement_results, [0, 0])
+        spent_abandonment = pipeline.load_json(abandonment_path)
+        self.assertEqual(
+            spent_abandonment["status"],
+            "replacement_authorized",
+        )
+        ledger = pipeline.load_json(reservation_path)
+        self.assertEqual(
+            len(ledger["animatic_repair_budget_continuations"]),
+            3,
+        )
+        self.assertEqual(
+            ledger["animatic_repair_budget_continuations"][
+                "ep8:g012-animatic-repair:replacement-01"
+            ]["status"],
+            "authorized",
+        )
+        changed_root = replacement_root.with_name("changed-root")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "command inputs",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_args),
+                        "allowed_output_root": str(changed_root),
+                    }
+                )
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "inside the exact episode",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_args),
+                        "episode": str(self.old_episode),
+                    }
+                )
+            )
+        ledger_spent = pipeline.load_json(reservation_path)
+        ledger_before_recovery = json.loads(json.dumps(ledger_spent))
+        del ledger_before_recovery[
+            "animatic_repair_budget_continuations"
+        ]["ep8:g012-animatic-repair:replacement-01"]
+        del ledger_before_recovery[
+            "animatic_repair_token_extensions"
+        ]["ep8:g012-animatic-repair:replacement-01"]
+        ledger_before_recovery[
+            "animatic_repair_replacement_recoveries"
+        ] = {}
+        ledger_before_recovery["animatic_repair_abandonments"][
+            "ep8:batch_c:repair-v03"
+        ]["status"] = "consumed"
+        ledger_before_recovery["animatic_repair_abandonments"][
+            "ep8:batch_c:repair-v03"
+        ]["receipt_hash"] = abandonment["receipt_hash"]
+        ledger_before_recovery["animatic_repair_abandonments"][
+            "ep8:batch_c:repair-v03"
+        ].pop("replacement_shared_work_key", None)
+        ledger_before_recovery.pop("ledger_hash", None)
+        ledger_before_recovery["ledger_hash"] = pipeline.object_hash(
+            ledger_before_recovery
+        )
+        self.write_json(reservation_path, ledger_before_recovery)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "continuation CAS row|recovery ledger CAS",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_args
+            )
+        self.write_json(reservation_path, ledger_spent)
+        extension_saved = pipeline.load_json(replacement_extension)
+        replacement_extension.unlink()
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "sealed outputs are missing",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_args
+            )
+        self.write_json(replacement_extension, extension_saved)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "spent|missing",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_args),
+                        "supervisor_output": str(
+                            replacement_supervisor.with_name(
+                                "second-supervisor.json"
+                            )
+                        ),
+                    }
+                )
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "requires --animatic-repair-recovery",
+        ):
+            start(
+                "batch_c",
+                "g012_singularity_winding_synthesis",
+                actor="/root/ep8_g012_replacement_author",
+                state_suffix="-replacement-missing-lineage",
+                continuation_override=replacement_continuation,
+                extension_override=replacement_extension,
+                batch_override=replacement_batch,
+                shared_key_override=(
+                    "ep8:g012-animatic-repair:replacement-01"
+                ),
+            )
+        for field, value in {
+            "raw_token_allocation": 1_500_001,
+            "uncached_input_token_allocation": 60_001,
+            "output_token_allocation": 8_001,
+            "reasoning_token_allocation": 4_001,
+        }.items():
+            with self.assertRaisesRegex(
+                pipeline.PipelineError,
+                "hard limit|key cap|local token extension",
+            ):
+                start(
+                    "batch_c",
+                    "g012_singularity_winding_synthesis",
+                    actor="/root/ep8_g012_replacement_author",
+                    state_suffix=f"-replacement-over-{field}",
+                    continuation_override=replacement_continuation,
+                    extension_override=replacement_extension,
+                    batch_override=replacement_batch,
+                    recovery=abandonment_path,
+                    allocation_overrides={field: value},
+                    active_seconds=600,
+                    shared_key_override=(
+                        "ep8:g012-animatic-repair:replacement-01"
+                    ),
+                )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "600-second",
+        ):
+            start(
+                "batch_c",
+                "g012_singularity_winding_synthesis",
+                actor="/root/ep8_g012_replacement_author",
+                state_suffix="-replacement-over-active",
+                continuation_override=replacement_continuation,
+                extension_override=replacement_extension,
+                batch_override=replacement_batch,
+                recovery=abandonment_path,
+                active_seconds=1500,
+                shared_key_override=(
+                    "ep8:g012-animatic-repair:replacement-01"
+                ),
+            )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "shared-work-key",
+        ):
+            start(
+                "batch_c",
+                "g012_singularity_winding_synthesis",
+                actor="/root/ep8_g012_replacement_author",
+                state_suffix="-replacement-wrong-key",
+                continuation_override=replacement_continuation,
+                extension_override=replacement_extension,
+                batch_override=replacement_batch,
+                recovery=abandonment_path,
+                active_seconds=600,
+                shared_key_override="ep8:g012:not-recovery",
+            )
+        replacement_state = start(
+            "batch_c",
+            "g012_singularity_winding_synthesis",
+            actor="/root/ep8_g012_replacement_author",
+            state_suffix="-replacement",
+            continuation_override=replacement_continuation,
+            extension_override=replacement_extension,
+            batch_override=replacement_batch,
+            recovery=abandonment_path,
+            active_seconds=600,
+            shared_key_override=(
+                "ep8:g012-animatic-repair:replacement-01"
+            ),
+        )
+        replacement_state_record = pipeline.load_json(replacement_state)
+        self.assertTrue(
+            replacement_state_record[
+                "animatic_repair_recovery_local_admission_applied"
+            ]
+        )
+        self.assertEqual(
+            replacement_state_record[
+                "efficiency_status_at_start"
+            ]["token_status"]["observed"],
+            {
+                "raw_input_plus_output_tokens": 83_109_495,
+                "uncached_input_tokens": 1_934_985,
+                "output_tokens": 361_062,
+                "reasoning_tokens": 75_140,
+            },
+        )
+        self.assertEqual(
+            set(
+                replacement_state_record[
+                    "base_episode_reservation_overflow_at_start"
+                ]
+            ),
+            {
+                "raw_input_plus_output_tokens",
+                "uncached_input_tokens",
+                "output_tokens",
+            },
+        )
+        self.assertEqual(
+            set(
+                replacement_state_record[
+                    "base_phase_envelope_overflow_at_start"
+                ]
+            ),
+            {
+                "raw_input_plus_output_tokens",
+                "uncached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+            },
+        )
+        self.assertFalse(
+            replacement_state_record[
+                "base_stage_active_overflow_at_start"
+            ]
+        )
+        self.assertTrue(
+            replacement_state_record[
+                "base_phase_active_overflow_at_start"
+            ]
+        )
+        replacement_health_paths: list[Path] = []
+        replacement_recovery_dir = (
+            replacement_supervisor.parent / "recovery"
+        )
+        for sequence, result in (
+            (1, "no_response"),
+            (2, "no_response"),
+            (3, "forced_interrupt_no_checkpoint"),
+        ):
+            health_path = (
+                replacement_recovery_dir
+                / f"health_check_{sequence:02d}.json"
+            )
+            health = {
+                "schema_version": (
+                    "lecture-animation-worker-health-check-evidence-v1"
+                ),
+                "sequence": sequence,
+                "agent_id": "/root/ep8_g012_replacement_author",
+                "result": result,
+                "requested_action": f"replacement probe {sequence}",
+                "artifact_progress": False,
+                "recorded_by": "/root",
+            }
+            if sequence == 1:
+                health["requested_at_approximate"] = (
+                    "2026-07-30T03:46Z"
+                )
+            elif sequence == 2:
+                health["requested_at"] = "2026-07-30T03:50:48Z"
+            else:
+                health["previous_status"] = "running"
+                health["checkpoint_present"] = False
+            self.write_json(health_path, health)
+            replacement_health_paths.append(health_path)
+        replacement_feedback = (
+            self.episode
+            / "review"
+            / "agent-feedback"
+            / "2026-07-30-g012-replacement-author-unresponsive.md"
+        )
+        replacement_feedback.parent.mkdir(parents=True, exist_ok=True)
+        replacement_feedback.write_text(
+            "Two no-response probes followed by a forced interrupt "
+            "without a checkpoint.\n",
+            encoding="utf-8",
+        )
+        replacement_issue = (
+            self.episode
+            / "review"
+            / "issues"
+            / (
+                "agent_g012_replacement_identity_unresponsive_"
+                "2026-07-30.json"
+            )
+        )
+        self.write_json(
+            replacement_issue,
+            {
+                "schema": "lecture-animation-review-issue-v1",
+                "issue_id": (
+                    "agent_g012_replacement_identity_unresponsive_"
+                    "2026-07-30"
+                ),
+                "source": "accepted_agent_feedback",
+                "origin_source": "supervisor_observation",
+                "accepted_by": "/root",
+                "scene_slug": "g012_singularity_winding_synthesis",
+                "pattern_key": (
+                    "replacement_repair_author_unresponsive_without_"
+                    "artifact_progress"
+                ),
+                "must_check_in_future": True,
+                "status": "open",
+            },
+        )
+        replacement_abandonment = (
+            replacement_recovery_dir
+            / "replacement-01-abandonment.json"
+        )
+        replacement_abandon_args = SimpleNamespace(
+            repo_root=str(self.root),
+            state=str(replacement_state),
+            supervisor=str(replacement_supervisor),
+            health_check=[
+                str(path) for path in replacement_health_paths
+            ],
+            accepted_feedback=str(replacement_feedback),
+            accepted_issue=str(replacement_issue),
+            output=str(replacement_abandonment),
+        )
+        replacement_root.mkdir(parents=True, exist_ok=True)
+        claimed_progress = replacement_root / "claimed-progress.txt"
+        claimed_progress.write_text("progress\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "zero attributable author progress",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        claimed_progress.unlink()
+        allowed_rollout = (
+            replacement_root / "rollout_totals_start.json"
+        )
+        self.write_json(allowed_rollout, {"input_tokens": 0})
+        same_name_directory = replacement_root / "same-name-attack"
+        same_name_directory.mkdir()
+        same_name_file = (
+            same_name_directory / replacement_state.name
+        )
+        same_name_file.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "non-control entry",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        same_name_file.unlink()
+        same_name_directory.rmdir()
+        empty_subdirectory = replacement_root / "empty-subdirectory"
+        empty_subdirectory.mkdir()
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "non-control entry",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        empty_subdirectory.rmdir()
+        hidden_file = replacement_root / ".hidden-progress"
+        hidden_file.write_text("hidden\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "non-control entry",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        hidden_file.unlink()
+        fake_appledouble = replacement_root / "._other-state.json"
+        fake_appledouble.write_bytes(b"appledouble")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "non-control entry",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        fake_appledouble.unlink()
+        symlink_progress = replacement_root / "linked-progress"
+        symlink_progress.symlink_to(replacement_health_paths[0])
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "non-control entry",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        symlink_progress.unlink()
+        original_state_bytes = replacement_state.read_bytes()
+        renamed_state = replacement_root / "renamed-active-state.json"
+        renamed_state.write_bytes(original_state_bytes)
+        replacement_state.unlink()
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "canonical state path|recovery CAS",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                SimpleNamespace(
+                    **{
+                        **vars(replacement_abandon_args),
+                        "state": str(renamed_state),
+                    }
+                )
+            )
+        replacement_state.write_bytes(original_state_bytes)
+        renamed_state.unlink()
+        fake_third = pipeline.load_json(replacement_health_paths[2])
+        fake_third["result"] = "no_response"
+        fake_third.pop("previous_status")
+        fake_third.pop("checkpoint_present")
+        self.write_json(replacement_health_paths[2], fake_third)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "forced_interrupt_no_checkpoint",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        fake_third["result"] = "forced_interrupt_no_checkpoint"
+        fake_third["previous_status"] = "running"
+        fake_third["checkpoint_present"] = False
+        self.write_json(replacement_health_paths[2], fake_third)
+        precise_first = pipeline.load_json(replacement_health_paths[0])
+        approximate_time = precise_first.pop(
+            "requested_at_approximate"
+        )
+        precise_first["requested_at"] = "2026-07-30T03:46:00Z"
+        self.write_json(replacement_health_paths[0], precise_first)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "approximate|health evidence",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        precise_first.pop("requested_at")
+        precise_first["requested_at_approximate"] = approximate_time
+        self.write_json(replacement_health_paths[0], precise_first)
+        pre_event_log = central_log.read_bytes()
+        pre_event_ledger = reservation_path.read_bytes()
+        pre_event_state = replacement_state.read_bytes()
+        replacement_state_record = pipeline.load_json(replacement_state)
+        partial_event_id = (
+            "phase:"
+            + hashlib.sha1(
+                (
+                    str(
+                        replacement_state_record[
+                            "phase_instance_id"
+                        ]
+                    )
+                    + "|replacement-01-unresponsive-abandonment"
+                ).encode()
+            ).hexdigest()[:16]
+        )
+        with central_log.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "schema": "lecture-animation-phase-event-v2",
+                        "event_id": partial_event_id,
+                        "result": "abandoned",
+                    }
+                )
+                + "\n"
+            )
+        partial_event_log = central_log.read_bytes()
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "event without a receipt|partial",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        self.assertEqual(central_log.read_bytes(), partial_event_log)
+        self.assertEqual(reservation_path.read_bytes(), pre_event_ledger)
+        self.assertEqual(replacement_state.read_bytes(), pre_event_state)
+        central_log.write_bytes(pre_event_log)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+            second_abandonment_results = list(
+                executor.map(
+                    lambda _: (
+                        pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                            replacement_abandon_args
+                        )
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual(second_abandonment_results, [0, 0])
+        second_abandonment = pipeline.load_json(
+            replacement_abandonment
+        )
+        self.assertEqual(
+            [row["result"] for row in second_abandonment["health_checks"]],
+            [
+                "no_response",
+                "no_response",
+                "forced_interrupt_no_checkpoint",
+            ],
+        )
+        self.assertIn(
+            "requested_at_approximate",
+            second_abandonment["health_checks"][0],
+        )
+        self.assertNotIn(
+            "requested_at",
+            second_abandonment["health_checks"][0],
+        )
+        late_hidden_file = replacement_root / ".late-progress"
+        late_hidden_file.write_text("late\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "output root gained a non-control entry",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        late_hidden_file.unlink()
+        blocked_replacement_supervisor = pipeline.load_json(
+            replacement_supervisor
+        )
+        self.assertEqual(
+            blocked_replacement_supervisor["assignments"][
+                "/root/ep8_g012_replacement_author"
+            ]["state"],
+            "blocked",
+        )
+        partial_supervisor = json.loads(
+            json.dumps(blocked_replacement_supervisor)
+        )
+        partial_supervisor["assignments"][
+            "/root/ep8_g012_replacement_author"
+        ]["state"] = "active"
+        partial_supervisor.pop("session_hash", None)
+        partial_supervisor["session_hash"] = pipeline.object_hash(
+            partial_supervisor
+        )
+        self.write_json(replacement_supervisor, partial_supervisor)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "supervisor block|blocked supervisor",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        self.write_json(
+            replacement_supervisor,
+            blocked_replacement_supervisor,
+        )
+        second_abandonment_ledger = pipeline.load_json(
+            reservation_path
+        )
+        partial_abandonment_ledger = json.loads(
+            json.dumps(second_abandonment_ledger)
+        )
+        partial_abandonment_ledger[
+            "animatic_repair_replacement_abandonments"
+        ].pop("ep8:g012-animatic-repair:replacement-01")
+        partial_abandonment_ledger.pop("ledger_hash", None)
+        partial_abandonment_ledger["ledger_hash"] = (
+            pipeline.object_hash(partial_abandonment_ledger)
+        )
+        self.write_json(
+            reservation_path,
+            partial_abandonment_ledger,
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "ledger fence",
+        ):
+            pipeline.command_abandon_unresponsive_animatic_repair_replacement(
+                replacement_abandon_args
+            )
+        self.write_json(
+            reservation_path,
+            second_abandonment_ledger,
+        )
+        replacement_02_root = (
+            self.episode
+            / "review"
+            / "v3"
+            / "batch_c_replacement_02"
+            / "g012"
+        )
+        replacement_02_supervisor = replacement_02_root.parent / (
+            "supervisor.json"
+        )
+        replacement_02_batch = replacement_02_root.parent / (
+            "production-batch.json"
+        )
+        replacement_02_continuation = replacement_02_root.parent / (
+            "continuation.json"
+        )
+        replacement_02_extension = replacement_02_root.parent / (
+            "extension.json"
+        )
+        replacement_02_args = SimpleNamespace(
+            repo_root=str(self.root),
+            episode=str(self.episode),
+            abandonment=str(replacement_abandonment),
+            replacement_author="/root/ep8_g012_replacement_author_02",
+            planned_verifier="/root/ep8_review_batch_c",
+            shared_work_key=(
+                "ep8:g012-animatic-repair:replacement-02"
+            ),
+            allowed_output_root=str(replacement_02_root),
+            supervisor_output=str(replacement_02_supervisor),
+            production_batch_output=str(replacement_02_batch),
+            continuation_output=str(replacement_02_continuation),
+            extension_output=str(replacement_02_extension),
+            required_attempt_ordinal=2,
+        )
+        preserved_ledger = pipeline.load_json(reservation_path)
+        tampered_first_recovery = json.loads(
+            json.dumps(preserved_ledger)
+        )
+        tampered_first_recovery[
+            "animatic_repair_replacement_recoveries"
+        ][abandonment["abandonment_hash"]]["status"] = "authorized"
+        tampered_first_recovery.pop("ledger_hash", None)
+        tampered_first_recovery["ledger_hash"] = pipeline.object_hash(
+            tampered_first_recovery
+        )
+        self.write_json(reservation_path, tampered_first_recovery)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "replacement-01 recovery consumption",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_02_args
+            )
+        self.write_json(reservation_path, preserved_ledger)
+        tampered_root_reservation = json.loads(
+            json.dumps(preserved_ledger)
+        )
+        root_old_lineage = abandonment["old_lineage"]
+        tampered_root_reservation["reservations"][
+            root_old_lineage["reservation_id"]
+        ]["actual"] = {
+            "raw_input_plus_output_tokens": 0,
+            "uncached_input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+        tampered_root_reservation.pop("ledger_hash", None)
+        tampered_root_reservation["ledger_hash"] = (
+            pipeline.object_hash(tampered_root_reservation)
+        )
+        self.write_json(reservation_path, tampered_root_reservation)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "original batch-C abandonment|unknown-actual",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_02_args
+            )
+        self.write_json(reservation_path, preserved_ledger)
+        preserved_root_receipt = pipeline.load_json(abandonment_path)
+        tampered_root_receipt = json.loads(
+            json.dumps(preserved_root_receipt)
+        )
+        tampered_root_receipt["actual"] = {
+            "raw_input_plus_output_tokens": 0
+        }
+        tampered_root_receipt.pop("receipt_hash", None)
+        tampered_root_receipt["receipt_hash"] = pipeline.object_hash(
+            tampered_root_receipt
+        )
+        self.write_json(abandonment_path, tampered_root_receipt)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "root abandonment|actual",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                replacement_02_args
+            )
+        self.write_json(abandonment_path, preserved_root_receipt)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=2
+        ) as executor:
+            replacement_02_results = list(
+                executor.map(
+                    lambda _: (
+                        pipeline.command_authorize_animatic_repair_replacement(
+                            replacement_02_args
+                        )
+                    ),
+                    range(2),
+                )
+            )
+        self.assertEqual(replacement_02_results, [0, 0])
+        replacement_02_extension_record = pipeline.load_json(
+            replacement_02_extension
+        )
+        self.assertEqual(
+            replacement_02_extension_record[
+                "max_active_seconds_allocation"
+            ],
+            1500,
+        )
+        self.assertEqual(
+            replacement_02_extension_record["soft_checkpoints"],
+            {
+                "300": "read_complete_and_two_change_plan",
+                "600": "source_patch_and_smoke_or_audit_started",
+                "1200": "render_qc_and_self_review_underway",
+                "1500": "hard_stop",
+            },
+        )
+        replacement_02_continuation_record = pipeline.load_json(
+            replacement_02_continuation
+        )
+        missing_attempt_02 = json.loads(
+            json.dumps(replacement_02_continuation_record)
+        )
+        missing_attempt_02["replacement_recovery"].pop(
+            "attempt_ordinal"
+        )
+        missing_attempt_02["replacement_recovery"].pop(
+            "soft_checkpoints"
+        )
+        missing_attempt_02.pop("continuation_hash", None)
+        missing_attempt_02["continuation_hash"] = pipeline.object_hash(
+            missing_attempt_02
+        )
+        missing_attempt_02_errors = (
+            pipeline.validate_animatic_repair_budget_continuation(
+                missing_attempt_02,
+                repo_root=self.root,
+                episode=self.episode,
+                efficiency_contract=efficiency,
+                production_batch=pipeline.load_json(
+                    replacement_02_batch
+                ),
+                supervisor_session=pipeline.load_json(
+                    replacement_02_supervisor
+                ),
+                efficiency_contract_path=self.efficiency_contract,
+                production_batch_path=replacement_02_batch,
+                supervisor_session_path=replacement_02_supervisor,
+                at_time=missing_attempt_02["created_at"],
+            )
+        )
+        self.assertTrue(
+            any(
+                "attempt" in error or "soft-checkpoint" in error
+                for error in missing_attempt_02_errors
+            ),
+            missing_attempt_02_errors,
+        )
+        nonlegacy_missing = pipeline.load_json(
+            replacement_continuation
+        )
+        nonlegacy_missing["replacement_recovery"][
+            "abandonment_path"
+        ] = pipeline.relative_or_absolute(
+            replacement_abandonment,
+            self.root,
+        )
+        nonlegacy_missing["replacement_recovery"][
+            "abandonment_hash"
+        ] = second_abandonment["abandonment_hash"]
+        nonlegacy_missing["replacement_recovery"].pop(
+            "attempt_ordinal"
+        )
+        nonlegacy_missing["replacement_recovery"].pop(
+            "soft_checkpoints"
+        )
+        nonlegacy_missing.pop("continuation_hash", None)
+        nonlegacy_missing["continuation_hash"] = pipeline.object_hash(
+            nonlegacy_missing
+        )
+        nonlegacy_errors = (
+            pipeline.validate_animatic_repair_budget_continuation(
+                nonlegacy_missing,
+                repo_root=self.root,
+                episode=self.episode,
+                efficiency_contract=efficiency,
+                production_batch=pipeline.load_json(replacement_batch),
+                supervisor_session=pipeline.load_json(
+                    replacement_supervisor
+                ),
+                efficiency_contract_path=self.efficiency_contract,
+                production_batch_path=replacement_batch,
+                supervisor_session_path=replacement_supervisor,
+                at_time=nonlegacy_missing["created_at"],
+            )
+        )
+        self.assertTrue(
+            any(
+                "attempt" in error or "soft-checkpoint" in error
+                for error in nonlegacy_errors
+            ),
+            nonlegacy_errors,
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "1500-second|active allocation",
+        ):
+            start(
+                "batch_c",
+                "g012_singularity_winding_synthesis",
+                actor="/root/ep8_g012_replacement_author_02",
+                state_suffix="-replacement-02-over-active",
+                continuation_override=replacement_02_continuation,
+                extension_override=replacement_02_extension,
+                batch_override=replacement_02_batch,
+                recovery=replacement_abandonment,
+                active_seconds=1501,
+                shared_key_override=(
+                    "ep8:g012-animatic-repair:replacement-02"
+                ),
+            )
+        replacement_02_state = start(
+            "batch_c",
+            "g012_singularity_winding_synthesis",
+            actor="/root/ep8_g012_replacement_author_02",
+            state_suffix="-replacement-02",
+            continuation_override=replacement_02_continuation,
+            extension_override=replacement_02_extension,
+            batch_override=replacement_02_batch,
+            recovery=replacement_abandonment,
+            active_seconds=1500,
+            shared_key_override=(
+                "ep8:g012-animatic-repair:replacement-02"
+            ),
+        )
+        replacement_animatic = replacement_02_root / "animatic-v03.mp4"
+        replacement_review = replacement_02_root / "self-review.md"
+        replacement_02_root.mkdir(parents=True, exist_ok=True)
+        replacement_animatic.write_bytes(b"replacement-02")
+        replacement_review.write_text(
+            "Pending independent review.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            end(
+                replacement_02_state,
+                "completed",
+                replacement_animatic,
+                replacement_review,
+                output_tokens=8_001,
+            ),
+            2,
+        )
+        completed_replacement = pipeline.load_json(
+            replacement_02_state
+        )
+        self.assertTrue(
+            completed_replacement["phase_envelope_status_at_end"][
+                "exceeded"
+            ]
+        )
+        self.assertTrue(
+            completed_replacement["phase_envelope_status_at_end"][
+                "active_exceeded"
+            ]
+        )
+        self.assertFalse(
+            completed_replacement[
+                "phase_envelope_completion_exceeded"
+            ]
+        )
+        self.assertIn(
+            "PHASE_BUDGET_ENVELOPE_EXCEEDED",
+            completed_replacement["efficiency_status_at_end"]["alerts"],
+        )
+        self.assertIn(
+            "output_tokens",
+            pipeline.event_rows(phase_log)[-1][
+                "token_allocation_exceeded"
+            ],
+        )
+        ledger = pipeline.load_json(reservation_path)
+        recovery_rows = ledger[
+            "animatic_repair_replacement_recoveries"
+        ]
+        self.assertEqual(len(recovery_rows), 2)
+        self.assertEqual(
+            ledger["animatic_repair_recovery_attempt_count"],
+            2,
+        )
+        self.assertTrue(
+            all(
+                row["status"] == "consumed"
+                for row in recovery_rows.values()
+            )
+        )
+        replacement_02_recovery_row = recovery_rows[
+            second_abandonment["abandonment_hash"]
+        ]
+        replacement_02_reservation = ledger["reservations"][
+            replacement_02_recovery_row["reservation_id"]
+        ]
+        self.assertEqual(
+            replacement_02_reservation["status"],
+            "released",
+        )
+        self.assertEqual(
+            replacement_02_reservation["actual"]["output_tokens"],
+            8_001,
+        )
+        self.assertFalse(
+            replacement_02_reservation.get("refunded", False)
+        )
+        for table_name in (
+            "animatic_repair_budget_continuations",
+            "animatic_repair_token_extensions",
+        ):
+            replacement_02_row = ledger[table_name][
+                "ep8:g012-animatic-repair:replacement-02"
+            ]
+            self.assertEqual(replacement_02_row["status"], "consumed")
+            self.assertFalse(
+                replacement_02_row.get("refunded", False)
+            )
+        third_attempt_args = SimpleNamespace(
+            **{
+                **vars(replacement_02_args),
+                "supervisor_output": str(
+                    replacement_02_supervisor.with_name(
+                        "third-supervisor.json"
+                    )
+                ),
+            }
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "spent|attempt|maximum",
+        ):
+            pipeline.command_authorize_animatic_repair_replacement(
+                third_attempt_args
+            )
+
+    def test_episode8_replacement_unresponsive_evidence_is_real_and_exact(
+        self,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[4]
+        episode = (
+            repo_root / "videos/0008-mpm-8-cauchy_integral"
+        )
+        recovery = (
+            episode
+            / "review/v3/batch_c_replacement/recovery"
+        )
+        health = [
+            pipeline.load_json(
+                recovery / f"health_check_{sequence:02d}.json"
+            )
+            for sequence in (1, 2, 3)
+        ]
+        self.assertEqual(
+            [row["result"] for row in health],
+            [
+                "no_response",
+                "no_response",
+                "forced_interrupt_no_checkpoint",
+            ],
+        )
+        self.assertEqual(
+            health[0]["requested_at_approximate"],
+            "2026-07-30T03:46Z",
+        )
+        self.assertNotIn("requested_at", health[0])
+        self.assertEqual(health[2]["previous_status"], "running")
+        self.assertFalse(health[2]["checkpoint_present"])
+        accepted_issue = pipeline.load_json(
+            episode
+            / "review/issues/"
+            "agent_g012_replacement_identity_unresponsive_2026-07-30.json"
+        )
+        self.assertEqual(
+            accepted_issue["pattern_key"],
+            (
+                "replacement_repair_author_unresponsive_without_"
+                "artifact_progress"
+            ),
+        )
+        if accepted_issue["status"] != "open":
+            self.assertIn(
+                accepted_issue["status"],
+                {"verified_fixed", "human_approved", "resolved", "mitigated"},
+            )
+            resolution = accepted_issue["resolution_history"][-1]
+            self.assertEqual(resolution["previous_status"], "open")
+            self.assertEqual(resolution["new_status"], accepted_issue["status"])
+            self.assertEqual(resolution["authority"], "user_final_episode_review")
+            self.assertEqual(
+                resolution["approved_episode_candidate"]["sha256"],
+                "56ed7c80e2a70c1ad78b0b624a2868c032ab03bb1daddfb924fd3ba3da07b070",
+            )
+        self.assertTrue(accepted_issue["must_check_in_future"])
+        feedback = (
+            episode
+            / "review/agent-feedback/"
+            "2026-07-30-g012-replacement-author-unresponsive.md"
+        )
+        self.assertTrue(feedback.is_file())
+        self.assertIn(
+            "forced_interrupt_no_checkpoint",
+            feedback.read_text(encoding="utf-8"),
+        )
+        active_state = (
+            episode
+            / "review/v3/"
+            "g012_singularity_winding_synthesis_replacement/"
+            "animatic_v03_repair_phase_active.json"
+        )
+        active_state_record = pipeline.load_json(active_state)
+        continuation = pipeline.load_json(
+            repo_root
+            / active_state_record[
+                "animatic_repair_budget_continuation_path"
+            ]
+        )
+        output_root = (
+            repo_root
+            / continuation["allowed_output_roots_by_scene"][
+                "g012_singularity_winding_synthesis"
+            ]
+        )
+        self.assertEqual(
+            pipeline.animatic_repair_zero_progress_violations(
+                output_root=output_root,
+                state_path=active_state,
+                receipt_path=(
+                    recovery / "replacement-01-abandonment.json"
+                ),
+                repo_root=repo_root,
+            ),
+            [],
+        )
+        recovery_receipt_path = (
+            repo_root
+            / active_state_record["animatic_repair_recovery_path"]
+        )
+        recovery_receipt = pipeline.load_json(recovery_receipt_path)
+        extension_path = (
+            repo_root
+            / active_state_record[
+                "animatic_repair_token_extension_path"
+            ]
+        )
+        batch_path = (
+            repo_root / active_state_record["production_batch_path"]
+        )
+        supervisor_path = (
+            repo_root
+            / recovery_receipt["replacement_authorization"][
+                "supervisor_path"
+            ]
+        )
+        # The original recovery receipt authorized replacement-01.  That
+        # authorization was later consumed and replacement-01 was abandoned,
+        # so validating the historical receipt against the current mutable
+        # supervisor must now fail closed instead of pretending the earlier
+        # supervisor binding is still live.
+        self.assertEqual(
+            pipeline.validate_animatic_repair_recovery_binding(
+                recovery_receipt,
+                repo_root=repo_root,
+                episode=episode,
+                receipt_path=recovery_receipt_path,
+                continuation=continuation,
+                continuation_path=(
+                    repo_root
+                    / active_state_record[
+                        "animatic_repair_budget_continuation_path"
+                    ]
+                ),
+                extension=pipeline.load_json(extension_path),
+                extension_path=extension_path,
+                production_batch=pipeline.load_json(batch_path),
+                production_batch_path=batch_path,
+                supervisor=pipeline.load_json(supervisor_path),
+                supervisor_path=supervisor_path,
+            ),
+            [
+                (
+                    "animatic repair recovery replacement "
+                    "supervisor_hash is stale"
+                )
+            ],
+        )
+        replacement_abandonment = pipeline.load_json(
+            recovery / "g012_replacement_01_abandonment.json"
+        )
+        self.assertEqual(
+            replacement_abandonment["schema"],
+            (
+                "lecture-animation-animatic-repair-"
+                "replacement-abandonment-v1"
+            ),
+        )
+        self.assertTrue(
+            pipeline.validate_hashed_record(
+                replacement_abandonment,
+                "receipt_hash",
+            )
+        )
+        self.assertEqual(
+            replacement_abandonment["old_lineage"]["supervisor_path"],
+            recovery_receipt["replacement_authorization"][
+                "supervisor_path"
+            ],
+        )
+        self.assertEqual(
+            pipeline.load_json(supervisor_path)["session_hash"],
+            replacement_abandonment["old_lineage"]["supervisor_hash"],
+        )
+        self.assertEqual(
+            replacement_abandonment["status"],
+            "replacement_authorized",
+        )
+        self.assertEqual(
+            replacement_abandonment["replacement_authorization"][
+                "attempt_ordinal"
+            ],
+            2,
+        )
+        self.assertFalse(replacement_abandonment["token_observed"])
+        self.assertIsNone(replacement_abandonment["actual"])
+        self.assertFalse(replacement_abandonment["refund"])
+
+    def test_human_wait_ignores_resume_context_token_delta(
+        self,
+    ) -> None:
+        state = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "human-wait.json"
+        )
+        phase_log = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "human-wait.jsonl"
+        )
+        usage_path = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "human-wait-usage.json"
+        )
+        self.write_json(
+            usage_path,
+            {
+                "input_tokens": 100,
+                "cached_input_tokens": 50,
+                "output_tokens": 10,
+                "reasoning_tokens": 5,
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        efficiency_contract=str(
+                            self.efficiency_contract
+                        ),
+                        run_id="human-wait",
+                        scene_slug="episode",
+                        phase="human_wait",
+                        phase_purpose=None,
+                        actor_model="human",
+                        active_seconds_allocation=0,
+                        raw_token_allocation=0,
+                        uncached_input_token_allocation=0,
+                        output_token_allocation=0,
+                        reasoning_token_allocation=0,
+                        prompt_bytes=0,
+                        artifact_input_bytes=0,
+                        files_read=0,
+                        usage_file=str(usage_path),
+                        state=str(state),
+                    )
+                ),
+                0,
+            )
+            self.write_json(
+                usage_path,
+                {
+                    "input_tokens": 50_000,
+                    "cached_input_tokens": 20_000,
+                    "output_tokens": 4_000,
+                    "reasoning_tokens": 2_000,
+                },
+            )
+            self.assertEqual(
+                pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(state),
+                        phase_log=str(phase_log),
+                        result="completed",
+                        manifest_hash="",
+                        usage_file=None,
+                    )
+                ),
+                0,
+            )
+        event = pipeline.event_rows(phase_log)[0]
+        self.assertEqual(event["phase"], "human_wait")
+        self.assertEqual(event["token_source_kind"], "human_wait_zero")
+        self.assertEqual(event["token_allocation_exceeded"], [])
+        self.assertEqual(event["input_tokens"], 0)
+        self.assertEqual(event["cached_input_tokens"], 0)
+        self.assertEqual(event["output_tokens"], 0)
+        self.assertEqual(event["reasoning_tokens"], 0)
+
+    def test_close_legacy_episode_efficiency_requires_full_measured_workflow(
         self,
     ) -> None:
         episode = self.root / "videos" / "0009-close-test"
-        episode.mkdir(parents=True)
         self.write_json(
             episode / "progressive_production.json",
             {"scenes": [{"scene_slug": "g001"}]},
@@ -3962,7 +9601,9 @@ class PipelineV2Tests(unittest.TestCase):
             / "episode_efficiency_contract.json"
         )
         args = SimpleNamespace(
-            episode_target_hours=8.0,
+            episode_target_hours=8.75,
+            delivery_target_hours=None,
+            delivery_clock=None,
             retrospective_reserve_minutes=45.0,
             raw_token_budget=50_000_000,
             uncached_input_token_budget=2_000_000,
@@ -3979,6 +9620,10 @@ class PipelineV2Tests(unittest.TestCase):
             args,
         )
         self.write_json(contract_path, contract)
+        self.write_json(
+            pipeline.episode_efficiency_reservation_ledger(contract),
+            pipeline.empty_efficiency_reservation_ledger(contract),
+        )
         central_log = pipeline.episode_efficiency_central_log(contract)
         central_log.parent.mkdir(parents=True, exist_ok=True)
         rows = []
@@ -4046,6 +9691,12 @@ class PipelineV2Tests(unittest.TestCase):
             encoding="utf-8",
         )
         completion_path = episode / "episode_completion.json"
+        final_video = episode / "exports" / "final" / "episode.mp4"
+        final_video.parent.mkdir(parents=True, exist_ok=True)
+        final_video.write_bytes(b"exact-upload-master")
+        final_video_artifact = pipeline.artifact_snapshot(
+            final_video, self.root
+        )
         completion = {
             "schema": "lecture-animation-episode-completion-v2",
             "created_at": "2026-07-28T00:01:00+00:00",
@@ -4054,6 +9705,9 @@ class PipelineV2Tests(unittest.TestCase):
                 self.root,
             ),
             "scene_outcomes": {"g001": {"event_id": "human-pass"}},
+            "final_artifacts": {
+                "final_video": final_video_artifact,
+            },
         }
         completion["completion_hash"] = pipeline.object_hash(completion)
         self.write_json(completion_path, completion)
@@ -4071,6 +9725,8 @@ class PipelineV2Tests(unittest.TestCase):
                         episode=str(episode),
                         efficiency_contract=str(contract_path),
                         completion_receipt=str(completion_path),
+                        delivery_clock=None,
+                        metric_policy_profile=None,
                         output=str(output),
                     )
                 ),
@@ -4079,10 +9735,36 @@ class PipelineV2Tests(unittest.TestCase):
         receipt = pipeline.load_json(output)
         self.assertEqual(receipt["status"], "completed")
         self.assertTrue(receipt["evaluation"]["compliant"])
+        self.assertIsNone(receipt["evaluation"]["delivery_clock"])
         self.assertEqual(
             pipeline.load_json(contract_path)["status"],
             "completed",
         )
+
+    def test_latest_human_revise_supersedes_an_older_pass(self) -> None:
+        outcome_log = self.episode / "review" / "evolution" / "latest-outcome.jsonl"
+        outcome_log.parent.mkdir(parents=True, exist_ok=True)
+        rows = [
+            {
+                "schema": "lecture-animation-outcome-v2",
+                "event_id": "pass-1",
+                "scene_slug": "g001",
+                "human_verdict": "pass",
+                "manifest_hash": "manifest-a",
+            },
+            {
+                "schema": "lecture-animation-outcome-v2",
+                "event_id": "revise-2",
+                "scene_slug": "g001",
+                "human_verdict": "revise",
+                "manifest_hash": "manifest-a",
+            },
+        ]
+        outcome_log.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        self.assertNotIn("g001", pipeline.latest_human_passes(outcome_log))
 
     def test_diagnostic_packet_is_hash_bound_and_cannot_grant_final_pass(self) -> None:
         profile = self.make_profile()
@@ -4789,7 +10471,10 @@ class PipelineV2Tests(unittest.TestCase):
         )
 
         shared_states = []
-        for scene_slug in ("g002c_riemann_sum_limit", "g002d_normalization"):
+        for index, scene_slug in enumerate(
+            ("g002c_riemann_sum_limit", "g002d_normalization"),
+            start=1,
+        ):
             shared_state = self.episode / "review" / "evolution" / f"{scene_slug}_shared.json"
             shared_states.append(shared_state)
             with contextlib.redirect_stdout(io.StringIO()):
@@ -4801,7 +10486,7 @@ class PipelineV2Tests(unittest.TestCase):
                             efficiency_contract=str(
                                 self.efficiency_contract
                             ),
-                            run_id="batch-shared",
+                            run_id=f"batch-shared-wrapper-{index}",
                             scene_slug=scene_slug,
                             phase="design",
                             phase_purpose=None,
@@ -4827,22 +10512,121 @@ class PipelineV2Tests(unittest.TestCase):
         shared_ids = {
             pipeline.load_json(path)["phase_instance_id"] for path in shared_states
         }
+        accounting_ids = {
+            pipeline.load_json(path)["accounting_identity"]
+            for path in shared_states
+        }
         self.assertEqual(len(shared_ids), 1)
+        self.assertEqual(len(accounting_ids), 1)
         self.assertTrue(next(iter(shared_ids)).startswith("phase-instance:shared:"))
+        ledger = pipeline.load_json(
+            pipeline.episode_efficiency_reservation_ledger(
+                pipeline.load_json(self.efficiency_contract)
+            )
+        )
+        shared_reservations = [
+            reservation
+            for reservation in ledger["reservations"].values()
+            if reservation.get("shared_work_key")
+            == "batch-spine-pass"
+        ]
+        self.assertEqual(len(shared_reservations), 2)
+        self.assertEqual(
+            {
+                reservation["accounting_identity"]
+                for reservation in shared_reservations
+            },
+            accounting_ids,
+        )
+        self.assertTrue(
+            all(
+                reservation["shared_work_key"]
+                == "batch-spine-pass"
+                for reservation in shared_reservations
+            )
+        )
+        self.assertEqual(
+            pipeline.active_token_reservations(
+                ledger,
+                contract=pipeline.load_json(
+                    self.efficiency_contract
+                ),
+            )["raw_input_plus_output_tokens"],
+            1_000,
+        )
+        shared_identity = next(iter(accounting_ids))
+        self.assertAlmostEqual(
+            pipeline.projected_active_seconds(
+                [],
+                ledger,
+                new_phase="design",
+                new_phase_purpose="",
+                new_started_at=pipeline.load_json(
+                    shared_states[0]
+                )["started_at"],
+                new_active_seconds=2_400,
+                contract=pipeline.load_json(
+                    self.efficiency_contract
+                ),
+                new_accounting_identity=shared_identity,
+            ),
+            2_400.0,
+            delta=1.0,
+        )
 
     def test_episode_retrospective_reports_coverage_before_interpretation(self) -> None:
+        feedback_dir = self.episode / "review" / "human-feedback"
+        feedback_dir.mkdir(parents=True, exist_ok=True)
+        (feedback_dir / "real-feedback.md").write_text(
+            "# Real feedback\n",
+            encoding="utf-8",
+        )
+        (feedback_dir / "._real-feedback.md").write_text(
+            "appledouble mirror",
+            encoding="utf-8",
+        )
         partial = pipeline.retrospective_evidence_data(self.root, self.episode)
         self.assertEqual(
             partial["schema"], "lecture-animation-episode-retrospective-v2"
         )
         self.assertEqual(partial["completion_status"], "partial")
         self.assertEqual(partial["issue_ledger"]["count"], 1)
+        self.assertEqual(
+            partial["issue_ledger"]["classification_coverage"][
+                "pattern_key"
+            ],
+            1.0,
+        )
+        self.assertEqual(
+            partial["issue_ledger"]["classification_coverage"][
+                "standard_key"
+            ],
+            0.0,
+        )
         self.assertEqual(partial["source_coverage"]["required_logs_observed"], 0)
+        self.assertEqual(partial["feedback_count"], 1)
+        self.assertFalse(
+            any(
+                "/._" in path
+                for path in partial["evidence_paths"]["feedback"]
+            )
+        )
         self.assertGreater(
             len(partial["source_coverage"]["missing_sources"]), 0
         )
         self.assertTrue(
             partial["interpretation_contract"]["missing_is_not_zero"]
+        )
+        self.assertIsNone(partial["metrics"]["review_attempts"])
+        self.assertIsNone(
+            partial["metrics"]["author_self_review_attempts"]
+        )
+        self.assertIsNone(partial["metrics"]["repair_attempts"])
+        self.assertEqual(
+            partial["metrics"]["observability"][
+                "ledger_metric_status"
+            ]["review_attempts"],
+            "unknown_missing_ledger",
         )
         self.assertTrue(
             pipeline.validate_hashed_record(partial, "retrospective_hash")
@@ -4852,6 +10636,9 @@ class PipelineV2Tests(unittest.TestCase):
             "schema": "lecture-animation-episode-completion-v2",
             "episode": self.episode.name,
             "created_at": "2026-07-24T00:00:00+00:00",
+            "final_artifacts": {
+                "final_video": {"sha256": "approved-v01-sha"},
+            },
         }
         completion["completion_hash"] = pipeline.object_hash(completion)
         self.write_json(self.episode / "episode_completion.json", completion)
@@ -4873,6 +10660,70 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertTrue(
             pipeline.validate_hashed_record(report, "retrospective_hash")
         )
+
+        # A later approved upload master is not finalized merely because an
+        # older completion and portability receipt exist. Retrospective must
+        # bind the current release lineage instead of accepting stale success.
+        final_dir = self.episode / "exports" / "final" / "approved_v02"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        self.write_json(
+            final_dir / "approved_upload_master.json",
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "created_at": "2026-07-24T01:00:00+00:00",
+                "approval_source": "user",
+                "upload_mp4_sha256": "approved-v02-sha",
+            },
+        )
+        portability = {
+            "schema": "lecture-animation-portability-audit-v2",
+            "created_at": "2026-07-24T00:30:00+00:00",
+            "status": "pass",
+            "required_artifacts": {
+                "final_video": {"sha256": "approved-v01-sha"},
+            },
+        }
+        portability["receipt_hash"] = pipeline.object_hash(portability)
+        self.write_json(
+            self.episode / "review" / "portability_v01.json",
+            portability,
+        )
+        stale_report = pipeline.retrospective_evidence_data(
+            self.root,
+            self.episode,
+        )
+        self.assertEqual(
+            stale_report["completion_status"],
+            "stale_finalization_evidence_for_latest_master",
+        )
+        self.assertEqual(
+            stale_report["finalization_lineage"][
+                "latest_approved_master_video_sha256"
+            ],
+            "approved-v02-sha",
+        )
+        self.assertFalse(
+            stale_report["finalization_lineage"][
+                "completion_receipt_matches_latest_master"
+            ]
+        )
+        self.assertFalse(
+            stale_report["finalization_lineage"][
+                "portability_receipt_matches_latest_master"
+            ]
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_episode_retrospective(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        episode=str(self.episode),
+                        output=str(output),
+                        require_finalized=True,
+                    )
+                ),
+                2,
+            )
         parser = pipeline.build_parser()
         parsed = parser.parse_args(
             [
@@ -4951,6 +10802,107 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertIn(
             "review_attempts",
             report["evidence_paths"]["required_logs_observed"],
+        )
+
+    def test_episode_retrospective_counts_time_governed_phase_events(self) -> None:
+        evolution = self.episode / "review" / "evolution"
+        evolution.mkdir(parents=True, exist_ok=True)
+        time_governed_phase = {
+            "schema": "lecture-animation-time-governed-phase-event-v1",
+            "event_id": "time-governed-phase-1",
+            "phase_instance_id": "time-governed-phase-instance-1",
+            "scene_slug": "g001",
+            "phase": "authoring",
+            "result": "completed",
+            "started_at": "2026-07-24T00:00:00+00:00",
+            "ended_at": "2026-07-24T00:02:00+00:00",
+            "duration_seconds": 120.0,
+            "input_tokens": 100,
+            "cached_input_tokens": 80,
+            "output_tokens": 20,
+            "reasoning_tokens": 10,
+            "token_observed": True,
+        }
+        (evolution / "episode_time_governed_phase_events.jsonl").write_text(
+            json.dumps(time_governed_phase) + "\n",
+            encoding="utf-8",
+        )
+
+        report = pipeline.retrospective_evidence_data(self.root, self.episode)
+
+        self.assertEqual(report["metrics"]["phase_events"], 1)
+        self.assertEqual(
+            report["metrics"]["phase_agent_seconds"]["authoring"],
+            120.0,
+        )
+        self.assertEqual(
+            report["metrics"]["token_usage"]["output_tokens"],
+            20,
+        )
+        self.assertTrue(
+            report["metrics"]["observability"]["phase_timing_recorded"]
+        )
+
+    def test_same_episode_iteration_comparison_is_tooling_only(self) -> None:
+        before = {
+            "schema": "lecture-animation-skill-iteration-snapshot-v2",
+            "episode": self.episode.name,
+            "metrics": {
+                "human_rejection_rate": 0.1,
+                "false_pass_rate": 0.1,
+                "average_findings_per_attempt": 1.0,
+                "review_attempts_per_scene": 1.0,
+                "review_mp4_per_scene": 1.0,
+                "reviewer_switches": 0,
+                "total_measured_minutes": 10.0,
+                "observability": {
+                    "human_outcomes_recorded": True,
+                    "phase_timing_recorded": True,
+                    "review_sessions_recorded": False,
+                    "token_usage_coverage": 0.5,
+                },
+            },
+        }
+        before["snapshot_hash"] = pipeline.object_hash(before)
+        after = json.loads(json.dumps(before))
+        after.pop("snapshot_hash")
+        after["metrics"]["human_rejection_rate"] = 0.2
+        after["metrics"]["total_measured_minutes"] = 20.0
+        after["metrics"]["observability"]["token_usage_coverage"] = 1.0
+        after["snapshot_hash"] = pipeline.object_hash(after)
+        before_path = self.root / "before-snapshot.json"
+        after_path = self.root / "after-snapshot.json"
+        output_path = self.root / "comparison.json"
+        self.write_json(before_path, before)
+        self.write_json(after_path, after)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_compare_iterations(
+                    SimpleNamespace(
+                        before=str(before_path),
+                        after=str(after_path),
+                        output=str(output_path),
+                    )
+                ),
+                0,
+            )
+        comparison = pipeline.load_json(output_path)
+        self.assertEqual(
+            comparison["comparison_scope"],
+            "same_episode_tooling_only",
+        )
+        self.assertFalse(comparison["production_window_comparable"])
+        self.assertEqual(
+            comparison["quality"]["verdict"],
+            "insufficient_data",
+        )
+        self.assertEqual(
+            comparison["efficiency"]["verdict"],
+            "insufficient_data",
+        )
+        self.assertEqual(
+            comparison["efficiency"]["deltas"]["total_measured_minutes"],
+            10.0,
         )
 
     def test_reviewer_assisted_repair_requires_recusal_and_fresh_verifier(
@@ -5069,18 +11021,35 @@ class PipelineV2Tests(unittest.TestCase):
         self.write_json(readiness_path, readiness)
         narration = animatic.with_name("narration.txt")
         narration.write_text(
-            "先看有限格点如何变密。我是结束乐队的键盘手，下个视频见。",
+            "先看有限格点如何变密。连续极限留下了哪一个积分对象？",
             encoding="utf-8",
         )
         episode_scene_source = self.episode / "src" / "episode_scene.py"
         episode_scene_source.parent.mkdir(exist_ok=True)
         episode_scene_source.write_text("from manim import *\n", encoding="utf-8")
+        episode_screen_text_semantics = animatic.with_name(
+            "episode_screen_text_semantic_contract.json"
+        )
+        self.write_json(
+            episode_screen_text_semantics,
+            {
+                "schema": "lecture-animation-screen-text-semantic-contract-v1",
+                "semantic_items": [],
+            },
+        )
         episode_contract = animatic.with_name("episode_readiness_contract.json")
         self.write_json(
             episode_contract,
             {
                 "schema": "lecture-animation-episode-readiness-v2",
                 "author_id": "author-test",
+                "fixed_ending": "连续极限留下了哪一个积分对象？",
+                "fixed_ending_contract": {
+                    "role": "learner_facing_math_question",
+                    "learner_job": "Leave one exact question about the resulting continuous object.",
+                    "math_anchor": "continuous integral limit",
+                    "externalizes_production_intent": False,
+                },
                 "scenes": [
                     {
                         "scene_slug": "g002c_riemann_sum_limit",
@@ -5092,6 +11061,11 @@ class PipelineV2Tests(unittest.TestCase):
                         ),
                         "narration_path": pipeline.relative_or_absolute(narration, self.root),
                         "duration_seconds": 12.0,
+                        "screen_text_semantic_contract_path": (
+                            pipeline.relative_or_absolute(
+                                episode_screen_text_semantics, self.root
+                            )
+                        ),
                     }
                 ],
             },
@@ -5159,6 +11133,310 @@ class PipelineV2Tests(unittest.TestCase):
                 ),
                 0,
             )
+
+    def test_keyframe_probe_cannot_replace_complete_visual_plan(self) -> None:
+        profile = self.make_profile()
+        bundle = self.make_design_bundle(profile)
+        plan = self.make_plan(profile, bundle)
+        plan_path = self.episode / "review" / "v2" / "scene_plan.json"
+        self.write_json(plan_path, plan)
+        artifact_paths = {
+            "profile": self.episode / "review" / "v2" / "profile.json",
+            "plan": plan_path,
+            "challenge": self.episode / "review" / "v2" / "challenge.json",
+            "deliberation": self.episode / "review" / "v2" / "deliberation.json",
+            "design_gate": self.episode / "review" / "v2" / "design_gate.json",
+            "precedent_packet": self.episode / "review" / "v2" / "precedent.json",
+            "episode_spine": self.episode / "review" / "v2" / "spine.json",
+            "batch_plan": self.episode / "review" / "v2" / "batch.json",
+        }
+        for key, path in artifact_paths.items():
+            if key == "plan":
+                continue
+            self.write_json(path, {"artifact": key})
+        validation = {
+            "schema": "lecture-animation-scene-plan-validation-v1",
+            "valid": True,
+            "errors": [],
+            "scene_slug": plan["scene_slug"],
+            "profile_hash": profile["profile_hash"],
+            "plan_hash": pipeline.object_hash(plan),
+            "artifacts": {
+                key: pipeline.artifact_snapshot(path, self.root)
+                for key, path in artifact_paths.items()
+            },
+        }
+        validation["validation_hash"] = pipeline.object_hash(validation)
+        validation_path = plan_path.with_name("scene_plan_validation.json")
+        self.write_json(validation_path, validation)
+        validation_binding = pipeline.artifact_snapshot(validation_path, self.root)
+        scene_production = {
+            "schema": "lecture-animation-scene-production-v2",
+            "scene_slug": plan["scene_slug"],
+            "state": "audio_aligned",
+        }
+        scene_production["scene_production_hash"] = pipeline.object_hash(
+            scene_production
+        )
+        scene_production_path = plan_path.with_name("scene_production.json")
+        self.write_json(scene_production_path, scene_production)
+        scene_production_binding = pipeline.artifact_snapshot(
+            scene_production_path,
+            self.root,
+        )
+        keyframe_path = plan_path.with_name("risky_transition_keyframe.png")
+        keyframe_path.write_bytes(b"not-a-real-png-but-hash-bound-test-evidence")
+        probe_evidence = [
+            {
+                "kind": "keyframe",
+                "artifact": pipeline.artifact_snapshot(keyframe_path, self.root),
+            }
+        ]
+
+        draft = pipeline.visual_plan_review_draft_data(
+            plan,
+            scene_plan_validation=validation,
+            validation_binding=validation_binding,
+            scene_production=scene_production,
+            scene_production_binding=scene_production_binding,
+            author_agent_id="plan-author",
+            reviewer="independent-plan-reviewer",
+            reviewer_model="frontier-reviewer",
+            reasoning_effort="xhigh",
+            reviewer_agent_id="plan-reviewer-session",
+            probe_evidence=probe_evidence,
+        )
+        draft["probe_evidence"][0]["purpose"] = (
+            "Inspect the riskiest transition midpoint for hierarchy and clearance."
+        )
+        draft["probe_evidence"][0]["plan_section_ids"] = [
+            "transition:state_1->state_2"
+        ]
+        incomplete_errors = pipeline.validate_visual_plan_review_data(
+            draft,
+            plan,
+            scene_plan_validation=validation,
+            validation_binding=validation_binding,
+            scene_production=scene_production,
+            scene_production_binding=scene_production_binding,
+            current_probe_evidence=probe_evidence,
+            require_hash=False,
+        )
+        self.assertTrue(
+            any("complete detailed plan" in error for error in incomplete_errors)
+        )
+
+        for item in draft["plan_completeness_checks"]:
+            item["status"] = "pass"
+            item["observation"] = (
+                "The detailed plan names concrete objects, stage ownership, and executable evidence."
+            )
+        for item in draft["quality_dimension_checks"]:
+            item["status"] = "pass"
+            item["observation"] = (
+                "The reviewer traced this dimension through the learner task and visible causal chain."
+            )
+        for item in draft["stage_state_checks"]:
+            item.update(
+                layout_and_focus_observation=(
+                    "The primary object owns the declared region and the eye has one unambiguous target."
+                ),
+                learner_task_and_evidence_observation=(
+                    "The learner task is supported by visible evidence before the corresponding inference."
+                ),
+                passed=True,
+            )
+        for item in draft["transition_checks"]:
+            item.update(
+                causal_trigger_observation=(
+                    "The mathematical question makes the old allocation insufficient and triggers the move."
+                ),
+                identity_clearance_handoff_observation=(
+                    "The identity carrier persists, stale objects clear, and the next focal region settles."
+                ),
+                passed=True,
+            )
+        draft["detailed_plan_complete"] = True
+        draft["verdict"] = "ready_for_animation_production"
+        self.assertEqual(
+            pipeline.validate_visual_plan_review_data(
+                draft,
+                plan,
+                scene_plan_validation=validation,
+                validation_binding=validation_binding,
+                scene_production=scene_production,
+                scene_production_binding=scene_production_binding,
+                current_probe_evidence=probe_evidence,
+                require_hash=False,
+            ),
+            [],
+        )
+        duplicated = json.loads(json.dumps(draft))
+        duplicated["plan_completeness_checks"].append(
+            dict(duplicated["plan_completeness_checks"][0])
+        )
+        duplicate_errors = pipeline.validate_visual_plan_review_data(
+            duplicated,
+            plan,
+            scene_plan_validation=validation,
+            validation_binding=validation_binding,
+            scene_production=scene_production,
+            scene_production_binding=scene_production_binding,
+            current_probe_evidence=probe_evidence,
+            require_hash=False,
+        )
+        self.assertTrue(
+            any("exactly once" in error for error in duplicate_errors)
+        )
+        sealed = dict(draft)
+        sealed["review_hash"] = pipeline.object_hash(sealed)
+        self.assertEqual(
+            pipeline.validate_visual_plan_review_data(
+                sealed,
+                plan,
+                scene_plan_validation=validation,
+                validation_binding=validation_binding,
+                scene_production=scene_production,
+                scene_production_binding=scene_production_binding,
+                current_probe_evidence=probe_evidence,
+                require_hash=True,
+            ),
+            [],
+        )
+
+    def test_workflow_v2_blocks_animation_before_visual_plan_review(self) -> None:
+        contract = pipeline.episode_efficiency_contract_data(
+            self.root,
+            self.episode,
+            SimpleNamespace(
+                workflow_gate_version=2,
+                episode_target_hours=8.0,
+                retrospective_reserve_minutes=45.0,
+                raw_token_budget=50_000_000,
+                uncached_input_token_budget=2_000_000,
+                output_token_budget=300_000,
+                reasoning_token_budget=100_000,
+                token_budget_warning_fraction=0.75,
+                max_false_passes=0,
+                max_known_regression_recurrences=0,
+                max_human_issue_scene_rate=0.25,
+            ),
+        )
+        self.write_json(self.efficiency_contract, contract)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "requires --visual-plan-review",
+        ):
+            pipeline.command_phase_start(
+                SimpleNamespace(
+                    repo_root=str(self.root),
+                    episode=str(self.episode),
+                    efficiency_contract=str(self.efficiency_contract),
+                    run_id="premature-animation",
+                    scene_slug="g002c_riemann_sum_limit",
+                    phase="authoring",
+                    phase_purpose="final_animation",
+                    actor_model="animation-author",
+                    active_seconds_allocation=60,
+                    raw_token_allocation=1,
+                    uncached_input_token_allocation=0,
+                    output_token_allocation=0,
+                    reasoning_token_allocation=0,
+                    state=str(self.episode / "premature-animation.json"),
+                )
+            )
+
+    def test_retrospective_measures_visual_plan_gate_and_probe_backed_revise(self) -> None:
+        central_log = pipeline.episode_efficiency_central_log(
+            pipeline.load_json(self.efficiency_contract)
+        )
+        pipeline.append_jsonl(
+            central_log,
+            {
+                "schema": "lecture-animation-phase-event-v2",
+                "event_id": "phase:v2-plan-gated-authoring",
+                "run_id": "v2-plan-gated-authoring",
+                "phase_instance_id": "phase-instance:v2-plan-gated-authoring",
+                "scene_slug": "g002c_riemann_sum_limit",
+                "phase": "authoring",
+                "phase_purpose": "final_animation",
+                "workflow_gate_version": 2,
+                "visual_plan_review_hash": "review-hash",
+                "visual_plan_review_scene_production_hash": "scene-audio-hash",
+                "scene_production_hash": "scene-audio-hash",
+                "started_at": "2026-08-01T00:00:00+00:00",
+                "ended_at": "2026-08-01T00:01:00+00:00",
+                "duration_seconds": 60.0,
+                "result": "completed",
+                "token_observed": False,
+            },
+        )
+        attempts_path = (
+            self.episode
+            / "review"
+            / "v2"
+            / "g002c_riemann_sum_limit"
+            / "visual_plan_review_attempts.jsonl"
+        )
+        pipeline.append_jsonl(
+            attempts_path,
+            {
+                "schema": "lecture-animation-visual-plan-review-attempt-v1",
+                "attempt_id": "visual-plan-review:first-revise",
+                "attempted_at": "2026-08-01T00:00:00+00:00",
+                "scene_slug": "g002c_riemann_sum_limit",
+                "probe_count": 1,
+                "detailed_plan_complete": False,
+                "gate_result": "revise",
+                "error_count": 3,
+            },
+        )
+        pipeline.append_jsonl(
+            attempts_path,
+            {
+                "schema": "lecture-animation-visual-plan-review-attempt-v1",
+                "attempt_id": "visual-plan-review:second-pass",
+                "attempted_at": "2026-08-01T00:01:00+00:00",
+                "scene_slug": "g002c_riemann_sum_limit",
+                "probe_count": 1,
+                "detailed_plan_complete": True,
+                "gate_result": "pass",
+                "error_count": 0,
+            },
+        )
+
+        metrics = pipeline.production_metrics(self.episode)
+        self.assertEqual(metrics["visual_plan_review_attempts"], 2)
+        self.assertEqual(metrics["visual_plan_review_revise_attempts"], 1)
+        self.assertEqual(
+            metrics["visual_plan_review_findings_caught_before_animation"],
+            3,
+        )
+        self.assertEqual(
+            metrics["visual_plan_review_probe_backed_revise_attempts"],
+            1,
+        )
+        self.assertEqual(metrics["visual_plan_review_first_attempt_passes"], 0)
+        self.assertEqual(
+            metrics["visual_plan_review_probe_substitution_false_passes"],
+            0,
+        )
+        self.assertEqual(
+            metrics["workflow_v2_visual_plan_gate_event_coverage"],
+            1.0,
+        )
+        self.assertEqual(
+            metrics["workflow_v2_visual_plan_gate_scene_coverage"],
+            1.0,
+        )
+        self.assertEqual(
+            metrics["workflow_v2_visual_plan_attempt_log_scene_coverage"],
+            1.0,
+        )
+        self.assertEqual(
+            metrics["workflow_v2_visual_plan_gate_missing_event_ids"],
+            [],
+        )
 
     def test_progressive_scene_audio_contract_and_execution_registry(self) -> None:
         notes = self.episode / "lecture-notes.md"
@@ -5353,6 +11631,19 @@ class PipelineV2Tests(unittest.TestCase):
         registry = pipeline.scene_registry_data(profile, plan, scene_production)
         self.assertTrue(pipeline.validate_hashed_record(registry, "registry_hash"))
         self.assertEqual(registry["exact_media"]["word_alignment"]["sha256"], pipeline.artifact_snapshot(word_alignment, self.root)["sha256"])
+        expected_state_ids = [item.get("state_id") or item.get("id") for item in plan.get("stage_states", [])]
+        self.assertEqual(registry["stage_state_ids"], expected_state_ids)
+        self.assertTrue(all(registry["stage_state_ids"]))
+        expected_transition_ids = []
+        for index, item in enumerate(plan.get("stage_transitions", [])):
+            transition_id = item.get("transition_id") or item.get("id")
+            if not transition_id:
+                from_state = str(item.get("from_state", "")).strip()
+                to_state = str(item.get("to_state", "")).strip()
+                transition_id = f"{from_state}->{to_state}" if from_state and to_state else f"transition-{index + 1:02d}"
+            expected_transition_ids.append(transition_id)
+        self.assertEqual(registry["stage_transition_ids"], expected_transition_ids)
+        self.assertTrue(all(registry["stage_transition_ids"]))
 
         production["scenes"][0]["state"] = "designing"
         production.pop("production_hash", None)
@@ -5570,7 +11861,7 @@ class PipelineV2Tests(unittest.TestCase):
         text_only = json.loads(json.dumps(telemetry))
         text_only["word_anchor_events"][0]["text_only"] = True
         text_only["word_anchor_events"][0]["duplicate_text_ids"] = ["rotate-caption"]
-        self.assertEqual(profile["autopilot_contract_version"], 7)
+        self.assertEqual(profile["autopilot_contract_version"], 8)
         self.assertEqual(len(plan["narrated_action_contracts"]), 2)
         self.assertIs(text_only["word_anchor_events"][0]["text_only"], True)
         qc = pipeline.validate_authoring_qc_data(profile, plan, text_only)
@@ -5597,6 +11888,10 @@ class PipelineV2Tests(unittest.TestCase):
                         "count": 1,
                         "role": "comparison_label",
                         "unique_visual_job": "Name the comparison state beside the square.",
+                        "necessity": "The label identifies which compared state belongs to the rotating square.",
+                        "removal_failure": "Without it the two comparison states cannot be assigned to their objects.",
+                        "clearance_condition": "Clear after the comparison resolves.",
+                        "math_object_anchor": "selected_cell",
                         "duplicates_narration": False,
                         "externalizes_production_intent": False,
                     },
@@ -5606,6 +11901,10 @@ class PipelineV2Tests(unittest.TestCase):
                         "count": 1,
                         "role": "scene_title",
                         "unique_visual_job": "Name the scene topic at the opening.",
+                        "necessity": "The title is claimed to identify the learner question for this scene.",
+                        "removal_failure": "Without it the opening question would not be explicit.",
+                        "clearance_condition": "Clear when the first object appears.",
+                        "learner_question_anchor": "what operation changes the square",
                         "duplicates_narration": False,
                         "externalizes_production_intent": False,
                     },
@@ -5625,19 +11924,64 @@ class PipelineV2Tests(unittest.TestCase):
         self.assertTrue(any("duplicates the spoken narration" in error for error in errors))
         self.assertTrue(any("externalizes production intent" in error for error in errors))
 
+    def test_screen_text_semantics_reject_episode_recap_and_creator_persona(self) -> None:
+        profile = self.make_profile()
+        profile["autopilot_contract_version"] = 7
+        payloads = [
+            "把这一集的因果链重新走一遍",
+            "我是结束乐队的键盘手，下个视频见。",
+        ]
+        plan = {
+            "screen_text_contract": {
+                "semantic_items": [
+                    {
+                        "constructor": "cn_text",
+                        "payload": payload,
+                        "count": 1,
+                        "role": "scene_title",
+                        "unique_visual_job": "Attempt to title the summary state for the learner.",
+                        "necessity": "The author claims this text is needed to identify the current state.",
+                        "removal_failure": "The author claims removal would weaken the summary transition.",
+                        "clearance_condition": "Clear after the state changes.",
+                        "learner_question_anchor": "summary question",
+                        "duplicates_narration": False,
+                        "externalizes_production_intent": False,
+                    }
+                    for payload in payloads
+                ],
+                "dynamic_payload_count": 0,
+                "dynamic_payload_policy": "runtime_registered",
+            }
+        }
+        inventory = {
+            "signature": [
+                {"constructor": "cn_text", "payloads": [payload], "count": 1}
+                for payload in payloads
+            ],
+            "dynamic_payload_count": 0,
+        }
+        errors = pipeline.validate_screen_text_semantics(profile, plan, inventory)
+        for payload in payloads:
+            self.assertTrue(
+                any(payload in error and "externalizes production intent" in error for error in errors),
+                errors,
+            )
+
     def test_screen_text_inventory_includes_project_wrappers(self) -> None:
         source = self.episode / "src" / "scenes" / "wrapped_formula_scene"
         source.mkdir(parents=True, exist_ok=True)
         (source / "objects.py").write_text(
             "formula = role_formula(r'F(\\omega)=1', font_size=40)\n"
             "symbol = math_tex(r'\\omega', font_size=30)\n"
-            "caption = label('频率', font_size=28)\n",
+            "caption = label('频率', font_size=28)\n"
+            "question = cn_text('小圈积分读取什么？', size=28)\n",
             encoding="utf-8",
         )
         inventory = pipeline.scan_screen_text_inventory(source, self.root)
         self.assertEqual(inventory["constructor_counts"]["role_formula"], 1)
         self.assertEqual(inventory["constructor_counts"]["math_tex"], 1)
         self.assertEqual(inventory["constructor_counts"]["label"], 1)
+        self.assertEqual(inventory["constructor_counts"]["cn_text"], 1)
         self.assertGreater(inventory["static_character_count"], 0)
 
     def test_relevant_regressions_exclude_unaccepted_subagent_diagnostics(self) -> None:
@@ -6265,8 +12609,10 @@ class PipelineV2Tests(unittest.TestCase):
                 "batch-b": {"state": "completed"},
             },
             "replacement_authorizations": {},
+            "capacity_authorizations": {},
             "identity_history": ["author-a", "author-b"],
             "replacement_count": 0,
+            "capacity_expansion_count": 0,
         }
         supervisor["session_hash"] = pipeline.object_hash(supervisor)
         completion = pipeline.validate_supervisor_episode_completion(supervisor)
@@ -6277,6 +12623,2267 @@ class PipelineV2Tests(unittest.TestCase):
         pending["session_hash"] = pipeline.object_hash(pending)
         with self.assertRaisesRegex(pipeline.PipelineError, "unfinished roster work"):
             pipeline.validate_supervisor_episode_completion(pending)
+        pending_capacity = json.loads(json.dumps(supervisor))
+        pending_capacity["capacity_authorizations"]["capacity:one"] = {
+            "status": "authorized"
+        }
+        pending_capacity.pop("session_hash")
+        pending_capacity["session_hash"] = pipeline.object_hash(pending_capacity)
+        with self.assertRaisesRegex(pipeline.PipelineError, "unfinished roster work"):
+            pipeline.validate_supervisor_episode_completion(pending_capacity)
+
+    def _independent_review_repair_round_fixture(
+        self,
+    ) -> dict[str, object]:
+        skill_root = (
+            self.root
+            / ".agents"
+            / "skills"
+            / "lecture-animation-pipeline"
+        )
+        skill_root.mkdir(parents=True, exist_ok=True)
+        (skill_root / "marker.txt").write_text(
+            "test skill tree\n",
+            encoding="utf-8",
+        )
+        efficiency = pipeline.load_json(self.efficiency_contract)
+        reservation_path = (
+            pipeline.episode_efficiency_reservation_ledger(efficiency)
+        )
+        scenes = [
+            "g006_conjugate_path_dependence",
+            "g008_cauchy_theorem_local_rectangle",
+        ]
+        spine_path = self.episode / "episode_visual_spine.json"
+        spine = {
+            "schema": "lecture-animation-episode-visual-spine-v2",
+            "episode": pipeline.relative_or_absolute(
+                self.episode,
+                self.root,
+            ),
+            "production_mode": "parallel_batches",
+        }
+        spine["spine_hash"] = pipeline.object_hash(spine)
+        self.write_json(spine_path, spine)
+        parent_batch_path = (
+            self.episode
+            / "review"
+            / "v3"
+            / "batch_b"
+            / "production_batch_repair_v03.json"
+        )
+        parent_batch = {
+            "schema": "lecture-animation-production-batch-v2",
+            "batch_id": "batch_b",
+            "episode": pipeline.relative_or_absolute(
+                self.episode,
+                self.root,
+            ),
+            "scenes": ["g005", *scenes, "g007"],
+            "episode_spine_hash": spine["spine_hash"],
+            "episode_efficiency_contract_hash": efficiency[
+                "contract_hash"
+            ],
+            "author_id": "old-author",
+        }
+        parent_batch["batch_hash"] = pipeline.object_hash(parent_batch)
+        self.write_json(parent_batch_path, parent_batch)
+        old_key = "episode:test:mandatory-repair:batch-b"
+        parent_path = (
+            parent_batch_path.parent / "continuation.json"
+        )
+        parent = {
+            "schema": (
+                pipeline.ANIMATIC_REPAIR_BUDGET_CONTINUATION_SCHEMA
+            ),
+            "shared_work_key": old_key,
+            "exact_scenes": scenes,
+            "production_batch": {
+                "path": pipeline.relative_or_absolute(
+                    parent_batch_path,
+                    self.root,
+                ),
+                "hash": parent_batch["batch_hash"],
+                "batch_id": "batch_b",
+            },
+        }
+        parent["continuation_hash"] = pipeline.object_hash(parent)
+        self.write_json(parent_path, parent)
+        extension_path = parent_path.with_name("extension.json")
+        extension = {
+            "schema": pipeline.ANIMATIC_REPAIR_TOKEN_EXTENSION_SCHEMA,
+            "parent_continuation": {
+                "path": pipeline.relative_or_absolute(
+                    parent_path,
+                    self.root,
+                ),
+                "hash": parent["continuation_hash"],
+            },
+        }
+        extension["extension_hash"] = pipeline.object_hash(extension)
+        self.write_json(extension_path, extension)
+        old_state_paths: dict[str, str] = {}
+        for index, scene in enumerate(scenes):
+            state_path = (
+                self.episode
+                / "review"
+                / "v3"
+                / "old"
+                / f"{scene}.json"
+            )
+            self.write_json(
+                state_path,
+                {"duration_seconds": 3727.5 + index * 0.37},
+            )
+            old_state_paths[scene] = str(state_path.resolve())
+        old_reservation_id = "reservation:old-consumed-batch-b"
+        old_actual = {
+            "raw_input_plus_output_tokens": 12_049_777,
+            "uncached_input_tokens": 269_861,
+            "output_tokens": 44_620,
+            "reasoning_tokens": 11_860,
+        }
+        ledger = pipeline.empty_efficiency_reservation_ledger(efficiency)
+        ledger.pop("ledger_hash")
+        ledger["reservations"] = {
+            old_reservation_id: {
+                "reservation_id": old_reservation_id,
+                "status": "released",
+                "shared_work_key": old_key,
+                "actual": old_actual,
+                "wrapper_state_paths": old_state_paths,
+            }
+        }
+        ledger["animatic_repair_budget_continuations"] = {
+            old_key: {
+                "shared_work_key": old_key,
+                "status": "consumed",
+                "continuation_hash": parent["continuation_hash"],
+                "production_batch_hash": parent_batch["batch_hash"],
+                "batch_id": "batch_b",
+            }
+        }
+        ledger["animatic_repair_token_extensions"] = {
+            old_key: {
+                "shared_work_key": old_key,
+                "status": "consumed",
+                "extension_hash": extension["extension_hash"],
+            }
+        }
+        ledger["revision"] = 8
+        ledger["ledger_hash"] = pipeline.object_hash(ledger)
+        self.write_json(reservation_path, ledger)
+        proposal_path = (
+            self.episode
+            / "review"
+            / "evolution"
+            / "proposals"
+            / "synthetic_independent_review_repair_round.md"
+        )
+        proposal_path.parent.mkdir(parents=True, exist_ok=True)
+        proposal_path.write_text(
+            "Frozen independent-review repair round design.\n",
+            encoding="utf-8",
+        )
+        issue_paths: dict[str, Path] = {}
+        report_paths: dict[str, Path] = {}
+        candidate_paths: dict[str, Path] = {}
+        source_roots: dict[str, Path] = {}
+        for index, scene in enumerate(scenes):
+            candidate_path = (
+                self.episode
+                / "review"
+                / "v3"
+                / scene
+                / "animatic_v03.mp4"
+            )
+            candidate_path.parent.mkdir(parents=True, exist_ok=True)
+            candidate_path.write_bytes(
+                f"candidate-{scene}".encode()
+            )
+            candidate_paths[scene] = candidate_path
+            report_path = candidate_path.with_name(
+                "independent_review_v03.md"
+            )
+            report_path.write_text(
+                f"# Review {scene}\n\nVerdict: revise.\n",
+                encoding="utf-8",
+            )
+            report_paths[scene] = report_path
+            issue_path = (
+                self.episode
+                / "review"
+                / "issues"
+                / f"{scene}-v03.json"
+            )
+            issue = {
+                "schema": "lecture-animation-review-issue-v1",
+                "issue_id": f"{scene}-v03",
+                "scene_slug": scene,
+                "status": "open",
+                "reviewer": "historical-discovery-reviewer-v03",
+                "candidate": {
+                    "path": pipeline.relative_or_absolute(
+                        candidate_path,
+                        self.root,
+                    ),
+                    "sha256": hashlib.sha256(
+                        candidate_path.read_bytes()
+                    ).hexdigest(),
+                },
+            }
+            self.write_json(issue_path, issue)
+            issue_paths[scene] = issue_path
+            source_root = (
+                self.root
+                / "worktrees"
+                / "old-batch-b"
+                / "videos"
+                / self.episode.name
+                / "src"
+                / "scenes"
+                / scene
+            )
+            source_root.mkdir(parents=True, exist_ok=True)
+            (source_root / "scene.py").write_text(
+                f"SCENE = {index}\n",
+                encoding="utf-8",
+            )
+            source_roots[scene] = source_root
+        control_root = (
+            self.episode
+            / "review"
+            / "v4"
+            / "batch_b_independent_repair_r01"
+        )
+        output_roots = {
+            scene: self.episode / "review" / "v4" / scene
+            for scene in scenes
+        }
+        args = SimpleNamespace(
+            repo_root=str(self.root),
+            episode=str(self.episode),
+            efficiency_contract=str(self.efficiency_contract),
+            episode_spine=str(spine_path),
+            parent_repair_batch=str(parent_batch_path),
+            parent_continuation=str(parent_path),
+            parent_extension=str(extension_path),
+            design_authority=str(proposal_path),
+            batch_lineage_root="batch_b",
+            consumed_shared_work_key=old_key,
+            released_reservation_id=old_reservation_id,
+            authorizing_agent_id="/root",
+            repair_author_agent_id="repair-author-v04",
+            planned_verifier_agent_id="future-reviewer-v04",
+            author_model="test-model",
+            scenes=",".join(scenes),
+            shared_work_key=(
+                "episode:test:independent-review-repair:batch-b:r01"
+            ),
+            classification=[
+                f"{scenes[0]}=incomplete_fix",
+                f"{scenes[1]}=preexisting_missed",
+            ],
+            issue=[
+                f"{scene}={issue_paths[scene]}" for scene in scenes
+            ],
+            review_report=[
+                f"{scene}={report_paths[scene]}" for scene in scenes
+            ],
+            rejected_candidate=[
+                f"{scene}={candidate_paths[scene]}" for scene in scenes
+            ],
+            source_root=[
+                f"{scene}={source_roots[scene]}" for scene in scenes
+            ],
+            allowed_output_root=[
+                f"{scene}={output_roots[scene]}" for scene in scenes
+            ],
+            control_root=str(control_root),
+            supervisor_output=str(control_root / "supervisor.json"),
+            production_batch_output=str(
+                control_root / "production_batch.json"
+            ),
+            round_state_output=str(
+                control_root / "round_state.json"
+            ),
+            expires_hours=6.0,
+            output=str(control_root / "authority.json"),
+        )
+        return {
+            "args": args,
+            "scenes": scenes,
+            "efficiency": efficiency,
+            "reservation_path": reservation_path,
+            "proposal_path": proposal_path,
+            "issue_paths": issue_paths,
+            "report_paths": report_paths,
+            "candidate_paths": candidate_paths,
+            "source_roots": source_roots,
+            "control_root": control_root,
+            "output_roots": output_roots,
+        }
+
+    def _terminal_abandoned_independent_review_repair_round(
+        self,
+    ) -> dict[str, object]:
+        fixture = self._independent_review_repair_round_fixture()
+        args = fixture["args"]
+        assert isinstance(args, SimpleNamespace)
+        scenes = fixture["scenes"]
+        assert isinstance(scenes, list)
+        with contextlib.redirect_stdout(io.StringIO()):
+            pipeline.command_authorize_independent_review_repair_round(
+                args
+            )
+        authority_path = Path(args.output)
+        control_root = Path(fixture["control_root"])
+        round_state_path = control_root / "round_state.json"
+        wrapper_paths: dict[str, Path] = {}
+        for scene in scenes:
+            state_path = control_root / f"{scene}.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.command_start_independent_review_repair_round_wrapper(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        authority=str(authority_path),
+                        round_state=str(round_state_path),
+                        state=str(state_path),
+                        scene_slug=scene,
+                        actor_agent_id="repair-author-v04",
+                        actor_model="test-model",
+                        reasoning_effort="high",
+                        run_id=f"repair-r01-{scene}",
+                        active_seconds_allocation=1800,
+                        raw_token_allocation=1_500_000,
+                        uncached_input_token_allocation=100_000,
+                        output_token_allocation=20_000,
+                        reasoning_token_allocation=8_000,
+                        usage_file=str(
+                            self.root / "missing-token-usage.jsonl"
+                        ),
+                    )
+                )
+            wrapper_paths[scene] = state_path
+        for scene in scenes:
+            state_path = wrapper_paths[scene]
+            with contextlib.redirect_stdout(io.StringIO()):
+                pipeline.command_end_independent_review_repair_round_wrapper(
+                    SimpleNamespace(
+                        repo_root=str(self.root),
+                        authority=str(authority_path),
+                        round_state=str(round_state_path),
+                        state=str(state_path),
+                        artifact_result="abandoned",
+                        artifact=[],
+                    )
+                )
+        return {
+            **fixture,
+            "authority_path": authority_path,
+            "round_state_path": round_state_path,
+            "wrapper_paths": wrapper_paths,
+        }
+
+    def _fresh_independent_review_bundle(
+        self,
+        *,
+        authority_path: Path,
+        final_receipt_path: Path,
+        verdict: str,
+    ) -> list[Path]:
+        authority = pipeline.load_json(authority_path)
+        receipt = pipeline.load_json(final_receipt_path)
+        fresh_root = pipeline.resolve_stored_path(
+            authority["fresh_review_root"],
+            self.root,
+        )
+        fresh_root.mkdir(parents=True, exist_ok=True)
+        layer_names = (
+            "layout",
+            "math_object",
+            "timing_attention",
+            "novice_causality",
+            "visual_finish",
+        )
+        evidence_paths: list[Path] = []
+        five_layers: dict[str, list[dict[str, str]]] = {}
+        for layer in layer_names:
+            path = fresh_root / f"{layer}.md"
+            path.write_text(
+                f"Fresh post-finalization {layer} evidence.\n",
+                encoding="utf-8",
+            )
+            evidence_paths.append(path)
+            snapshot = pipeline.artifact_snapshot(path, self.root)
+            five_layers[layer] = [
+                {
+                    "path": snapshot["path"],
+                    "sha256": snapshot["sha256"],
+                    "finding": f"{layer} checked against both candidates",
+                }
+            ]
+        created_at = (
+            datetime.fromisoformat(receipt["created_at"])
+            + timedelta(seconds=1)
+        ).isoformat(timespec="seconds")
+        wrapper_results = receipt["wrapper_results"]
+        submission = {
+            "schema": (
+                pipeline.INDEPENDENT_REVIEW_REPAIR_ROUND_FRESH_REVIEW_SCHEMA
+            ),
+            "created_at": created_at,
+            "reviewer_agent_id": authority[
+                "planned_verifier_agent_id"
+            ],
+            "repair_author_agent_id": authority[
+                "repair_author_agent_id"
+            ],
+            "author_recused": True,
+            "verdict": verdict,
+            "final_receipt": {
+                "path": pipeline.relative_or_absolute(
+                    final_receipt_path,
+                    self.root,
+                ),
+                "hash": receipt["receipt_hash"],
+            },
+            "wrapper_hashes_by_scene": {
+                row["scene_slug"]: row["wrapper_hash"]
+                for row in wrapper_results
+            },
+            "candidate_hashes_by_scene": {
+                row["scene_slug"]: row["artifact_snapshots"][0][
+                    "sha256"
+                ]
+                for row in wrapper_results
+            },
+            "five_layer_review": five_layers,
+        }
+        submission["submission_hash"] = pipeline.object_hash(submission)
+        submission_path = fresh_root / "fresh_review_submission.json"
+        self.write_json(submission_path, submission)
+        return [*evidence_paths, submission_path]
+
+    def test_independent_review_repair_authority_rejects_clone_partial_symlink_and_tamper(
+        self,
+    ) -> None:
+        fixture = self._independent_review_repair_round_fixture()
+        args = fixture["args"]
+        assert isinstance(args, SimpleNamespace)
+        scenes = fixture["scenes"]
+        assert isinstance(scenes, list)
+        issue_paths = fixture["issue_paths"]
+        assert isinstance(issue_paths, dict)
+
+        cloned_issue = (
+            self.episode / "review" / "issues" / "cloned-issue.json"
+        )
+        cloned_issue.write_bytes(Path(issue_paths[scenes[0]]).read_bytes())
+        clone_args = SimpleNamespace(**vars(args))
+        clone_args.issue = [
+            (
+                f"{scene}="
+                f"{cloned_issue if scene == scenes[0] else issue_paths[scene]}"
+            )
+            for scene in scenes
+        ]
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "stale, closed, cloned",
+        ):
+            pipeline.command_authorize_independent_review_repair_round(
+                clone_args
+            )
+
+        partial_path = Path(args.output)
+        partial_path.parent.mkdir(parents=True)
+        partial_path.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "authorization is partial",
+        ):
+            pipeline.command_authorize_independent_review_repair_round(
+                args
+            )
+        partial_path.unlink()
+
+        symlink_target = self.episode / "review" / "v4" / "real-target"
+        symlink_target.mkdir(parents=True)
+        symlink_root = self.episode / "review" / "v4" / "linked-root"
+        symlink_root.symlink_to(symlink_target, target_is_directory=True)
+        symlink_args = SimpleNamespace(**vars(args))
+        symlink_args.control_root = str(symlink_root)
+        symlink_args.supervisor_output = str(symlink_root / "supervisor.json")
+        symlink_args.production_batch_output = str(
+            symlink_root / "batch.json"
+        )
+        symlink_args.round_state_output = str(symlink_root / "state.json")
+        symlink_args.output = str(symlink_root / "authority.json")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "symlink",
+        ):
+            pipeline.command_authorize_independent_review_repair_round(
+                symlink_args
+            )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_authorize_independent_review_repair_round(
+                    args
+                ),
+                0,
+            )
+        ledger_path = Path(fixture["reservation_path"])
+        ledger = pipeline.load_json(ledger_path)
+        old_reservation_id = args.released_reservation_id
+        ledger["reservations"][old_reservation_id]["actual"][
+            "raw_input_plus_output_tokens"
+        ] -= 1
+        ledger.pop("ledger_hash", None)
+        ledger["revision"] += 1
+        ledger["ledger_hash"] = pipeline.object_hash(ledger)
+        self.write_json(ledger_path, ledger)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "idempotent authorization retry diverged",
+        ):
+            pipeline.command_authorize_independent_review_repair_round(
+                args
+            )
+
+    def test_independent_review_repair_episode8_policy_is_v2_only_and_reuses_identities(
+        self,
+    ) -> None:
+        policy = (
+            pipeline.INDEPENDENT_REVIEW_REPAIR_EP8_BATCH_B_POLICY
+        )
+        workspace_root = MODULE_PATH.parents[4]
+        proposal_path = (
+            workspace_root / policy["design_authority_path"]
+        )
+        self.assertEqual(
+            hashlib.sha256(proposal_path.read_bytes()).hexdigest(),
+            policy["design_authority_sha256"],
+        )
+        real_issue_paths = {
+            "g006_conjugate_path_dependence": (
+                workspace_root
+                / "videos/0008-mpm-8-cauchy_integral/review/issues/"
+                "independent_g006_remaining_samples_bypass_conjugate_"
+                "product_transit_animatic_v03_2026-07-30.json"
+            ),
+            "g008_cauchy_theorem_local_rectangle": (
+                workspace_root
+                / "videos/0008-mpm-8-cauchy_integral/review/issues/"
+                "independent_g008_cr_zero_equations_preannounced_before_"
+                "live_substitution_animatic_v03_2026-07-30.json"
+            ),
+        }
+        for scene, issue_path in real_issue_paths.items():
+            issue = pipeline.load_json(issue_path)
+            current_issue_sha256 = hashlib.sha256(issue_path.read_bytes()).hexdigest()
+            if current_issue_sha256 != policy["issue_sha256"][scene]:
+                self.assertIn(
+                    issue["status"],
+                    {"verified_fixed", "human_approved", "resolved", "mitigated"},
+                )
+                resolution = issue["resolution_history"][-1]
+                self.assertEqual(resolution["previous_status"], "open")
+                self.assertEqual(resolution["new_status"], issue["status"])
+                self.assertEqual(resolution["authority"], "user_final_episode_review")
+            else:
+                self.assertEqual(current_issue_sha256, policy["issue_sha256"][scene])
+            self.assertEqual(
+                issue["reviewer"],
+                policy["discovery_reviewers_by_scene"][scene],
+            )
+            self.assertNotEqual(
+                issue["reviewer"],
+                policy["planned_verifier_agent_id"],
+            )
+        authority = {
+            "episode": f"videos/{policy['episode']}",
+            "batch_lineage_root": policy["batch_lineage_root"],
+            "authorizing_agent_id": policy["authorizing_agent_id"],
+            "repair_author_agent_id": policy[
+                "repair_author_agent_id"
+            ],
+            "planned_verifier_agent_id": policy[
+                "planned_verifier_agent_id"
+            ],
+            "discovery_reviewers_by_scene": dict(
+                policy["discovery_reviewers_by_scene"]
+            ),
+            "exact_scenes": list(policy["exact_scenes"]),
+            "consumed_shared_work_key": policy[
+                "consumed_shared_work_key"
+            ],
+            "design_authority": {
+                "path": policy["design_authority_path"],
+                "sha256": policy["design_authority_sha256"],
+            },
+            "released_reservation": {
+                "reservation_id": policy[
+                    "released_reservation_id"
+                ],
+                "status": "released",
+                "actual": dict(policy["released_actual"]),
+                "refund": False,
+            },
+            "issue_bindings": [
+                {
+                    "scene_slug": scene,
+                    "sha256": policy["issue_sha256"][scene],
+                    "classification": policy["classifications"][scene],
+                }
+                for scene in policy["exact_scenes"]
+            ],
+            "review_report_bindings": [
+                {
+                    "scene_slug": scene,
+                    "sha256": policy["review_report_sha256"][scene],
+                }
+                for scene in policy["exact_scenes"]
+            ],
+            "rejected_candidate_bindings": [
+                {
+                    "scene_slug": scene,
+                    "sha256": policy[
+                        "rejected_candidate_sha256"
+                    ][scene],
+                }
+                for scene in policy["exact_scenes"]
+            ],
+        }
+        self.assertEqual(
+            pipeline.independent_review_repair_episode_policy_errors(
+                authority
+            ),
+            [],
+        )
+        negative_mutations = [
+            (
+                "v1 proposal path",
+                lambda row: row["design_authority"].update(
+                    {
+                        "path": (
+                            "videos/0008-mpm-8-cauchy_integral/review/"
+                            "evolution/proposals/"
+                            "independent_review_repair_round_v1.md"
+                        )
+                    }
+                ),
+            ),
+            (
+                "v1 proposal hash",
+                lambda row: row["design_authority"].update(
+                    {
+                        "sha256": (
+                            "c66016e8d4038da61baf4a542efa63072af32c276faef65fa1bbd8f05a8eeb5b"
+                        )
+                    }
+                ),
+            ),
+            (
+                "retired v1 author",
+                lambda row: row.update(
+                    {
+                        "repair_author_agent_id": (
+                            "/root/ep8_g006_g008_v04_author"
+                        )
+                    }
+                ),
+            ),
+            (
+                "retired v1 verifier",
+                lambda row: row.update(
+                    {
+                        "planned_verifier_agent_id": (
+                            "/root/ep8_review_v03_b"
+                        )
+                    }
+                ),
+            ),
+        ]
+        for label, mutate in negative_mutations:
+            attacked = json.loads(json.dumps(authority))
+            mutate(attacked)
+            with self.subTest(label=label):
+                self.assertTrue(
+                    pipeline.independent_review_repair_episode_policy_errors(
+                        attacked
+                    )
+                )
+
+    def test_independent_review_repair_unknown_usage_consumes_without_zero_or_refund(
+        self,
+    ) -> None:
+        prepared = (
+            self._terminal_abandoned_independent_review_repair_round()
+        )
+        scenes = prepared["scenes"]
+        wrapper_paths = prepared["wrapper_paths"]
+        assert isinstance(scenes, list)
+        assert isinstance(wrapper_paths, dict)
+        control_root = Path(prepared["control_root"])
+        phase_log = control_root / "phase_events.jsonl"
+        final_receipt = control_root / "final_receipt.json"
+        final_args = SimpleNamespace(
+            repo_root=str(self.root),
+            authority=str(prepared["authority_path"]),
+            round_state=str(prepared["round_state_path"]),
+            wrapper_state=[
+                str(wrapper_paths[scene]) for scene in scenes
+            ],
+            phase_log=str(phase_log),
+            usage_file=None,
+            raw_input_plus_output_tokens=None,
+            uncached_input_tokens=None,
+            output_tokens=None,
+            reasoning_tokens=None,
+            output=str(final_receipt),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_finalize_independent_review_repair_round(
+                    final_args
+                ),
+                2,
+            )
+        receipt = pipeline.load_json(final_receipt)
+        self.assertEqual(receipt["budget_result"], "token_unobserved")
+        self.assertIsNone(receipt["actual"])
+        self.assertFalse(receipt["refund"])
+        ledger = pipeline.load_json(Path(prepared["reservation_path"]))
+        row = ledger["independent_review_repair_rounds"][
+            receipt["lineage_counter_key"]
+        ]
+        reservation = ledger["reservations"][row["reservation_id"]]
+        self.assertEqual(row["status"], "consumed")
+        self.assertEqual(reservation["status"], "released")
+        self.assertIsNone(reservation["actual"])
+        self.assertFalse(reservation["refund"])
+        self.assertTrue(
+            all(
+                pipeline.load_json(path)["status"] == "open"
+                for path in prepared["issue_paths"].values()
+            )
+        )
+
+    def test_independent_review_repair_overrun_and_orphan_event_fail_closed(
+        self,
+    ) -> None:
+        prepared = (
+            self._terminal_abandoned_independent_review_repair_round()
+        )
+        scenes = prepared["scenes"]
+        wrapper_paths = prepared["wrapper_paths"]
+        assert isinstance(scenes, list)
+        assert isinstance(wrapper_paths, dict)
+        control_root = Path(prepared["control_root"])
+        phase_log = control_root / "phase_events.jsonl"
+        first_wrapper = pipeline.load_json(wrapper_paths[scenes[0]])
+        phase_log.write_text(
+            json.dumps(
+                {
+                    "event_id": first_wrapper["event_id"],
+                    "shared_actual": {"forged": 1},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        final_receipt = control_root / "final_receipt.json"
+        final_args = SimpleNamespace(
+            repo_root=str(self.root),
+            authority=str(prepared["authority_path"]),
+            round_state=str(prepared["round_state_path"]),
+            wrapper_state=[
+                str(wrapper_paths[scene]) for scene in scenes
+            ],
+            phase_log=str(phase_log),
+            usage_file=None,
+            raw_input_plus_output_tokens=1_500_001,
+            uncached_input_tokens=100_000,
+            output_tokens=20_000,
+            reasoning_tokens=8_000,
+            output=str(final_receipt),
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "event exists without its final receipt",
+        ):
+            pipeline.command_finalize_independent_review_repair_round(
+                final_args
+            )
+        phase_log.unlink()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_finalize_independent_review_repair_round(
+                    final_args
+                ),
+                2,
+            )
+        receipt = pipeline.load_json(final_receipt)
+        self.assertEqual(receipt["budget_result"], "local_overrun")
+        self.assertEqual(
+            receipt["actual"]["raw_input_plus_output_tokens"],
+            1_500_001,
+        )
+        smaller_retry = SimpleNamespace(**vars(final_args))
+        smaller_retry.raw_input_plus_output_tokens = 1_000
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "cannot replace the sealed shared actual",
+        ):
+            pipeline.command_finalize_independent_review_repair_round(
+                smaller_retry
+            )
+
+    def test_independent_review_repair_round_is_one_shot_shared_and_fail_closed(
+        self,
+    ) -> None:
+        fixture = self._independent_review_repair_round_fixture()
+        args = fixture["args"]
+        assert isinstance(args, SimpleNamespace)
+        scenes = fixture["scenes"]
+        assert isinstance(scenes, list)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_authorize_independent_review_repair_round(
+                    args
+                ),
+                0,
+            )
+        authority_path = Path(args.output)
+        authority = pipeline.load_json(authority_path)
+        self.assertEqual(authority["round_index"], 1)
+        self.assertEqual(
+            authority["active_seconds_limit"],
+            1800,
+        )
+        self.assertEqual(
+            authority["soft_checkpoints"],
+            pipeline.INDEPENDENT_REVIEW_REPAIR_ROUND_CHECKPOINTS,
+        )
+        self.assertEqual(
+            authority["design_authority"]["sha256"],
+            hashlib.sha256(
+                Path(fixture["proposal_path"]).read_bytes()
+            ).hexdigest(),
+        )
+        self.assertEqual(
+            authority["released_reservation"]["actual"][
+                "raw_input_plus_output_tokens"
+            ],
+            12_049_777,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_authorize_independent_review_repair_round(
+                    args
+                ),
+                0,
+            )
+        reset_args = SimpleNamespace(**vars(args))
+        reset_args.control_root = str(
+            self.episode / "review" / "v4" / "new-thread-reset"
+        )
+        reset_args.supervisor_output = str(
+            Path(reset_args.control_root) / "supervisor.json"
+        )
+        reset_args.production_batch_output = str(
+            Path(reset_args.control_root) / "batch.json"
+        )
+        reset_args.round_state_output = str(
+            Path(reset_args.control_root) / "state.json"
+        )
+        reset_args.output = str(
+            Path(reset_args.control_root) / "authority.json"
+        )
+        reset_args.shared_work_key = "new-thread-new-key"
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "already exists for this original batch lineage",
+        ):
+            pipeline.command_authorize_independent_review_repair_round(
+                reset_args
+            )
+        control_root = Path(fixture["control_root"])
+        round_state_path = control_root / "round_state.json"
+        wrapper_paths: dict[str, Path] = {}
+        first_start = None
+        for index, scene in enumerate(scenes):
+            state_path = control_root / f"{scene}.json"
+            start_args = SimpleNamespace(
+                repo_root=str(self.root),
+                authority=str(authority_path),
+                round_state=str(round_state_path),
+                state=str(state_path),
+                scene_slug=scene,
+                actor_agent_id="repair-author-v04",
+                actor_model="test-model",
+                reasoning_effort="high",
+                run_id=f"repair-r01-{scene}",
+                active_seconds_allocation=1501,
+                raw_token_allocation=1_500_000,
+                uncached_input_token_allocation=100_000,
+                output_token_allocation=20_000,
+                reasoning_token_allocation=8_000,
+                usage_file=None,
+            )
+            if index == 0:
+                first_start = start_args
+            else:
+                mismatch = SimpleNamespace(**vars(start_args))
+                mismatch.output_token_allocation = 19_999
+                with self.assertRaisesRegex(
+                    pipeline.PipelineError,
+                    "one allocation signature",
+                ):
+                    pipeline.command_start_independent_review_repair_round_wrapper(
+                        mismatch
+                    )
+                model_drift = SimpleNamespace(**vars(start_args))
+                model_drift.actor_model = "different-model"
+                with self.assertRaisesRegex(
+                    pipeline.PipelineError,
+                    "allocation signature",
+                ):
+                    pipeline.command_start_independent_review_repair_round_wrapper(
+                        model_drift
+                    )
+                reasoning_drift = SimpleNamespace(**vars(start_args))
+                reasoning_drift.reasoning_effort = "low"
+                with self.assertRaisesRegex(
+                    pipeline.PipelineError,
+                    "allocation signature",
+                ):
+                    pipeline.command_start_independent_review_repair_round_wrapper(
+                        reasoning_drift
+                    )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    pipeline.command_start_independent_review_repair_round_wrapper(
+                        start_args
+                    ),
+                    0,
+                )
+            wrapper_paths[scene] = state_path
+        assert first_start is not None
+        over_active = SimpleNamespace(**vars(first_start))
+        over_active.state = str(control_root / "too-long.json")
+        over_active.active_seconds_allocation = 1801
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "1800-second",
+        ):
+            pipeline.command_start_independent_review_repair_round_wrapper(
+                over_active
+            )
+        output_roots = fixture["output_roots"]
+        assert isinstance(output_roots, dict)
+        source_bindings: list[str] = []
+        artifact_paths: dict[str, list[Path]] = {}
+        for scene in scenes:
+            output_root = Path(output_roots[scene])
+            source_root = output_root / "source"
+            source_root.mkdir(parents=True)
+            (source_root / "scene.py").write_text(
+                f"# repaired {scene}\n",
+                encoding="utf-8",
+            )
+            source_bindings.append(f"{scene}={source_root}")
+            animatic = output_root / "animatic_v04.mp4"
+            self_review = output_root / "self_review.md"
+            animatic.write_bytes(f"v04-{scene}".encode())
+            self_review.write_text(
+                f"Self-review for {scene}.\n",
+                encoding="utf-8",
+            )
+            artifact_paths[scene] = [animatic, self_review]
+        late_checkpoint = SimpleNamespace(
+            repo_root=str(self.root),
+            authority=str(authority_path),
+            round_state=str(round_state_path),
+            checkpoint_seconds=300,
+            elapsed_seconds=301,
+            current_source_root=source_bindings,
+            evidence=["late attack"],
+            output=str(control_root / "checkpoint_0300.json"),
+        )
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "late or backdated",
+        ):
+            pipeline.command_record_independent_review_repair_round_checkpoint(
+                late_checkpoint
+            )
+        for seconds in (300, 600, 1200, 1500, 1800):
+            checkpoint_args = SimpleNamespace(
+                **{
+                    **vars(late_checkpoint),
+                    "checkpoint_seconds": seconds,
+                    "elapsed_seconds": seconds,
+                    "evidence": [f"checkpoint {seconds} evidence"],
+                    "output": str(
+                        control_root / f"checkpoint_{seconds:04d}.json"
+                    ),
+                }
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    pipeline.command_record_independent_review_repair_round_checkpoint(
+                        checkpoint_args
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    pipeline.command_record_independent_review_repair_round_checkpoint(
+                        checkpoint_args
+                    ),
+                    0,
+                )
+            if seconds == 300:
+                divergent_checkpoint = SimpleNamespace(
+                    **{
+                        **vars(checkpoint_args),
+                        "evidence": ["replacement evidence attack"],
+                    }
+                )
+                with self.assertRaisesRegex(
+                    pipeline.PipelineError,
+                    "divergent retry",
+                ):
+                    pipeline.command_record_independent_review_repair_round_checkpoint(
+                        divergent_checkpoint
+                    )
+        first_scene = scenes[0]
+        for index, scene in enumerate(scenes):
+            end_args = SimpleNamespace(
+                repo_root=str(self.root),
+                authority=str(authority_path),
+                round_state=str(round_state_path),
+                state=str(wrapper_paths[scene]),
+                artifact_result="complete",
+                artifact=[
+                    str(path) for path in artifact_paths[scene]
+                ],
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    pipeline.command_end_independent_review_repair_round_wrapper(
+                        end_args
+                    ),
+                    0,
+                )
+            ledger = pipeline.load_json(
+                Path(fixture["reservation_path"])
+            )
+            round_row = ledger[
+                "independent_review_repair_rounds"
+            ][authority["lineage_counter_key"]]
+            reservation = ledger["reservations"][
+                round_row["reservation_id"]
+            ]
+            self.assertEqual(reservation["status"], "active")
+            self.assertIsNone(reservation["actual"])
+            if index == 0:
+                self.assertEqual(scene, first_scene)
+        phase_log = control_root / "phase_events.jsonl"
+        final_receipt = control_root / "final_receipt.json"
+        final_args = SimpleNamespace(
+            repo_root=str(self.root),
+            authority=str(authority_path),
+            round_state=str(round_state_path),
+            wrapper_state=[
+                str(wrapper_paths[scene]) for scene in scenes
+            ],
+            phase_log=str(phase_log),
+            usage_file=None,
+            raw_input_plus_output_tokens=1_000,
+            uncached_input_tokens=500,
+            output_tokens=200,
+            reasoning_tokens=100,
+            output=str(final_receipt),
+        )
+        checkpoint_1800 = control_root / "checkpoint_1800.json"
+        checkpoint_1800_bytes = checkpoint_1800.read_bytes()
+        checkpoint_1800.unlink()
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "checkpoint chain failed",
+        ):
+            pipeline.command_finalize_independent_review_repair_round(
+                final_args
+            )
+        checkpoint_1800.write_bytes(checkpoint_1800_bytes)
+        checkpoint_1200 = control_root / "checkpoint_1200.json"
+        checkpoint_1200_bytes = checkpoint_1200.read_bytes()
+        attacked_checkpoint = pipeline.load_json(checkpoint_1200)
+        attacked_checkpoint["previous_checkpoint_hash"] = "forged-link"
+        attacked_checkpoint.pop("checkpoint_hash", None)
+        attacked_checkpoint["checkpoint_hash"] = pipeline.object_hash(
+            attacked_checkpoint
+        )
+        self.write_json(checkpoint_1200, attacked_checkpoint)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "checkpoint chain failed",
+        ):
+            pipeline.command_finalize_independent_review_repair_round(
+                final_args
+            )
+        checkpoint_1200.write_bytes(checkpoint_1200_bytes)
+        chain_authority = pipeline.load_json(authority_path)
+        chain_state = pipeline.load_json(round_state_path)
+        chain_ledger = pipeline.load_json(
+            Path(fixture["reservation_path"])
+        )
+        forged_state = json.loads(json.dumps(chain_state))
+        forged_state["checkpoint_chain"][-1][
+            "checkpoint_hash"
+        ] = "forged-state-hash"
+        self.assertTrue(
+            pipeline.validate_independent_review_repair_checkpoint_chain(
+                authority=chain_authority,
+                round_state=forged_state,
+                ledger=chain_ledger,
+                repo_root=self.root,
+                require_complete=True,
+            )
+        )
+        forged_ledger = json.loads(json.dumps(chain_ledger))
+        forged_ledger["independent_review_repair_rounds"][
+            chain_authority["lineage_counter_key"]
+        ]["checkpoint_hashes"][-1] = "forged-ledger-hash"
+        self.assertTrue(
+            pipeline.validate_independent_review_repair_checkpoint_chain(
+                authority=chain_authority,
+                round_state=chain_state,
+                ledger=forged_ledger,
+                repo_root=self.root,
+                require_complete=True,
+            )
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_finalize_independent_review_repair_round(
+                    final_args
+                ),
+                0,
+            )
+        ledger = pipeline.load_json(Path(fixture["reservation_path"]))
+        row = ledger["independent_review_repair_rounds"][
+            authority["lineage_counter_key"]
+        ]
+        reservation = ledger["reservations"][row["reservation_id"]]
+        self.assertEqual(reservation["status"], "released")
+        self.assertEqual(
+            reservation["actual"][
+                "raw_input_plus_output_tokens"
+            ],
+            1_000,
+        )
+        self.assertFalse(reservation["refund"])
+        events = pipeline.event_rows(phase_log)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["shared_actual"], events[1]["shared_actual"])
+        self.assertEqual(
+            events[0]["accounting_identity"],
+            events[1]["accounting_identity"],
+        )
+        fresh_review_paths = self._fresh_independent_review_bundle(
+            authority_path=authority_path,
+            final_receipt_path=final_receipt,
+            verdict="revise",
+        )
+        result_args = SimpleNamespace(
+            repo_root=str(self.root),
+            authority=str(authority_path),
+            round_state=str(round_state_path),
+            final_receipt=str(final_receipt),
+            reviewer_agent_id="future-reviewer-v04",
+            review_artifact=[
+                str(path) for path in fresh_review_paths
+            ],
+            verdict="revise",
+            output=str(control_root / "review_result.json"),
+        )
+        old_report_args = SimpleNamespace(**vars(result_args))
+        old_report_args.review_artifact = [
+            str(next(iter(fixture["report_paths"].values())))
+        ]
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "sealed fresh review root",
+        ):
+            pipeline.command_record_independent_review_repair_round_result(
+                old_report_args
+            )
+        forged_receipt_path = control_root / "forged_final_receipt.json"
+        forged_receipt = pipeline.load_json(final_receipt)
+        forged_receipt["actual"][
+            "raw_input_plus_output_tokens"
+        ] = 42
+        forged_receipt.pop("receipt_hash", None)
+        forged_receipt["receipt_hash"] = pipeline.object_hash(
+            forged_receipt
+        )
+        self.write_json(forged_receipt_path, forged_receipt)
+        forged_path_args = SimpleNamespace(**vars(result_args))
+        forged_path_args.final_receipt = str(forged_receipt_path)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "alternate final receipt path",
+        ):
+            pipeline.command_record_independent_review_repair_round_result(
+                forged_path_args
+            )
+        receipt_bytes = final_receipt.read_bytes()
+        self.write_json(final_receipt, forged_receipt)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "exact consumed final receipt",
+        ):
+            pipeline.command_record_independent_review_repair_round_result(
+                result_args
+            )
+        final_receipt.write_bytes(receipt_bytes)
+        reservation_path = Path(fixture["reservation_path"])
+        ledger_bytes = reservation_path.read_bytes()
+        attacked_ledger = pipeline.load_json(reservation_path)
+        attacked_row = attacked_ledger[
+            "independent_review_repair_rounds"
+        ][authority["lineage_counter_key"]]
+        attacked_row.pop("final_receipt_hash", None)
+        attacked_ledger.pop("ledger_hash", None)
+        attacked_ledger["revision"] += 1
+        attacked_ledger["ledger_hash"] = pipeline.object_hash(
+            attacked_ledger
+        )
+        self.write_json(reservation_path, attacked_ledger)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "exact consumed final receipt",
+        ):
+            pipeline.command_record_independent_review_repair_round_result(
+                result_args
+            )
+        reservation_path.write_bytes(ledger_bytes)
+        phase_log_bytes = phase_log.read_bytes()
+        phase_lines = phase_log_bytes.splitlines(keepends=True)
+        phase_log.write_bytes(b"".join(phase_lines[:1]))
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "exact consumed final receipt",
+        ):
+            pipeline.command_record_independent_review_repair_round_result(
+                result_args
+            )
+        phase_log.write_bytes(phase_log_bytes)
+        fresh_review_paths = self._fresh_independent_review_bundle(
+            authority_path=authority_path,
+            final_receipt_path=final_receipt,
+            verdict="revise",
+        )
+        result_args.review_artifact = [
+            str(path) for path in fresh_review_paths
+        ]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_record_independent_review_repair_round_result(
+                    result_args
+                ),
+                2,
+            )
+        result = pipeline.load_json(Path(result_args.output))
+        self.assertEqual(
+            result["terminal_state"],
+            "root_cause_replan_required",
+        )
+        self.assertFalse(result["automatic_next_round_authorized"])
+
+    def _time_governed_override_fixture(self) -> dict[str, Path | dict]:
+        """Build a small, isolated v2 episode with an immutable old overrun."""
+        episode = self.root / "videos" / "0009-mpm-9-singularities_residues"
+        episode.mkdir(parents=True, exist_ok=True)
+        efficiency_path = (
+            episode / "review" / "evolution" / "episode_efficiency_contract.json"
+        )
+        efficiency = pipeline.episode_efficiency_contract_data(
+            self.root,
+            episode,
+            SimpleNamespace(
+                episode_target_hours=8.0,
+                retrospective_reserve_minutes=45.0,
+                raw_token_budget=50_000_000,
+                uncached_input_token_budget=2_000_000,
+                output_token_budget=300_000,
+                reasoning_token_budget=100_000,
+                token_budget_warning_fraction=0.75,
+                max_false_passes=0,
+                max_known_regression_recurrences=0,
+                max_human_issue_scene_rate=0.25,
+                workflow_gate_version=2,
+            ),
+        )
+        self.write_json(efficiency_path, efficiency)
+        ledger_path = pipeline.episode_efficiency_reservation_ledger(efficiency)
+        self.write_json(
+            ledger_path,
+            pipeline.empty_efficiency_reservation_ledger(efficiency),
+        )
+        central_log = pipeline.episode_efficiency_central_log(efficiency)
+        pipeline.append_jsonl(
+            central_log,
+            {
+                "schema": "lecture-animation-phase-event-v2",
+                "event_id": "phase:ep9-historical-outer-overrun",
+                "phase_instance_id": "phase-instance:ep9-historical-outer-overrun",
+                "scene_slug": "episode",
+                "phase": "design",
+                "phase_purpose": "global_spine_and_batch_handoffs",
+                "result": "completed",
+                "started_at": "2026-08-01T00:00:00+00:00",
+                "ended_at": "2026-08-01T00:00:01+00:00",
+                "duration_seconds": 1.0,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 300_001,
+                "reasoning_tokens": 1,
+                "token_observed": True,
+                "token_source_kind": "manual",
+                "token_allocation_exceeded": ["output_tokens"],
+            },
+        )
+        authority_path = episode / "review" / "evolution" / "user-authority.json"
+        self.write_json(
+            authority_path,
+            {
+                "schema": "lecture-animation-user-authority-v1",
+                "decision": "authorize",
+                "episode": pipeline.relative_or_absolute(episode, self.root),
+                "exact_user_text": "视频优先；不能 bypass",
+                "preserve_existing_overage_evidence": True,
+                "quality_gates_unchanged": True,
+                "task_caps_unchanged": True,
+            },
+        )
+        parent_path = episode / "review" / "evolution" / "parent-contract.json"
+        parent = {
+            "schema": "lecture-animation-time-governed-parent-v1",
+            "status": "active",
+            "episode": pipeline.relative_or_absolute(episode, self.root),
+            "purpose": "video_priority_continuation",
+            "lineage_root": "ep9-overrun-root",
+        }
+        parent["contract_hash"] = pipeline.object_hash(parent)
+        self.write_json(parent_path, parent)
+        supervisor_path = episode / "review" / "v2" / "supervisor_session.json"
+        supervisor = {
+            "schema": "lecture-animation-supervisor-session-v2",
+            "session_id": "ep9-test-supervisor",
+            "supervisor_agent_id": "/root",
+            "assignments": {
+                "/root/ep9-author": {
+                    "state": "active",
+                    "role": "animation_author",
+                    "task_key": "ep9-batch-a",
+                    "scope": "g001",
+                    "model": "gpt-5.6-luna (reasoning_effort=max)",
+                }
+            },
+        }
+        supervisor["session_hash"] = pipeline.object_hash(supervisor)
+        self.write_json(supervisor_path, supervisor)
+        batch_path = episode / "review" / "v2" / "batch-a" / "production_batch.json"
+        batch = {
+            "schema": "lecture-animation-production-batch-v2",
+            "episode": pipeline.relative_or_absolute(episode, self.root),
+            "batch_id": "ep9-batch-a",
+            "scenes": ["g001"],
+            "author_id": "/root/ep9-author",
+            "supervisor_session_hash": "pending",
+            "grant_hash": "pending",
+            "actor_model": "gpt-5.6-luna",
+            "actor_role": "animation_author",
+            "reasoning_effort": "max",
+        }
+        batch["supervisor_session_hash"] = supervisor["session_hash"]
+        batch["grant_hash"] = pipeline.validate_supervisor_production_grant(
+            supervisor,
+            batch["author_id"],
+            batch["batch_id"],
+        )["grant_hash"]
+        batch["batch_hash"] = pipeline.object_hash(batch)
+        self.write_json(batch_path, batch)
+        replacement_path = episode / "review" / "evolution" / "replacement-authorization.json"
+        replacement = {
+            "schema": pipeline.TIME_GOVERNED_REPLACEMENT_AUTH_SCHEMA,
+            "status": "active",
+            "episode": pipeline.relative_or_absolute(episode, self.root),
+            "replacement_agent_id": "/root/ep9-author",
+            "actor_model": "gpt-5.6-luna",
+            "actor_role": "animation_author",
+            "reasoning_effort": "max",
+            "parent_contract_hash": parent["contract_hash"],
+            "production_batch_hashes": [batch["batch_hash"]],
+        }
+        replacement["authorization_hash"] = pipeline.object_hash(replacement)
+        self.write_json(replacement_path, replacement)
+        metric_profile_path = (
+            episode
+            / "review"
+            / "evolution"
+            / "metric-policy-profile.json"
+        )
+        metric_profile = pipeline.metric_policy_profile_data(
+            self.root,
+            episode,
+            policy_id="ep9-video-priority-metric-policy-r01",
+            parent_contract_path=parent_path,
+            user_authority_path=authority_path,
+            phases=["design"],
+            scenes=["g001"],
+            actor_model="gpt-5.6-luna",
+            actor_role="animation_author",
+            reasoning_effort="max",
+            active_seconds=120,
+            expires_hours=1,
+            metric_modes={
+                "token_budget": "off",
+                "active_time": "enforce",
+            },
+        )
+        self.write_json(metric_profile_path, metric_profile)
+        spec_path = episode / "review" / "evolution" / "time-override-spec.json"
+        token_allowance = {
+            "raw_input_plus_output_tokens": 500_000,
+            "uncached_input_tokens": 100_000,
+            "output_tokens": 400_000,
+            "reasoning_tokens": 20_000,
+        }
+        self.write_json(
+            spec_path,
+            {
+                "override_id": "ep9-video-priority-r01",
+                "phase_scopes": [
+                    "design:scene_detailed_visual_plan_and_audio:g001"
+                ],
+                "token_budget_mode": pipeline.TIME_GOVERNED_TOKEN_BUDGET_MODE,
+                "active_seconds_allowance": 120,
+                "phase_active_seconds_allowance": {"design": 120},
+                "authorized_overflow_fields": [
+                    # observed-only continuation never bridges token totals
+                ],
+                "expires_hours": 1,
+            },
+        )
+        override_path = episode / "review" / "evolution" / "time-override.json"
+        authorize_args = SimpleNamespace(
+            repo_root=str(self.root),
+            episode=str(episode),
+            efficiency_contract=str(efficiency_path),
+            user_authority=str(authority_path),
+            metric_policy_profile=str(metric_profile_path),
+            parent_contract=str(parent_path),
+            replacement_authorization=str(replacement_path),
+            production_batch=[str(batch_path)],
+            supervisor_session=str(supervisor_path),
+            spec=str(spec_path),
+            override_id="",
+            phase_scope=[],
+            token_allowance=[],
+            phase_token_allowance=[],
+            active_seconds_allowance=None,
+            phase_active_seconds=[],
+            authorized_overflow_field=[],
+            expires_hours=None,
+            output=str(override_path),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_authorize_time_governed_budget_override(
+                    authorize_args
+                ),
+                0,
+            )
+        override = pipeline.load_json(override_path)
+        return {
+            "episode": episode,
+            "efficiency_path": efficiency_path,
+            "efficiency": efficiency,
+            "ledger_path": ledger_path,
+            "central_log": central_log,
+            "batch_path": batch_path,
+            "override_path": override_path,
+            "override": override,
+            "metric_profile_path": metric_profile_path,
+        }
+
+    def test_metric_policy_switchboard_keeps_operational_modes_independent(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        parent_path = fixture["episode"] / "review" / "evolution" / "parent-contract.json"
+        authority_path = fixture["episode"] / "review" / "evolution" / "user-authority.json"
+        profile = pipeline.metric_policy_profile_data(
+            self.root,
+            fixture["episode"],
+            policy_id="ep9-independent-metric-switches-r01",
+            parent_contract_path=parent_path,
+            user_authority_path=authority_path,
+            phases=["design"],
+            scenes=["g001"],
+            actor_model="gpt-5.6-luna",
+            actor_role="animation_author",
+            reasoning_effort="max",
+            active_seconds=120,
+            expires_hours=1,
+            metric_modes={
+                "token_budget": "observe",
+                "active_time": "observe",
+                "telemetry": "off",
+            },
+        )
+        self.assertEqual(
+            pipeline.validate_metric_policy_profile(
+                profile,
+                repo_root=self.root,
+                episode=fixture["episode"],
+            ),
+            [],
+        )
+        self.assertEqual(profile["metrics"]["token_budget"]["mode"], "observe")
+        self.assertEqual(profile["metrics"]["active_time"]["mode"], "observe")
+        self.assertEqual(profile["metrics"]["telemetry"]["mode"], "off")
+        self.assertEqual(profile["metrics"]["quality_gates"]["mode"], "enforce")
+
+        episode_profile_path = (
+            fixture["episode"]
+            / "review"
+            / "evolution"
+            / "episode-wide-metric-policy.json"
+        )
+        episode_profile = pipeline.metric_policy_profile_data(
+            self.root,
+            fixture["episode"],
+            policy_id="ep9-episode-wide-switchboard-r01",
+            parent_contract_path=parent_path,
+            user_authority_path=authority_path,
+            phases=["design", "authoring", "render", "tts", "asr"],
+            scenes=["*"],
+            actor_model="*",
+            actor_role="*",
+            reasoning_effort="*",
+            active_seconds=8 * 3600,
+            expires_hours=12,
+        )
+        self.write_json(episode_profile_path, episode_profile)
+        self.assertEqual(
+            {
+                metric: episode_profile["metrics"][metric]["mode"]
+                for metric in (
+                    "token_budget",
+                    "active_time",
+                    "telemetry",
+                    "quality_gates",
+                    "user_review",
+                )
+            },
+            {
+                "token_budget": "enforce",
+                "active_time": "observe",
+                "telemetry": "observe",
+                "quality_gates": "enforce",
+                "user_review": "enforce",
+            },
+        )
+        self.assertEqual(
+            pipeline.validate_metric_policy_profile(
+                episode_profile,
+                repo_root=self.root,
+                episode=fixture["episode"],
+            ),
+            [],
+        )
+        wildcard_binding = pipeline.resolve_metric_policy_profile(
+            episode_profile_path,
+            repo_root=self.root,
+            episode=fixture["episode"],
+            phase="tts",
+            scene_slug="g001",
+            actor_model="local:indextts2",
+            actor_role="local_synthesis",
+            reasoning_effort="none",
+        )
+        self.assertEqual(
+            wildcard_binding["metric_policy_profile_hash"],
+            episode_profile["policy_hash"],
+        )
+        narrow_errors = pipeline.time_governed_metric_policy_errors(
+            episode_profile
+        )
+        self.assertTrue(any("token_budget" in error for error in narrow_errors))
+        self.assertTrue(any("exact scene" in error for error in narrow_errors))
+        self.assertTrue(any("exact actor_model" in error for error in narrow_errors))
+        self.assertTrue(any("four hours" in error for error in narrow_errors))
+        self.assertTrue(any("six hours" in error for error in narrow_errors))
+        with self.assertRaises(pipeline.PipelineError):
+            pipeline.metric_policy_profile_data(
+                self.root,
+                fixture["episode"],
+                policy_id="ep9-invalid-quality-switch-r01",
+                parent_contract_path=parent_path,
+                user_authority_path=authority_path,
+                phases=["design"],
+                scenes=["g001"],
+                actor_model="gpt-5.6-luna",
+                actor_role="animation_author",
+                reasoning_effort="max",
+                active_seconds=120,
+                expires_hours=1,
+                metric_modes={"quality_gates": "off"},
+            )
+        with self.assertRaises(pipeline.PipelineError):
+            pipeline.metric_policy_profile_data(
+                self.root,
+                fixture["episode"],
+                policy_id="ep9-invalid-user-review-switch-r01",
+                parent_contract_path=parent_path,
+                user_authority_path=authority_path,
+                phases=["design"],
+                scenes=["g001"],
+                actor_model="gpt-5.6-luna",
+                actor_role="animation_author",
+                reasoning_effort="max",
+                active_seconds=120,
+                expires_hours=1,
+                metric_modes={"user_review": "observe"},
+            )
+
+        # The generic switchboard may vary operational modes independently,
+        # but the time-governed overlay is a deliberately narrower consumer.
+        self.assertEqual(
+            pipeline.time_governed_metric_policy_errors(
+                fixture["override"]["metric_policy_profile_snapshot"][
+                    "metrics"
+                ]
+            ),
+            [],
+        )
+        self.assertEqual(
+            pipeline.time_governed_metric_policy_errors(
+                fixture["override"]["metric_policy_profile_snapshot"]
+            ),
+            [],
+        )
+        observed_only_metrics = {
+            key: dict(value)
+            for key, value in fixture["override"][
+                "metric_policy_profile_snapshot"
+            ]["metrics"].items()
+        }
+        observed_only_metrics["active_time"]["mode"] = "observe"
+        self.assertEqual(
+            pipeline.time_governed_metric_policy_errors(
+                observed_only_metrics
+            ),
+            ["time-governed metric policy active_time requires mode=enforce"],
+        )
+
+    def test_metric_policy_update_is_one_authorized_switchboard_operation(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        base_path = fixture["metric_profile_path"]
+        base = pipeline.load_json(base_path)
+        authority_path = fixture["episode"] / "review" / "evolution" / "user-authority-next.json"
+        self.write_json(
+            authority_path,
+            {
+                "schema": "lecture-animation-user-authority-v1",
+                "decision": "authorize",
+                "episode": pipeline.relative_or_absolute(fixture["episode"], self.root),
+                "exact_user_text": "本轮只观察 telemetry，token 不计入硬门槛",
+                "preserve_existing_overage_evidence": True,
+                "quality_gates_unchanged": True,
+                "task_caps_unchanged": True,
+            },
+        )
+        updated = pipeline.metric_policy_update_data(
+            self.root,
+            fixture["episode"],
+            base_profile_path=base_path,
+            user_authority_path=authority_path,
+            policy_id="ep9-independent-metric-switches-r02",
+            metric_modes={
+                "token_budget": "off",
+                "active_time": "on",
+                "telemetry": "observe",
+            },
+            expires_hours=1,
+        )
+        self.assertEqual(
+            pipeline.validate_metric_policy_profile(
+                updated,
+                repo_root=self.root,
+                episode=fixture["episode"],
+            ),
+            [],
+        )
+        self.assertEqual(updated["metrics"]["token_budget"]["mode"], "off")
+        self.assertEqual(updated["metrics"]["active_time"]["mode"], "enforce")
+        self.assertEqual(updated["metrics"]["telemetry"]["mode"], "observe")
+        self.assertEqual(
+            pipeline.metric_policy_mode(updated, "active_time"),
+            "enforce",
+        )
+        self.assertTrue(pipeline.metric_policy_enforces(updated, "active_time"))
+        self.assertFalse(pipeline.metric_policy_enforces(updated, "token_budget"))
+        self.assertNotEqual(updated["policy_hash"], base["policy_hash"])
+
+        token_enabled = pipeline.metric_policy_update_data(
+            self.root,
+            fixture["episode"],
+            base_profile_path=base_path,
+            user_authority_path=authority_path,
+            policy_id="ep9-token-enforced-r01",
+            metric_modes={"token_budget": "on"},
+            expires_hours=1,
+        )
+        self.assertEqual(
+            token_enabled["metrics"]["token_budget"],
+            {
+                "mode": "enforce",
+                "charge_to_parent": True,
+                "telemetry": "required",
+            },
+        )
+
+        # Updating one switch is a patch, not a reset to global defaults.  A
+        # future profile may deliberately enforce token accounting; changing
+        # only telemetry must preserve that independent decision.
+        enforced_base = dict(base)
+        enforced_base["metrics"] = {
+            key: dict(value)
+            for key, value in base["metrics"].items()
+        }
+        enforced_base["metrics"]["token_budget"].update(
+            {"mode": "enforce", "telemetry": "required", "charge_to_parent": True}
+        )
+        enforced_base["policy_hash"] = pipeline.object_hash(
+            {
+                key: value
+                for key, value in enforced_base.items()
+                if key != "policy_hash"
+            }
+        )
+        enforced_base_path = fixture["episode"] / "review" / "evolution" / "enforced-base-policy.json"
+        self.write_json(enforced_base_path, enforced_base)
+        patched = pipeline.metric_policy_update_data(
+            self.root,
+            fixture["episode"],
+            base_profile_path=enforced_base_path,
+            user_authority_path=authority_path,
+            policy_id="ep9-independent-metric-switches-r03",
+            metric_modes={"telemetry": "off"},
+            expires_hours=1,
+        )
+        self.assertEqual(patched["metrics"]["token_budget"]["mode"], "enforce")
+        self.assertEqual(patched["metrics"]["token_budget"]["telemetry"], "required")
+        self.assertTrue(patched["metrics"]["token_budget"]["charge_to_parent"])
+        self.assertEqual(patched["metrics"]["telemetry"]["mode"], "off")
+        with self.assertRaises(pipeline.PipelineError):
+            pipeline.metric_policy_update_data(
+                self.root,
+                fixture["episode"],
+                base_profile_path=base_path,
+                user_authority_path=authority_path,
+                policy_id="ep9-invalid-hard-gate-r02",
+                metric_modes={"quality_gates": "off"},
+                expires_hours=1,
+            )
+
+        parsed = pipeline.build_parser().parse_args(
+            [
+                "update-metric-policy",
+                "--repo-root",
+                str(self.root),
+                "--episode",
+                str(fixture["episode"]),
+                "--base-profile",
+                str(base_path),
+                "--user-authority",
+                str(authority_path),
+                "--policy-id",
+                "ep9-cli-switch-r01",
+                "--metric-mode",
+                "active_time=on",
+                "--output",
+                str(fixture["episode"] / "review" / "evolution" / "cli-policy.json"),
+            ]
+        )
+        self.assertIs(parsed.func, pipeline.command_update_metric_policy)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(parsed.func(parsed), 0)
+        cli_policy = pipeline.load_json(Path(parsed.output))
+        self.assertEqual(cli_policy["metrics"]["active_time"]["mode"], "enforce")
+
+    def test_standalone_metric_policy_observes_overages_without_blocking(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        episode = fixture["episode"]
+        parent_path = episode / "review" / "evolution" / "parent-contract.json"
+        authority_path = episode / "review" / "evolution" / "user-authority.json"
+        profile_path = episode / "review" / "evolution" / "standalone-policy.json"
+        profile = pipeline.metric_policy_profile_data(
+            self.root,
+            episode,
+            policy_id="ep9-standalone-observe-r01",
+            parent_contract_path=parent_path,
+            user_authority_path=authority_path,
+            phases=["design"],
+            scenes=["g001"],
+            actor_model="gpt-5.6-luna",
+            actor_role="animation_author",
+            reasoning_effort="max",
+            active_seconds=120,
+            expires_hours=1,
+            metric_modes={
+                "token_budget": "observe",
+                "active_time": "observe",
+                "telemetry": "off",
+            },
+        )
+        self.write_json(profile_path, profile)
+        state_path = episode / "review" / "evolution" / "standalone-state.json"
+        start_args = SimpleNamespace(
+            repo_root=str(self.root),
+            episode=str(episode),
+            efficiency_contract=str(fixture["efficiency_path"]),
+            run_id="ep9-standalone-g001-design",
+            scene_slug="g001",
+            production_batch=str(fixture["batch_path"]),
+            phase="design",
+            phase_purpose="scene_detailed_visual_plan_and_audio",
+            time_governed_budget_override=None,
+            metric_policy_profile=str(profile_path),
+            token_budget_mode=None,
+            actor_model="gpt-5.6-luna",
+            actor_role="animation_author",
+            reasoning_effort="max",
+            active_seconds_allocation=1,
+            raw_token_allocation=1,
+            uncached_input_token_allocation=1,
+            output_token_allocation=1,
+            reasoning_token_allocation=1,
+            prompt_bytes=100,
+            artifact_input_bytes=100,
+            files_read=2,
+            state=str(state_path),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pipeline.command_phase_start(start_args), 0)
+        started = pipeline.load_json(state_path)
+        self.assertEqual(started["metric_policy_modes"]["token_budget"], "observe")
+        self.assertFalse(started["metric_policy_enforcement"]["token_budget"])
+        started.pop("timer_hash", None)
+        started["started_at"] = (
+            datetime.fromisoformat(started["started_at"])
+            - timedelta(seconds=2)
+        ).isoformat(timespec="seconds")
+        started["timer_hash"] = pipeline.object_hash(started)
+        self.write_json(state_path, started)
+        phase_log = episode / "review" / "evolution" / "standalone-phases.jsonl"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(state_path),
+                        phase_log=str(phase_log),
+                        result="completed",
+                        manifest_hash="",
+                        usage_file=None,
+                        input_tokens=0,
+                        cached_input_tokens=0,
+                        output_tokens=10,
+                        reasoning_tokens=1,
+                    )
+                ),
+                0,
+            )
+        ended = pipeline.load_json(state_path)
+        self.assertTrue(
+            "PHASE_TOKEN_ALLOCATION_EXCEEDED"
+            in ended["efficiency_status_at_end"]["alerts"]
+        )
+        self.assertTrue(
+            "PHASE_ACTIVE_TIME_ALLOCATION_EXCEEDED"
+            in ended["efficiency_status_at_end"]["alerts"]
+        )
+        self.assertFalse(ended["metric_policy_enforced_failure"])
+        self.assertIn(
+            "PHASE_TOKEN_ALLOCATION_EXCEEDED",
+            ended["metric_policy_nonblocking_alerts"],
+        )
+        self.assertIn(
+            "PHASE_ACTIVE_TIME_ALLOCATION_EXCEEDED",
+            ended["metric_policy_nonblocking_alerts"],
+        )
+        event = pipeline.event_rows(phase_log)[-1]
+        self.assertTrue(event["token_allocation_exceeded"])
+        self.assertEqual(event["metric_policy_modes"]["token_budget"], "observe")
+
+    def test_batch_status_metric_policy_only_softens_operational_alerts(self) -> None:
+        alerts = [
+            "EPISODE_TOKEN_BUDGET_EXCEEDED",
+            "ACTIVE_BUDGET_EXCEEDED",
+            "TOKEN_TELEMETRY_INCOMPLETE",
+            "KNOWN_HUMAN_REGRESSION_RECURRED",
+            "HUMAN_OUTCOME_SCENES_MISSING",
+        ]
+        enforced, nonblocking = (
+            pipeline.metric_policy_operational_alert_partition(
+                alerts,
+                {
+                    "token_budget": "observe",
+                    "active_time": "off",
+                    "telemetry": "observe",
+                    "quality_gates": "enforce",
+                    "user_review": "enforce",
+                },
+            )
+        )
+        self.assertEqual(enforced, [])
+        self.assertEqual(
+            nonblocking,
+            sorted(alerts[:3]),
+        )
+        self.assertNotIn("KNOWN_HUMAN_REGRESSION_RECURRED", nonblocking)
+        self.assertNotIn("HUMAN_OUTCOME_SCENES_MISSING", nonblocking)
+        parsed = pipeline.build_parser().parse_args(
+            [
+                "batch-status",
+                "--batch",
+                "batch.json",
+                "--metric-policy-profile",
+                "metric-policy.json",
+            ]
+        )
+        self.assertEqual(parsed.metric_policy_profile, "metric-policy.json")
+
+    def test_time_governed_override_schema_scope_expiry_and_history_are_bound(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        override = fixture["override"]
+        self.assertEqual(
+            pipeline.validate_time_governed_budget_override(
+                override,
+                repo_root=self.root,
+                episode=fixture["episode"],
+                efficiency_contract=fixture["efficiency"],
+            ),
+            [],
+        )
+        self.assertEqual(
+            pipeline.time_governed_override_scope(
+                override,
+                phase="design",
+                phase_purpose="scene_detailed_visual_plan_and_audio",
+                scene_slug="g001",
+            )["scenes"],
+            ["g001"],
+        )
+        expired = dict(override)
+        expired["expires_at"] = "2020-01-01T00:00:00+00:00"
+        expired["override_hash"] = pipeline.object_hash(expired)
+        expired_errors = pipeline.validate_time_governed_budget_override(
+            expired,
+            repo_root=self.root,
+            episode=fixture["episode"],
+            efficiency_contract=fixture["efficiency"],
+        )
+        self.assertTrue(any("expired" in error for error in expired_errors))
+        mutated_rows = pipeline.event_rows(fixture["central_log"])
+        mutated_rows[0] = dict(mutated_rows[0])
+        mutated_rows[0]["output_tokens"] += 1
+        history_errors = pipeline.validate_time_governed_budget_override(
+            override,
+            repo_root=self.root,
+            episode=fixture["episode"],
+            efficiency_contract=fixture["efficiency"],
+            current_ledger=pipeline.load_json(fixture["ledger_path"]),
+            current_rows=mutated_rows,
+        )
+        self.assertTrue(
+            any("historical phase event changed" in error for error in history_errors)
+        )
+
+    def test_time_governed_override_phase_start_end_and_parser_are_fail_closed(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        episode = fixture["episode"]
+        override_path = fixture["override_path"]
+        old_ledger_bytes = Path(fixture["ledger_path"]).read_bytes()
+        parser = pipeline.build_parser()
+        parsed = parser.parse_args(
+            [
+                "phase-start",
+                "--episode",
+                str(episode),
+                "--efficiency-contract",
+                str(fixture["efficiency_path"]),
+                "--run-id",
+                "ep9-test-g001-design",
+                "--scene-slug",
+                "g001",
+                "--production-batch",
+                str(fixture["batch_path"]),
+                "--phase",
+                "design",
+                "--phase-purpose",
+                "scene_detailed_visual_plan_and_audio",
+                "--time-governed-budget-override",
+                str(override_path),
+                "--metric-policy-profile",
+                str(fixture["metric_profile_path"]),
+                "--token-budget-mode",
+                pipeline.TIME_GOVERNED_TOKEN_BUDGET_MODE,
+                "--actor-model",
+                "gpt-5.6-luna",
+                "--active-seconds-allocation",
+                "60",
+                "--raw-token-allocation",
+                "1000",
+                "--uncached-input-token-allocation",
+                "1",
+                "--output-token-allocation",
+                "10",
+                "--reasoning-token-allocation",
+                "1",
+                "--state",
+                str(episode / "review" / "evolution" / "design-state.json"),
+            ]
+        )
+        self.assertEqual(parsed.time_governed_budget_override, str(override_path))
+        common = dict(
+            repo_root=str(self.root),
+            episode=str(episode),
+            efficiency_contract=str(fixture["efficiency_path"]),
+            production_batch=str(fixture["batch_path"]),
+            scene_slug="g001",
+            phase="design",
+            phase_purpose="scene_detailed_visual_plan_and_audio",
+            time_governed_budget_override=str(override_path),
+            metric_policy_profile=str(fixture["metric_profile_path"]),
+            token_budget_mode=pipeline.TIME_GOVERNED_TOKEN_BUDGET_MODE,
+            actor_model="gpt-5.6-luna",
+            actor_role="animation_author",
+            reasoning_effort="max",
+            active_seconds_allocation=60,
+            raw_token_allocation=None,
+            uncached_input_token_allocation=None,
+            output_token_allocation=None,
+            reasoning_token_allocation=None,
+            prompt_bytes=100,
+            artifact_input_bytes=100,
+            files_read=2,
+        )
+        state_path = episode / "review" / "evolution" / "design-state.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        **common,
+                        run_id="ep9-test-g001-design",
+                        state=str(state_path),
+                    )
+                ),
+                0,
+            )
+        state = pipeline.load_json(state_path)
+        self.assertEqual(
+            Path(fixture["ledger_path"]).read_bytes(),
+            old_ledger_bytes,
+            "observed-only phase-start must not rewrite the canonical v4 ledger",
+        )
+        self.assertTrue(state["time_governed_budget_override_admission_applied"])
+        self.assertTrue(
+            {"output_tokens"}.issubset(
+                set(state["time_governed_original_overflow_fields"])
+            )
+        )
+        local_log = episode / "review" / "evolution" / "design-phases.jsonl"
+        self.assertEqual(
+                pipeline.command_phase_end(
+                    SimpleNamespace(
+                        state=str(state_path),
+                        phase_log=str(local_log),
+                        result="completed",
+                        manifest_hash="",
+                        usage_file=None,
+                        input_tokens=0,
+                        cached_input_tokens=0,
+                        output_tokens=10,
+                        reasoning_tokens=1,
+                    )
+                ),
+                0,
+            )
+        ended = pipeline.load_json(state_path)
+        self.assertEqual(
+            Path(fixture["ledger_path"]).read_bytes(),
+            old_ledger_bytes,
+            "observed-only phase-end must not rewrite the canonical v4 ledger",
+        )
+        self.assertFalse(ended["time_governed_budget_override_exceeded"])
+        central_rows = pipeline.event_rows(fixture["central_log"])
+        self.assertEqual(
+            central_rows[-1]["schema"],
+            pipeline.TIME_GOVERNED_PHASE_INDEX_SCHEMA,
+        )
+        self.assertTrue(central_rows[-1]["override_hash"])
+        override_events = pipeline.event_rows(
+            episode / "review" / "evolution" / "episode_time_governed_phase_events.jsonl"
+        )
+        self.assertFalse(override_events[-1]["time_governed_budget_override_exceeded"])
+        ledger = pipeline.load_json(
+            episode / "review" / "evolution" / "episode_time_governed_reservations.json"
+        )
+        self.assertEqual(
+            ledger["overrides"][
+                fixture["override"]["override_id"]
+            ]["status"],
+            "active",
+        )
+
+        unknown_state = episode / "review" / "evolution" / "design-state-unknown.json"
+        unknown_usage = episode / "review" / "evolution" / "missing-token-usage.json"
+        # The first completed event occupies this exact scope.  A second
+        # phase-start is rejected rather than creating duplicate work; the
+        # missing-token policy is checked directly below on an isolated status
+        # sample so that the rejection cannot hide the observability rule.
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(
+                pipeline.PipelineError,
+                "scope already has a phase event",
+            ):
+                pipeline.command_phase_start(
+                    SimpleNamespace(
+                        **common,
+                        run_id="ep9-test-g001-design-unknown",
+                        usage_file=str(unknown_usage),
+                        state=str(unknown_state),
+                    )
+                )
+        unknown_rows = [
+            {
+                "event_id": "unknown-token-sample",
+                "time_governed_budget_override_id": fixture["override"]["override_id"],
+                "phase": "design",
+                "token_observed": False,
+                "raw_input_plus_output_tokens": 0,
+                "uncached_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "duration_seconds": 1.0,
+            }
+        ]
+        unknown_status = pipeline.time_governed_override_budget_status(
+            fixture["override"],
+            rows=unknown_rows,
+            ledger={"reservations": {}},
+            extra_token_observed=False,
+        )
+        self.assertEqual(
+            Path(fixture["ledger_path"]).read_bytes(),
+            old_ledger_bytes,
+            "unknown-token observed-only continuation must preserve the v4 ledger bytes",
+        )
+        self.assertFalse(unknown_rows[-1]["token_observed"])
+        self.assertTrue(unknown_status["telemetry_missing"])
+        # Token monitoring is explicitly off for this user-authorized
+        # continuation: missing token telemetry remains unknown evidence but
+        # does not consume or exhaust the time-governed overlay. Active-time
+        # limits and all quality gates remain enforced separately.
+        self.assertFalse(unknown_status["exceeded"])
+
+    def test_time_governed_overlay_closeout_and_nested_supervisor_lineage_are_bound(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        supervisor = pipeline.load_json(
+            fixture["episode"] / "review" / "v2" / "supervisor_session.json"
+        )
+        batch = pipeline.load_json(fixture["batch_path"])
+        grant = pipeline.validate_supervisor_production_grant(
+            supervisor,
+            batch["author_id"],
+            batch["batch_id"],
+        )
+        nested = dict(batch)
+        nested.update(
+            {
+                "supervisor_session_hash": None,
+                "grant_hash": None,
+                "actor_model": None,
+                "actor_role": None,
+                "reasoning_effort": None,
+                "supervisor_binding": {
+                    "canonical_session_hash": supervisor["session_hash"],
+                    "grant_hash": grant["grant_hash"],
+                    "role": grant["role"],
+                    "model": "gpt-5.6-luna (reasoning_effort=max)",
+                },
+            }
+        )
+        lineage = pipeline.production_batch_lineage(nested)
+        self.assertEqual(lineage["supervisor_session_hash"], supervisor["session_hash"])
+        self.assertEqual(lineage["grant_hash"], grant["grant_hash"])
+        self.assertEqual(lineage["actor_model"], "gpt-5.6-luna")
+        self.assertEqual(lineage["reasoning_effort"], "max")
+        self.assertEqual(
+            pipeline.time_governed_batch_supervisor_lineage_errors(
+                nested,
+                lineage,
+                supervisor,
+            ),
+            [],
+        )
+        mismatched = dict(nested)
+        mismatched["reasoning_effort"] = "medium"
+        mismatched_lineage = pipeline.production_batch_lineage(mismatched)
+        self.assertTrue(
+            any(
+                "reasoning_effort" in error
+                for error in pipeline.time_governed_batch_supervisor_lineage_errors(
+                    mismatched,
+                    mismatched_lineage,
+                    supervisor,
+                )
+            )
+        )
+
+    def test_time_governed_overlay_missing_after_central_index_fails_closed(self) -> None:
+        fixture = self._time_governed_override_fixture()
+        overlay_path = pipeline.time_governed_reservation_ledger_path(
+            fixture["episode"]
+        )
+        overlay_path.unlink()
+        pipeline.append_jsonl(
+            fixture["central_log"],
+            {
+                "schema": pipeline.TIME_GOVERNED_PHASE_INDEX_SCHEMA,
+                "event_id": "phase:missing-overlay-evidence",
+                "event_hash": "unknown",
+                "override_id": fixture["override"]["override_id"],
+                "override_hash": fixture["override"]["override_hash"],
+                "source_event_log": "videos/0009-mpm-9-singularities_residues/review/evolution/episode_time_governed_phase_events.jsonl",
+            },
+        )
+        status = pipeline.time_governed_overlay_close_status(
+            self.root,
+            fixture["episode"],
+            fixture["efficiency"],
+        )
+        self.assertTrue(status["override_used"])
+        self.assertTrue(status["noncompliant"])
+        self.assertTrue(any("overlay is missing" in error for error in status["errors"]))
 
 
 if __name__ == "__main__":

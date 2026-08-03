@@ -4,22 +4,85 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime
+import hashlib
+import json
 from typing import Any, Iterable
 
 
 TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens")
+# The central ledger stores a compact index for observed-only continuations.
+# It is provenance, not a second phase event and must never enter ordinary
+# phase coverage, active-time, or token totals.
+TIME_GOVERNED_PHASE_INDEX_SCHEMA = "lecture-animation-time-governed-phase-index-v1"
+TIME_GOVERNED_PHASE_EVENT_SCHEMA = "lecture-animation-time-governed-phase-event-v1"
+
+
+def shared_phase_accounting_identity(
+    *,
+    episode: str,
+    phase: str,
+    phase_purpose: str,
+    actor_model: str,
+    actor_role: str,
+    shared_work_key: str,
+) -> str:
+    """Return the stable cost identity for work wrapped by several scenes.
+
+    Run and scene identifiers are deliberately absent: they describe coverage
+    wrappers, not distinct model work.  The episode and actor/phase dimensions
+    remain present so a convenient shared key cannot merge unrelated work.
+    """
+    payload = {
+        "schema": "lecture-animation-shared-work-accounting-v1",
+        "episode": str(episode),
+        "phase": str(phase),
+        "phase_purpose": str(phase_purpose or ""),
+        "actor_model": str(actor_model),
+        "actor_role": str(actor_role),
+        "shared_work_key": str(shared_work_key),
+    }
+    digest = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"phase-accounting:shared:{digest}"
 
 
 def interval_union_seconds(rows: Iterable[dict[str, Any]]) -> float:
     intervals: list[tuple[datetime, datetime]] = []
+    unplaced_seconds = 0.0
     for row in rows:
-        try:
-            start = datetime.fromisoformat(str(row.get("started_at")))
-            end = datetime.fromisoformat(str(row.get("ended_at")))
-        except (TypeError, ValueError):
-            continue
-        if end > start:
-            intervals.append((start, end))
+        accounting_intervals = row.get("accounting_intervals")
+        interval_rows = (
+            accounting_intervals
+            if isinstance(accounting_intervals, list)
+            else [row]
+        )
+        for interval in interval_rows:
+            if not isinstance(interval, dict):
+                continue
+            try:
+                start = datetime.fromisoformat(
+                    str(interval.get("started_at"))
+                )
+                end = datetime.fromisoformat(
+                    str(interval.get("ended_at"))
+                )
+            except (TypeError, ValueError):
+                continue
+            if end > start:
+                intervals.append((start, end))
+        unplaced_seconds += float(
+            row.get(
+                "accounting_unplaced_duration_seconds",
+                0.0,
+            )
+            or 0.0
+        )
     intervals.sort(key=lambda item: item[0])
     merged: list[list[datetime]] = []
     for start, end in intervals:
@@ -27,11 +90,187 @@ def interval_union_seconds(rows: Iterable[dict[str, Any]]) -> float:
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
-    return sum((end - start).total_seconds() for start, end in merged)
+    return (
+        sum((end - start).total_seconds() for start, end in merged)
+        + unplaced_seconds
+    )
 
 
 def phase_event_identity(row: dict[str, Any]) -> str:
-    return str(row.get("phase_instance_id") or row.get("event_id") or repr(sorted(row.items())))
+    return str(
+        row.get("accounting_identity")
+        or row.get("phase_instance_id")
+        or row.get("event_id")
+        or repr(sorted(row.items()))
+    )
+
+
+def normalize_accounting_event(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize even a single shared event into placed/unplaced time."""
+    normalized = dict(row)
+    if not normalized.get("accounting_identity"):
+        return normalized
+    if isinstance(normalized.get("accounting_intervals"), list):
+        normalized["accounting_unplaced_duration_seconds"] = float(
+            normalized.get(
+                "accounting_unplaced_duration_seconds",
+                0.0,
+            )
+            or 0.0
+        )
+        return normalized
+    try:
+        start = datetime.fromisoformat(
+            str(normalized.get("started_at"))
+        )
+        end = datetime.fromisoformat(str(normalized.get("ended_at")))
+    except (TypeError, ValueError):
+        start = end = None
+    if start is not None and end is not None and end > start:
+        duration = (end - start).total_seconds()
+        normalized["accounting_intervals"] = [
+            {
+                "started_at": start.isoformat(),
+                "ended_at": end.isoformat(),
+            }
+        ]
+        normalized["accounting_unplaced_duration_seconds"] = 0.0
+        normalized["duration_seconds"] = duration
+    else:
+        duration = float(
+            normalized.get("duration_seconds", 0.0) or 0.0
+        )
+        normalized["accounting_intervals"] = []
+        normalized["accounting_unplaced_duration_seconds"] = duration
+        normalized["duration_seconds"] = duration
+    return normalized
+
+
+def merge_accounting_event(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge shared wrappers without inventing one gap-spanning interval.
+
+    Token cost is the per-field maximum for the one accounting identity.
+    Active time is the union of reliable intervals; disjoint intervals remain
+    disjoint, and durations without a reliable endpoint are added
+    conservatively instead of being stretched to another wrapper's endpoint.
+    """
+    previous = normalize_accounting_event(previous)
+    current = normalize_accounting_event(current)
+    ordered = sorted(
+        (previous, current),
+        key=lambda row: (
+            str(row.get("event_id", "")),
+            str(row.get("phase_instance_id", "")),
+            str(row.get("scene_slug", "")),
+        ),
+    )
+    merged = dict(ordered[0])
+    for field in TOKEN_FIELDS:
+        merged[field] = max(
+            int(previous.get(field, 0) or 0),
+            int(current.get(field, 0) or 0),
+        )
+    accounting_intervals: list[dict[str, str]] = []
+    unplaced_seconds = 0.0
+    for row in (previous, current):
+        row_intervals = row.get("accounting_intervals")
+        if isinstance(row_intervals, list):
+            accounting_intervals.extend(
+                {
+                    "started_at": str(interval["started_at"]),
+                    "ended_at": str(interval["ended_at"]),
+                }
+                for interval in row_intervals
+                if isinstance(interval, dict)
+                and interval.get("started_at")
+                and interval.get("ended_at")
+            )
+            unplaced_seconds += float(
+                row.get(
+                    "accounting_unplaced_duration_seconds",
+                    0.0,
+                )
+                or 0.0
+            )
+            continue
+        try:
+            start = datetime.fromisoformat(
+                str(row.get("started_at"))
+            )
+            end = datetime.fromisoformat(str(row.get("ended_at")))
+        except (TypeError, ValueError):
+            start = end = None
+        if start is not None and end is not None and end > start:
+            accounting_intervals.append(
+                {
+                    "started_at": start.isoformat(),
+                    "ended_at": end.isoformat(),
+                }
+            )
+        else:
+            unplaced_seconds += float(
+                row.get("duration_seconds", 0.0) or 0.0
+            )
+    accounting_intervals.sort(
+        key=lambda interval: (
+            interval["started_at"],
+            interval["ended_at"],
+        )
+    )
+    merged_intervals: list[dict[str, str]] = []
+    for interval in accounting_intervals:
+        start = datetime.fromisoformat(interval["started_at"])
+        end = datetime.fromisoformat(interval["ended_at"])
+        if merged_intervals:
+            previous_end = datetime.fromisoformat(
+                merged_intervals[-1]["ended_at"]
+            )
+            if start <= previous_end:
+                if end > previous_end:
+                    merged_intervals[-1]["ended_at"] = end.isoformat()
+                continue
+        merged_intervals.append(
+            {
+                "started_at": start.isoformat(),
+                "ended_at": end.isoformat(),
+            }
+        )
+    placed_seconds = sum(
+        (
+            datetime.fromisoformat(interval["ended_at"])
+            - datetime.fromisoformat(interval["started_at"])
+        ).total_seconds()
+        for interval in merged_intervals
+    )
+    merged["accounting_intervals"] = merged_intervals
+    merged["accounting_unplaced_duration_seconds"] = (
+        unplaced_seconds
+    )
+    merged["duration_seconds"] = placed_seconds + unplaced_seconds
+    merged["token_observed"] = bool(
+        previous.get("token_observed") is True
+        or current.get("token_observed") is True
+    )
+    observed_source_kinds = sorted(
+        {
+            str(row.get("token_source_kind", "") or "")
+            for row in (previous, current)
+            if row.get("token_observed") is True
+            and str(row.get("token_source_kind", "") or "")
+        }
+    )
+    if observed_source_kinds:
+        merged["token_source_kind"] = (
+            observed_source_kinds[0]
+            if len(observed_source_kinds) == 1
+            else "mixed:" + ",".join(observed_source_kinds)
+        )
+    return merged
 
 
 def probable_shared_phase_signature(row: dict[str, Any]) -> tuple[Any, ...] | None:
@@ -57,25 +296,33 @@ def unique_phase_events_with_diagnostics(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
-        key = phase_event_identity(row)
+        if row.get("schema") == TIME_GOVERNED_PHASE_INDEX_SCHEMA:
+            continue
+        normalized = normalize_accounting_event(row)
+        key = phase_event_identity(normalized)
         previous = by_id.get(key)
-        if previous is None or float(row.get("duration_seconds", 0.0) or 0.0) > float(
+        if previous is None:
+            by_id[key] = normalized
+        elif normalized.get("accounting_identity"):
+            by_id[key] = merge_accounting_event(
+                previous,
+                normalized,
+            )
+        elif float(normalized.get("duration_seconds", 0.0) or 0.0) > float(
             previous.get("duration_seconds", 0.0) or 0.0
         ):
-            by_id[key] = row
+            by_id[key] = normalized
 
-    selected: list[dict[str, Any]] = []
+    selected = list(by_id.values())
     by_shared_signature: dict[tuple[Any, ...], dict[str, Any]] = {}
     probable_duplicates: list[dict[str, Any]] = []
     for row in by_id.values():
         signature = probable_shared_phase_signature(row)
         if signature is None:
-            selected.append(row)
             continue
         previous = by_shared_signature.get(signature)
         if previous is None:
             by_shared_signature[signature] = row
-            selected.append(row)
             continue
         probable_duplicates.append(
             {
@@ -91,6 +338,7 @@ def unique_phase_events_with_diagnostics(
                     }
                     - {""}
                 ),
+                "deduplicated": False,
             }
         )
     return selected, probable_duplicates

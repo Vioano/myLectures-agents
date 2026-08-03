@@ -18,6 +18,16 @@ connector count. The episode section also binds:
 - rolling pace warning/hard limits;
 - screen-text and summary-connector budgets.
 
+At `post_tts`, each scene additionally binds
+`screen_text_semantic_contract_path`. The referenced JSON may be a standalone
+contract or a v7 scene plan containing `screen_text_contract`; its
+`semantic_items` must exactly match every final-source
+`Text`/`MarkupText`/`Paragraph`/registered wrapper literal by constructor,
+payload, and count. Every item must state its unique visual job, necessity,
+removal failure, mathematical-object or learner-question anchor, and clearance
+condition, with narration duplication and production-intent flags explicitly
+false. Missing, stale, extra, or self-exempted text blocks post-TTS readiness.
+
 Example:
 
 ```json
@@ -25,26 +35,48 @@ Example:
   "schema": "lecture-animation-episode-readiness-v2",
   "readiness_stage": "post_tts",
   "author_id": "animation-author-agent-id",
-  "fixed_ending": "我是结束乐队的键盘手，下个视频见。",
+  "fixed_ending": "那么，小圈积分究竟读取了奇点附近的哪一部分信息？",
+  "fixed_ending_contract": {
+    "role": "learner_facing_math_question",
+    "learner_job": "带着关于小圈积分所提取局部信息的问题离开本段推导",
+    "math_anchor": "小圈积分与奇点局部信息",
+    "externalizes_production_intent": false
+  },
   "rolling_pace_warning_limit": 4.8,
   "rolling_pace_hard_limit": 5.5,
   "screen_text_budget": 12,
   "summary_connector_budget": 4,
   "sensitive_tokens": ["eta"],
   "pronunciation_map": {
-    "eta": {
-      "spoken_form": "伊塔",
-      "scene_slug": "g011",
-      "tts_input_path": "videos/NNNN-slug/review/v2/g011/tts_input.txt",
-      "source_audio_path": "videos/NNNN-slug/exports/audio/scenes/g011.wav",
-      "ear_evidence_path": "videos/NNNN-slug/exports/audio/scenes/g011.wav",
-      "ear_review_path": "videos/NNNN-slug/review/v2/g011/pronunciation_review.json",
-      "occurrences": 3,
-      "occurrence_windows_seconds": [[31.84, 32.32], [36.16, 36.48], [40.0, 40.32]],
-      "ear_check_results": [
-        {"occurrence": 1, "window_seconds": [31.84, 32.32], "result": "pass"},
-        {"occurrence": 2, "window_seconds": [36.16, 36.48], "result": "pass"},
-        {"occurrence": 3, "window_seconds": [40.0, 40.32], "result": "pass"}
+    "theta": {
+      "bindings": [
+        {
+          "spoken_form": "theta",
+          "scene_slug": "g003",
+          "tts_input_path": "videos/NNNN-slug/review/v2/g003/tts_input.txt",
+          "source_audio_path": "videos/NNNN-slug/exports/audio/scenes/g003.wav",
+          "ear_evidence_path": "videos/NNNN-slug/exports/audio/scenes/g003.wav",
+          "ear_review_path": "videos/NNNN-slug/review/v2/g003/pronunciation_review.json",
+          "occurrences": 2,
+          "occurrence_windows_seconds": [[31.84, 32.32], [36.16, 36.48]],
+          "ear_check_results": [
+            {"occurrence": 1, "window_seconds": [31.84, 32.32], "result": "pass"},
+            {"occurrence": 2, "window_seconds": [36.16, 36.48], "result": "pass"}
+          ]
+        },
+        {
+          "spoken_form": "theta",
+          "scene_slug": "g011",
+          "tts_input_path": "videos/NNNN-slug/review/v2/g011/tts_input.txt",
+          "source_audio_path": "videos/NNNN-slug/exports/audio/scenes/g011.wav",
+          "ear_evidence_path": "videos/NNNN-slug/exports/audio/scenes/g011.wav",
+          "ear_review_path": "videos/NNNN-slug/review/v2/g011/pronunciation_review.json",
+          "occurrences": 1,
+          "occurrence_windows_seconds": [[40.0, 40.32]],
+          "ear_check_results": [
+            {"occurrence": 1, "window_seconds": [40.0, 40.32], "result": "pass"}
+          ]
+        }
       ]
     }
   },
@@ -118,13 +150,33 @@ python3 "$SKILL/scripts/pipeline_v2.py" episode-preflight \
 ```
 
 The readiness contract has two non-circular stages. `pre_tts` requires the
-exact source/narration, novice and visible-text evidence, sensitive-token map,
-and TTS input with every formal token replaced by its spoken form; it does not
-pretend that not-yet-generated audio has already been heard. Run the initial
-TTS phase with that receipt. After synthesis and listening, change the stage to
-`post_tts`, bind the exact scene WAV, windows, and independent pronunciation
-review, and rerun preflight. Candidate/repair renders and episode finalization
-require `post_tts`.
+exact current source scaffold/narration, novice and visible-text evidence,
+sensitive-token map, and TTS input with every formal token replaced by its
+spoken form; it does not pretend that not-yet-generated audio has already been
+heard. A whole-episode lock uses `readiness_scope: full_episode`. A progressive
+episode may instead use `readiness_scope: progressive_wave` at either stage:
+`wave_scene_slugs` must exactly match the bound scene rows in episode order,
+every row supplies its scene-specific `author_id` and `tts_input_path`, and the
+contract hash-binds the complete `progressive_production.json` plus a
+`fixed_ending_source_path` inside the episode that contains the one fixed
+ending exactly once. Nonadjacent scenes in the same parallel wave are not
+treated as adjacent narration boundaries; their true boundary is checked when
+the missing neighboring scene joins a later wave. This permits just-in-time
+scene narration and scene-local audio locking without pretending that
+unfinished scenes have exact scripts. Run the initial TTS phase with the fresh
+`pre_tts` wave receipt. After synthesis and listening, change that same exact
+wave to `post_tts`, bind every covered scene's exact WAV, windows, independent
+pronunciation review, and final machine-readable screen-text semantic
+contract, and rerun preflight. A post-TTS wave receipt authorizes candidate or
+repair work only for its exact covered scenes. Episode finalization still
+requires a `post_tts` receipt whose scene set exactly equals the complete final
+production set; a wave receipt cannot finalize the episode.
+
+The episode-wide screen-text budget is a default, not an invitation to hide
+long scenes behind an arbitrary larger number. A scene-specific increase must
+remain below the duration-bound cap and persist a
+`screen_text_budget_exception` with a concrete reason, transient-text clearing
+plan, and semantic-contract path. Otherwise the increase itself is a blocker.
 
 The gate hash-binds the contract, exact scene source, narration, audio,
 alignment, TTS pronunciation input, and review evidence. Every novice-bridge
@@ -136,13 +188,18 @@ relevance checks. The review also binds `author_id`, a distinct `reviewer_id`,
 its own canonical `review_hash`, and a separately hashed
 `lecture-animation-human-review-authority-v2` (or equivalent independent
 authority) record that authorizes that reviewer for the exact author, review
-source, review kind, and pass verdict. Screen text is automatically extracted from every
-literal `Text`, `MarkupText`, and `Paragraph` constructor in every Python file
+source, review kind, and pass verdict. Screen text is automatically extracted
+from every literal `Text`, `MarkupText`, `Paragraph`, and registered project
+wrapper such as `cn_text` in every Python file
 under the hash-bound `scene_source_root`; `scene_source_path` must live inside
 that root, every inventory `source_path` must also remain inside it, and the
 declared inventory must match the extracted per-file multiset exactly. Dynamic
-constructor text blocks until it is made auditable. Summary connectors remain
-separately source-bound.
+constructor text blocks until it is made auditable. Every semantic item must
+also declare its necessity, the learner-visible failure caused by removal, a
+mathematical-object or learner-question anchor, and its clearance condition.
+The gate independently rejects episode recap/process labels, next-video
+scheduling, creator identity, and persona farewells even when an author marks
+them as learner-facing. Summary connectors remain separately source-bound.
 
 The gate blocks exact narration repeated across adjacent scene boundaries,
 rolling or fallback average pace above the hard limit, concept-heavy scenes
@@ -157,6 +214,22 @@ phrasing automatically requires `discrete_to_continuous`, even when
 
 Pronunciation matching canonicalizes ASCII, LaTeX, and Unicode Greek forms
 (`eta`, `\eta`, `η`, and their supported peers) before counting occurrences.
+Every scene TTS input must also bind a
+`lecture-animation-tts-input-mapping-v2` file compiled by
+`scripts/compile_tts_input_mapping.py`. Its Unicode character offsets,
+formal surfaces, occurrence indices, and spoken forms must be ordered and
+non-overlapping; replaying them against the hash-bound formal script must
+reconstruct `tts_input.txt` byte for byte. The compiler and preflight consume
+`references/tts-pronunciation-registry.json`, reject any known forbidden or
+unregistered candidate, require a registered exact route, and include the
+registry, mapping, and input hashes in the readiness receipt. Composite tokens
+such as `i d theta` or `Res f` own their spans, so their internal atomic tokens
+cannot be double-replaced. The registry stores candidates and known failures;
+it does not turn any spelling into a cross-context listening pass.
+If a token occurs in more than one scene, `pronunciation_map.<token>.bindings`
+must contain one evidence object for every affected scene; a single global
+spoken-form declaration cannot stand in for per-scene, per-occurrence
+listening.
 Evidence must be a decodable WAV, must be the exact audio bound to the named
 scene, and must carry ordered, non-overlapping 1..N time windows with one
 result per occurrence. A hashed `lecture-animation-pronunciation-review-v2`
@@ -184,6 +257,15 @@ Finalization also requires a fresh receipt with a scene set exactly equal to
 `progressive_production.json`. Editing a narration, alignment, TTS input, or
 ear-evidence file after preflight makes the receipt stale and blocks downstream
 work.
+
+Episode-specific TTS renderers must call the same canonical receipt validator
+before plan-only output, raw-cache inspection, directory creation, or
+inference. They must compare the runtime engine/model/quantization, CLI hash,
+speaker hash, emotion-reference hash, seed, and every synthesis parameter with
+the route fingerprint sealed in the registry and receipt. A raw WAV is reusable
+only with a matching provenance sidecar bound to the exact TTS input, mapping,
+and route fingerprint. Direct bottom-level CLI output is diagnostic only until
+it enters this evidence chain.
 
 This gate is not a substitute for listening or novice review. It cheaply
 removes predictable failures before they become audio, subtitle, animation, and
@@ -221,6 +303,15 @@ the bounded task; reuse the stable episode roster instead of repeatedly
 forking full history.
 
 ## 3. Promote accepted scene assets before deleting a worktree
+
+The exact user phrase `整理 Git 状态` invokes the complete local consolidation
+contract in the canonical Skill: inventory the current task scope, promote all
+protected generated assets to `/Volumes/bocchi/myLectures`, merge approved
+tracked source/control to local `main`, pass the canonical portability audit,
+and only then remove that task's producer/integration worktrees. A temporary
+worktree whose branch name is `main` is an integration aid, not the canonical
+filesystem destination. The trigger does not include push, upload, branch
+deletion, protected-media deletion, or unrelated worktree cleanup.
 
 An accepted scene is not durable merely because its branch was merged. Generated
 audio, review media, alignment files, and manifests may be ignored by Git.

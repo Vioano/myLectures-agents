@@ -14,6 +14,13 @@ older episode that predates completion receipts, accept an approved final
 master plus a passing portability receipt as legacy completion evidence and
 label that distinction. Ask only when two candidates are equally current.
 
+"Valid" means current-release valid, not merely present. When more than one
+approved upload master exists, the newest master by recorded creation time must
+have its exact video SHA-256 bound by both the completion receipt and a passing
+portability receipt. If either still names an older master, report
+`stale_finalization_evidence_for_latest_master` and make `--require-finalized`
+fail while preserving the bounded retrospective pack for diagnosis.
+
 This trigger authorizes:
 
 - read-only inspection of the episode, vault note, Git history, current Skill,
@@ -63,6 +70,47 @@ If a source is absent, write `missing` or `unknown` and retain the denominator.
 Never convert missing logs into zero cost, complete coverage, or successful
 quality. Chat timestamps and remembered elapsed time are supporting evidence
 only; use hash-stamped phase records for measured duration.
+
+This applies to attempt counters as well as time and tokens. If review,
+author-self-review, or repair ledgers are absent, their counts, rates, reviewer
+switches, and finding averages must be `null`/`unknown_missing_ledger`, not
+numeric zero. A retrospective remains mandatory after an episode overrun:
+record the overrun on its timer and failed closeout instead of letting the
+budget gate suppress the evidence-gathering phase.
+
+Issue taxonomy is evidence coverage too. Report separate coverage ratios for
+`pattern_key`, `standard_key`, `source`, `severity`, and `status`; a large
+unclassified legacy tail may be described, but it must not be silently treated
+as evidence that no recurring aesthetic, narration, or process pattern exists.
+
+For episodes compiled with autopilot v8, the retrospective must also report
+the `screen_text_preregistration_experiment` block. Read the canonical
+`screen_text_registration_attempts.jsonl` ledger and distinguish:
+
+- proposed literals that reached a terminal gate state;
+- keep, revise, and remove decisions;
+- deterministic formal blocks;
+- total pre-source prevention (`revise + remove + blocked`);
+- registered payloads and invalid attempt rows;
+- learner-facing presentation-boundary issues later found by the user.
+- planned-scene gate coverage, including scenes with zero proposed literals;
+- user findings that the gate removed necessary learner-facing visible text.
+- escaped payload count and attribution coverage. New human boundary issues
+  must list exact literals in `affected_visible_payloads`; if any issue omits
+  that list, the exact payload count stays `null` and only a lower bound is
+  reported.
+
+Compare these values with
+`references/experiments/screen-text-preregistration-v1.json`. Episode 8 is the
+pre-change baseline: it has one human boundary issue record containing two
+escaped screen-text payloads, but no historical decision ledger. Therefore its
+attempt, prevention, and gate-coverage values are unknown, not zero. The first
+valid matched later episode must have 100% terminal attempt coverage, 100%
+planned-scene gate coverage, zero invalid rows, zero human screen-text boundary
+escapes, and zero human overblocking findings. Report how many candidates the
+new gate prevented before source authoring and how many scenes legitimately had
+zero candidates; otherwise a clean final video could hide either the same
+costly repair loop or an unused gate.
 
 ## Evidence Reading Order
 
@@ -148,7 +196,10 @@ the historical Skill tree is resolvable. After editing:
 
 A same-episode post-change snapshot proves only that the tooling runs against
 the same evidence. It does not prove production efficiency improved; that
-requires a comparable later episode or scene batch.
+requires a comparable later episode or scene batch. `compare-iterations`
+therefore reports same-episode quality and efficiency verdicts as
+`insufficient_data` even when it preserves numerical deltas; time spent
+running the retrospective itself is not a matched production regression.
 
 ## Durable Outputs And User Report
 

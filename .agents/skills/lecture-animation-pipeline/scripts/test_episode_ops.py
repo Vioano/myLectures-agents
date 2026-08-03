@@ -13,7 +13,12 @@ import wave
 from pipeline_v2_lib.core import PipelineError
 from pipeline_v2_lib import engine
 from pipeline_v2_lib.episode_ops import (
+    _alignment_words,
+    _registry_occurrences,
+    _rolling_pace,
     _validate_independent_review,
+    _validate_pronunciation_binding,
+    artifact_snapshot,
     command_episode_preflight,
     command_promote_scene,
     run_episode_preflight,
@@ -23,7 +28,112 @@ from pipeline_v2_lib.episode_ops import (
 from pipeline_v2_lib.metrics import phase_metrics
 
 
+TEST_TTS_ROUTE_ID = "indextts2-mlx8-zaojian-takagi-seed3407"
+CANONICAL_PRONUNCIATION_REGISTRY = (
+    Path(__file__).resolve().parents[1]
+    / "references/tts-pronunciation-registry.json"
+)
+
+
+def write_tts_mapping_v2(
+    *,
+    root: Path,
+    scene_slug: str,
+    formal_script: Path,
+    tts_input: Path,
+    spoken_forms: dict[str, str] | None = None,
+) -> tuple[Path, Path]:
+    registry_path = (
+        root
+        / ".agents/skills/lecture-animation-pipeline/references/tts-pronunciation-registry.json"
+    )
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        CANONICAL_PRONUNCIATION_REGISTRY.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    formal_text = formal_script.read_text(encoding="utf-8")
+    rows = _registry_occurrences(formal_text, registry)
+    replacements = {key.casefold(): value for key, value in (spoken_forms or {}).items()}
+    rebuilt: list[str] = []
+    prior_end = 0
+    for row in rows:
+        spoken_form = replacements.get(row["token_key"], row["formal_surface"])
+        rebuilt.extend((formal_text[prior_end:row["formal_start"]], spoken_form))
+        prior_end = row["formal_end"]
+        row["spoken_form"] = spoken_form
+        row["replacement_applied"] = spoken_form != row["formal_surface"]
+    rebuilt.append(formal_text[prior_end:])
+    tts_input.write_text("".join(rebuilt), encoding="utf-8")
+    mapping_path = tts_input.with_name(f"{tts_input.stem}_mapping.json")
+    mapping_path.write_text(
+        json.dumps(
+            {
+                "schema": "lecture-animation-tts-input-mapping-v2",
+                "scene_slug": scene_slug,
+                "route_id": TEST_TTS_ROUTE_ID,
+                "formal_script_path": str(formal_script.relative_to(root)),
+                "formal_script_sha256": hashlib.sha256(
+                    formal_script.read_bytes()
+                ).hexdigest(),
+                "tts_input_path": str(tts_input.relative_to(root)),
+                "tts_input_sha256": hashlib.sha256(tts_input.read_bytes()).hexdigest(),
+                "occurrences": rows,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return registry_path, mapping_path
+
+
+def write_screen_text_semantic_contract(
+    path: Path,
+    semantic_items: list[dict[str, object]] | None = None,
+) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "lecture-animation-screen-text-semantic-contract-v1",
+                "semantic_items": semantic_items or [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def mathematical_fixed_ending_contract() -> dict[str, object]:
+    return {
+        "role": "learner_facing_math_question",
+        "learner_job": "让学习者把当前数学关系带入下一步独立判断",
+        "math_anchor": "当前数学关系",
+        "externalizes_production_intent": False,
+    }
+
+
 class EpisodeOpsTests(unittest.TestCase):
+    def test_alignment_pace_uses_one_canonical_word_sequence(self) -> None:
+        value = {
+            "word_cues": [
+                {"text": "一", "start": 0.0, "end": 0.2},
+                {"text": "步", "start": 0.5, "end": 0.7},
+            ],
+            "reader_cues": [
+                {"text": "一步", "start": 0.0, "end": 0.7},
+            ],
+            "raw_alignment": {
+                "words": [
+                    {"word": "一", "start": 0.0, "end": 0.2},
+                    {"word": "步", "start": 0.5, "end": 0.7},
+                ]
+            },
+        }
+        words = _alignment_words(value)
+        self.assertEqual([row["text"] for row in words], ["一", "步"])
+        self.assertAlmostEqual(_rolling_pace(words), 2 / 12)
+
     def test_independent_review_cannot_be_self_review(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -140,11 +250,28 @@ class EpisodeOpsTests(unittest.TestCase):
                 "先看一排还留着间隔的小点，观察相邻小点之间的间隔逐渐缩小。"
                 "把这些点叫作离散格点，再指出相邻格点的间隔正在缩小，最后过渡到积分。"
                 "eta 只是积分中的变量。"
-                "我是结束乐队的键盘手，下个视频见。",
+                "离散格点不断变密时，积分会怎样出现？",
                 encoding="utf-8",
             )
+            first_semantics = episode / "g001_screen_text_semantics.json"
+            second_semantics = episode / "g002_screen_text_semantics.json"
+            write_screen_text_semantic_contract(first_semantics)
+            write_screen_text_semantic_contract(second_semantics)
+            first_tts_input = episode / "g001_tts_input.txt"
+            registry_path, first_mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=first,
+                tts_input=first_tts_input,
+            )
             tts_input = episode / "tts_input.txt"
-            tts_input.write_text("现在让离散格点逐渐变密，伊塔只是积分中的变量。", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g002",
+                formal_script=second,
+                tts_input=tts_input,
+                spoken_forms={"eta": "伊塔"},
+            )
             ear_evidence = episode / "eta.wav"
             with wave.open(str(ear_evidence), "wb") as handle:
                 handle.setnchannels(1)
@@ -301,6 +428,10 @@ class EpisodeOpsTests(unittest.TestCase):
             contract = {
                 "schema": "lecture-animation-episode-readiness-v2",
                 "author_id": author_id,
+                "tts_route_id": TEST_TTS_ROUTE_ID,
+                "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                "fixed_ending": "离散格点不断变密时，积分会怎样出现？",
+                "fixed_ending_contract": mathematical_fixed_ending_contract(),
                 "sensitive_tokens": ["eta"],
                 "pronunciation_map": {
                     "eta": {
@@ -313,6 +444,7 @@ class EpisodeOpsTests(unittest.TestCase):
                         "occurrences": 1,
                         "occurrence_windows_seconds": [[1.0, 2.0]],
                         "ear_check_results": occurrence_results,
+                        "route_id": TEST_TTS_ROUTE_ID,
                     }
                 },
                 "required_concept_bridges": ["mode", "discrete_to_continuous"],
@@ -342,6 +474,10 @@ class EpisodeOpsTests(unittest.TestCase):
                         "scene_source_path": str(first_source.relative_to(root)),
                         "scene_source_root": str(episode.relative_to(root)),
                         "narration_path": str(first.relative_to(root)),
+                        "tts_input_path": str(first_tts_input.relative_to(root)),
+                        "tts_input_mapping_path": str(
+                            first_mapping_path.relative_to(root)
+                        ),
                         "duration_seconds": 40,
                         "concept_load": "concept_heavy",
                         "prerequisites": ["vector direction"],
@@ -350,20 +486,130 @@ class EpisodeOpsTests(unittest.TestCase):
                         "novice_bridge_review_path": str(
                             first_review.relative_to(root)
                         ),
+                        "screen_text_semantic_contract_path": str(
+                            first_semantics.relative_to(root)
+                        ),
                     },
                     {
                         "scene_slug": "g002",
                         "scene_source_path": str(second_source.relative_to(root)),
                         "scene_source_root": str(episode.relative_to(root)),
                         "narration_path": str(second.relative_to(root)),
+                        "tts_input_path": str(tts_input.relative_to(root)),
+                        "tts_input_mapping_path": str(mapping_path.relative_to(root)),
                         "audio_path": str(ear_evidence.relative_to(root)),
                         "duration_seconds": 50,
+                        "screen_text_semantic_contract_path": str(
+                            second_semantics.relative_to(root)
+                        ),
                     },
                 ],
             }
             result = run_episode_preflight(root, episode, contract)
-            self.assertEqual(result["status"], "pass")
+            self.assertEqual(result["status"], "pass", result["errors"])
             self.assertEqual(result["fixed_ending_count"], 1)
+
+    def test_progressive_wave_binds_nonadjacent_scenes_at_pre_and_post_tts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            episode.mkdir(parents=True)
+            fixed_ending = "一只小圈已经能读取局部系数，大围道会怎样汇总所有奇点？"
+            ending_source = episode / "narration-outline.md"
+            ending_source.write_text(f"# 粗口播\n\n{fixed_ending}\n", encoding="utf-8")
+
+            tracker = {
+                "schema": "lecture-animation-progressive-production-v2",
+                "episode": "videos/0009-test",
+                "scenes": [
+                    {"scene_slug": "g001"},
+                    {"scene_slug": "g002"},
+                    {"scene_slug": "g003"},
+                    {"scene_slug": "g004"},
+                ],
+            }
+            tracker["production_hash"] = engine.object_hash(tracker)
+            tracker_path = episode / "progressive_production.json"
+            tracker_path.write_text(
+                json.dumps(tracker, ensure_ascii=False), encoding="utf-8"
+            )
+
+            scene_rows = []
+            for slug, author, narration_text in (
+                ("g001", "author:a", "先比较两根贡献箭头，再判断它们能否抵消。"),
+                ("g003", "author:c", "现在保持小圆不变，只观察局部系数的方向。"),
+            ):
+                scene_root = episode / "src" / slug
+                source = scene_root / "composer.py"
+                narration = episode / "review" / "v2" / slug / "narration.txt"
+                tts_input = episode / "review" / "v2" / slug / "tts_input.txt"
+                semantics = (
+                    episode / "review" / "v2" / slug / "screen_text_semantics.json"
+                )
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text('"""Pre-TTS inventory scaffold."""\n', encoding="utf-8")
+                narration.parent.mkdir(parents=True, exist_ok=True)
+                narration.write_text(narration_text, encoding="utf-8")
+                registry_path, mapping_path = write_tts_mapping_v2(
+                    root=root,
+                    scene_slug=slug,
+                    formal_script=narration,
+                    tts_input=tts_input,
+                )
+                write_screen_text_semantic_contract(semantics)
+                scene_rows.append(
+                    {
+                        "scene_slug": slug,
+                        "author_id": author,
+                        "scene_source_path": str(source.relative_to(root)),
+                        "scene_source_root": str(scene_root.relative_to(root)),
+                        "narration_path": str(narration.relative_to(root)),
+                        "tts_input_path": str(tts_input.relative_to(root)),
+                        "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                        "screen_text_semantic_contract_path": str(
+                            semantics.relative_to(root)
+                        ),
+                        "duration_seconds": 18,
+                    }
+                )
+
+            contract = {
+                "schema": "lecture-animation-episode-readiness-v2",
+                "readiness_stage": "pre_tts",
+                "readiness_scope": "progressive_wave",
+                "author_id": "main:producer",
+                "tts_route_id": TEST_TTS_ROUTE_ID,
+                "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                "progressive_production_path": str(tracker_path.relative_to(root)),
+                "wave_scene_slugs": ["g001", "g003"],
+                "fixed_ending": fixed_ending,
+                "fixed_ending_source_path": str(ending_source.relative_to(root)),
+                "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                "scenes": scene_rows,
+            }
+            result = run_episode_preflight(root, episode, contract)
+            self.assertEqual(result["status"], "pass", result["errors"])
+            self.assertEqual(result["readiness_scope"], "progressive_wave")
+            self.assertEqual(result["planned_scene_count"], 4)
+            self.assertEqual(result["wave_scene_count"], 2)
+            self.assertEqual(
+                [row["author_id"] for row in result["scenes"]],
+                ["author:a", "author:c"],
+            )
+            self.assertEqual(result["fixed_ending_count"], 1)
+            self.assertIsNotNone(result["fixed_ending_source"])
+
+            contract["readiness_stage"] = "post_tts"
+            post_tts_result = run_episode_preflight(root, episode, contract)
+            self.assertEqual(
+                post_tts_result["status"], "pass", post_tts_result["errors"]
+            )
+            self.assertEqual(post_tts_result["readiness_stage"], "post_tts")
+            self.assertEqual(post_tts_result["readiness_scope"], "progressive_wave")
+            self.assertEqual(
+                [row["scene_slug"] for row in post_tts_result["scenes"]],
+                ["g001", "g003"],
+            )
 
     def test_episode_preflight_blocks_predictable_rework(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -404,25 +650,47 @@ class EpisodeOpsTests(unittest.TestCase):
             episode.mkdir(parents=True)
             narration = episode / "g001.txt"
             narration.write_text(
-                "先看一个具体变化。我是结束乐队的键盘手，下个视频见。",
+                "先看一个具体变化。这个变化最终保留了哪个方向？",
                 encoding="utf-8",
             )
             source = episode / "src" / "g001.py"
             source.parent.mkdir()
             source.write_text("from manim import *\n", encoding="utf-8")
+            semantics = episode / "g001_screen_text_semantics.json"
+            write_screen_text_semantic_contract(semantics)
+            tts_input = episode / "g001_tts_input.txt"
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+            )
             contract_path = episode / "readiness.json"
             contract_path.write_text(
                 json.dumps(
                     {
                         "schema": "lecture-animation-episode-readiness-v2",
                         "author_id": "author:test",
+                        "tts_route_id": TEST_TTS_ROUTE_ID,
+                        "pronunciation_registry_path": str(
+                            registry_path.relative_to(root)
+                        ),
+                        "fixed_ending": "这个变化最终保留了哪个方向？",
+                        "fixed_ending_contract": mathematical_fixed_ending_contract(),
                         "scenes": [
                             {
                                 "scene_slug": "g001",
                                 "scene_source_path": str(source.relative_to(root)),
                                 "scene_source_root": str(source.parent.relative_to(root)),
                                 "narration_path": str(narration.relative_to(root)),
+                                "tts_input_path": str(tts_input.relative_to(root)),
+                                "tts_input_mapping_path": str(
+                                    mapping_path.relative_to(root)
+                                ),
                                 "duration_seconds": 20,
+                                "screen_text_semantic_contract_path": str(
+                                    semantics.relative_to(root)
+                                ),
                             }
                         ],
                     },
@@ -452,7 +720,10 @@ class EpisodeOpsTests(unittest.TestCase):
                     episode,
                     expected_scene_slugs={"g001", "g002"},
                 )
-            narration.write_text("内容已经变化。我是结束乐队的键盘手，下个视频见。", encoding="utf-8")
+            narration.write_text(
+                "内容已经变化。这个变化最终保留了哪个方向？",
+                encoding="utf-8",
+            )
             with self.assertRaisesRegex(PipelineError, "stale"):
                 validate_episode_readiness_receipt(receipt, root, episode, "g001")
 
@@ -711,28 +982,66 @@ class EpisodeOpsTests(unittest.TestCase):
             )
             narration = episode / "g001.txt"
             narration.write_text(
-                "先检查重复文字。我是结束乐队的键盘手，下个视频见。",
+                "先检查重复文字。这两个相同标签分别锚定哪个对象？",
                 encoding="utf-8",
             )
             source_relative = str(source.relative_to(root))
+            semantics = episode / "g001_screen_text_semantics.json"
+            write_screen_text_semantic_contract(
+                semantics,
+                [
+                    {
+                        "constructor": "Text",
+                        "payload": "same",
+                        "count": 2,
+                        "unique_visual_job": "给两个独立对象提供相同类别标签",
+                        "necessity": "学习者需要看见两个对象属于同一个类别",
+                        "removal_failure": "移除后无法判断两个对象是否共享同一类别",
+                        "clearance_condition": "两个对象完成类别比较后清场",
+                        "math_object_anchor": "两个待比较对象",
+                        "duplicates_narration": False,
+                        "externalizes_production_intent": False,
+                    }
+                ],
+            )
+            tts_input = episode / "g001_tts_input.txt"
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+            )
             result = run_episode_preflight(
                 root,
                 episode,
                 {
                     "schema": "lecture-animation-episode-readiness-v2",
                     "author_id": "author:test",
+                    "tts_route_id": TEST_TTS_ROUTE_ID,
+                    "pronunciation_registry_path": str(
+                        registry_path.relative_to(root)
+                    ),
+                    "fixed_ending": "这两个相同标签分别锚定哪个对象？",
+                    "fixed_ending_contract": mathematical_fixed_ending_contract(),
                     "scenes": [
                         {
                             "scene_slug": "g001",
                             "scene_source_path": source_relative,
                             "scene_source_root": str(package.relative_to(root)),
                             "narration_path": str(narration.relative_to(root)),
+                            "tts_input_path": str(tts_input.relative_to(root)),
+                            "tts_input_mapping_path": str(
+                                mapping_path.relative_to(root)
+                            ),
                             "duration_seconds": 20,
                             "screen_text_inventory": [
                                 {"text": "same", "source_path": source_relative},
                                 {"text": "same", "source_path": source_relative},
                             ],
                             "screen_text_count": 2,
+                            "screen_text_semantic_contract_path": str(
+                                semantics.relative_to(root)
+                            ),
                         }
                     ],
                 },
@@ -898,14 +1207,20 @@ class EpisodeOpsTests(unittest.TestCase):
             episode.mkdir(parents=True)
             narration = episode / "g001.txt"
             narration.write_text(
-                "eta 是积分变量。我是结束乐队的键盘手，下个视频见。",
+                "eta 是积分变量。这个变量在积分中怎样移动？",
                 encoding="utf-8",
             )
             source = episode / "src" / "g001.py"
             source.parent.mkdir()
             source.write_text("from manim import *\n", encoding="utf-8")
             tts_input = episode / "tts.txt"
-            tts_input.write_text("伊塔是积分变量。", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+                spoken_forms={"eta": "伊塔"},
+            )
             contract_path = episode / "readiness.json"
             contract_path.write_text(
                 json.dumps(
@@ -913,6 +1228,10 @@ class EpisodeOpsTests(unittest.TestCase):
                         "schema": "lecture-animation-episode-readiness-v2",
                         "author_id": "author:test",
                         "readiness_stage": "pre_tts",
+                        "tts_route_id": TEST_TTS_ROUTE_ID,
+                        "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                        "fixed_ending": "这个变量在积分中怎样移动？",
+                        "fixed_ending_contract": mathematical_fixed_ending_contract(),
                         "sensitive_tokens": ["eta"],
                         "pronunciation_map": {
                             "eta": {
@@ -920,6 +1239,7 @@ class EpisodeOpsTests(unittest.TestCase):
                                 "scene_slug": "g001",
                                 "tts_input_path": str(tts_input.relative_to(root)),
                                 "occurrences": 1,
+                                "route_id": TEST_TTS_ROUTE_ID,
                             }
                         },
                         "scenes": [
@@ -928,6 +1248,8 @@ class EpisodeOpsTests(unittest.TestCase):
                                 "scene_source_path": str(source.relative_to(root)),
                                 "scene_source_root": str(source.parent.relative_to(root)),
                                 "narration_path": str(narration.relative_to(root)),
+                                "tts_input_path": str(tts_input.relative_to(root)),
+                                "tts_input_mapping_path": str(mapping_path.relative_to(root)),
                                 "duration_seconds": 20,
                             }
                         ],
@@ -957,6 +1279,361 @@ class EpisodeOpsTests(unittest.TestCase):
                 validate_episode_readiness_receipt(
                     receipt, root, episode, "g001", required_stage="post_tts"
                 )
+
+    def test_pre_tts_blocks_forbidden_pronunciation_form(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            source = episode / "src" / "g001.py"
+            narration = episode / "g001.txt"
+            tts_input = episode / "tts.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.write_text("theta 是方向参数。这个方向怎样变化？", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+                spoken_forms={"theta": "西塔"},
+            )
+            result = run_episode_preflight(
+                root,
+                episode,
+                {
+                    "schema": "lecture-animation-episode-readiness-v2",
+                    "author_id": "author:test",
+                    "readiness_stage": "pre_tts",
+                    "tts_route_id": TEST_TTS_ROUTE_ID,
+                    "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                    "fixed_ending": "这个方向怎样变化？",
+                    "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                    "sensitive_tokens": ["theta"],
+                    "pronunciation_map": {
+                        "theta": {
+                            "spoken_form": "西塔",
+                            "scene_slug": "g001",
+                            "tts_input_path": str(tts_input.relative_to(root)),
+                            "occurrences": 1,
+                            "route_id": TEST_TTS_ROUTE_ID,
+                        }
+                    },
+                    "scenes": [
+                        {
+                            "scene_slug": "g001",
+                            "scene_source_path": str(source.relative_to(root)),
+                            "scene_source_root": str(source.parent.relative_to(root)),
+                            "narration_path": str(narration.relative_to(root)),
+                            "tts_input_path": str(tts_input.relative_to(root)),
+                            "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                            "duration_seconds": 20,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(result["status"], "blocked")
+            self.assertIn("forbidden spoken form '西塔'", " | ".join(result["errors"]))
+
+    def test_pre_tts_blocks_unregistered_or_misplaced_text_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            source = episode / "src" / "g001.py"
+            narration = episode / "g001.txt"
+            tts_input = episode / "tts.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.write_text("先观察一个方向。这个方向怎样变化？", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+            )
+            tts_input.write_text(
+                tts_input.read_text(encoding="utf-8").replace("观察", "猜测"),
+                encoding="utf-8",
+            )
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+            mapping["tts_input_sha256"] = hashlib.sha256(tts_input.read_bytes()).hexdigest()
+            mapping_path.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+            result = run_episode_preflight(
+                root,
+                episode,
+                {
+                    "schema": "lecture-animation-episode-readiness-v2",
+                    "author_id": "author:test",
+                    "readiness_stage": "pre_tts",
+                    "tts_route_id": TEST_TTS_ROUTE_ID,
+                    "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                    "fixed_ending": "这个方向怎样变化？",
+                    "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                    "scenes": [
+                        {
+                            "scene_slug": "g001",
+                            "scene_source_path": str(source.relative_to(root)),
+                            "scene_source_root": str(source.parent.relative_to(root)),
+                            "narration_path": str(narration.relative_to(root)),
+                            "tts_input_path": str(tts_input.relative_to(root)),
+                            "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                            "duration_seconds": 20,
+                        }
+                    ],
+                },
+            )
+            self.assertIn("cannot exactly reconstruct", " | ".join(result["errors"]))
+
+    def test_receipt_rejects_stale_nested_mapping_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            source = episode / "src" / "g001.py"
+            narration = episode / "g001.txt"
+            tts_input = episode / "tts.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.write_text("先观察一个方向。这个方向怎样变化？", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+            )
+            contract_path = episode / "readiness.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "lecture-animation-episode-readiness-v2",
+                        "author_id": "author:test",
+                        "readiness_stage": "pre_tts",
+                        "tts_route_id": TEST_TTS_ROUTE_ID,
+                        "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                        "fixed_ending": "这个方向怎样变化？",
+                        "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                        "scenes": [
+                            {
+                                "scene_slug": "g001",
+                                "scene_source_path": str(source.relative_to(root)),
+                                "scene_source_root": str(source.parent.relative_to(root)),
+                                "narration_path": str(narration.relative_to(root)),
+                                "tts_input_path": str(tts_input.relative_to(root)),
+                                "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                                "duration_seconds": 20,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            receipt = episode / "receipt.json"
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    command_episode_preflight(
+                        SimpleNamespace(
+                            repo_root=str(root),
+                            episode=str(episode),
+                            contract=str(contract_path),
+                            output=str(receipt),
+                            require_clean=True,
+                        )
+                    ),
+                    0,
+                )
+            mapping_path.write_text(
+                mapping_path.read_text(encoding="utf-8") + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(PipelineError, "stale"):
+                validate_episode_readiness_receipt(
+                    receipt, root, episode, "g001", required_stage="pre_tts"
+                )
+
+    def test_receipt_rejects_deleted_evidence_even_when_self_hash_is_recomputed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            source = episode / "src" / "g001.py"
+            narration = episode / "g001.txt"
+            tts_input = episode / "tts.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.write_text("先观察一个方向。这个方向怎样变化？", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+            )
+            contract_path = episode / "readiness.json"
+            contract_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "lecture-animation-episode-readiness-v2",
+                        "author_id": "author:test",
+                        "readiness_stage": "pre_tts",
+                        "tts_route_id": TEST_TTS_ROUTE_ID,
+                        "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                        "fixed_ending": "这个方向怎样变化？",
+                        "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                        "scenes": [
+                            {
+                                "scene_slug": "g001",
+                                "scene_source_path": str(source.relative_to(root)),
+                                "scene_source_root": str(source.parent.relative_to(root)),
+                                "narration_path": str(narration.relative_to(root)),
+                                "tts_input_path": str(tts_input.relative_to(root)),
+                                "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                                "duration_seconds": 20,
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            receipt_path = episode / "receipt.json"
+            with redirect_stdout(io.StringIO()):
+                command_episode_preflight(
+                    SimpleNamespace(
+                        repo_root=str(root),
+                        episode=str(episode),
+                        contract=str(contract_path),
+                        output=str(receipt_path),
+                        require_clean=True,
+                    )
+                )
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt.pop("pronunciation_registry")
+            receipt.pop("receipt_hash")
+            receipt["receipt_hash"] = engine.object_hash(receipt)
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            with self.assertRaisesRegex(PipelineError, "readiness evidence hash"):
+                validate_episode_readiness_receipt(receipt_path, root, episode, "g001")
+
+    def test_pre_tts_rejects_noncanonical_registry_and_unregistered_sensitive_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            source = episode / "src" / "g001.py"
+            narration = episode / "g001.txt"
+            tts_input = episode / "tts.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.write_text("kappa 是参数。这个参数怎样变化？", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+            )
+            alternate = root / "alternate-registry.json"
+            alternate.write_text(registry_path.read_text(encoding="utf-8"), encoding="utf-8")
+            result = run_episode_preflight(
+                root,
+                episode,
+                {
+                    "schema": "lecture-animation-episode-readiness-v2",
+                    "author_id": "author:test",
+                    "readiness_stage": "pre_tts",
+                    "tts_route_id": TEST_TTS_ROUTE_ID,
+                    "pronunciation_registry_path": str(alternate.relative_to(root)),
+                    "sensitive_tokens": ["kappa"],
+                    "fixed_ending": "这个参数怎样变化？",
+                    "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                    "scenes": [
+                        {
+                            "scene_slug": "g001",
+                            "scene_source_path": str(source.relative_to(root)),
+                            "scene_source_root": str(source.parent.relative_to(root)),
+                            "narration_path": str(narration.relative_to(root)),
+                            "tts_input_path": str(tts_input.relative_to(root)),
+                            "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                            "duration_seconds": 20,
+                        }
+                    ],
+                },
+            )
+            joined = " | ".join(result["errors"])
+            self.assertIn("canonical Skill registry", joined)
+            self.assertIn("missing sensitive tokens: kappa", joined)
+
+    def test_pre_tts_rejects_boundary_whitespace_in_spoken_form(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0009-test"
+            source = episode / "src" / "g001.py"
+            narration = episode / "g001.txt"
+            tts_input = episode / "tts.txt"
+            source.parent.mkdir(parents=True)
+            source.write_text("from manim import *\n", encoding="utf-8")
+            narration.write_text("theta 是参数。这个参数怎样变化？", encoding="utf-8")
+            registry_path, mapping_path = write_tts_mapping_v2(
+                root=root,
+                scene_slug="g001",
+                formal_script=narration,
+                tts_input=tts_input,
+                spoken_forms={"theta": "\ntheta"},
+            )
+            result = run_episode_preflight(
+                root,
+                episode,
+                {
+                    "schema": "lecture-animation-episode-readiness-v2",
+                    "author_id": "author:test",
+                    "readiness_stage": "pre_tts",
+                    "tts_route_id": TEST_TTS_ROUTE_ID,
+                    "pronunciation_registry_path": str(registry_path.relative_to(root)),
+                    "sensitive_tokens": ["theta"],
+                    "fixed_ending": "这个参数怎样变化？",
+                    "fixed_ending_contract": mathematical_fixed_ending_contract(),
+                    "scenes": [
+                        {
+                            "scene_slug": "g001",
+                            "scene_source_path": str(source.relative_to(root)),
+                            "scene_source_root": str(source.parent.relative_to(root)),
+                            "narration_path": str(narration.relative_to(root)),
+                            "tts_input_path": str(tts_input.relative_to(root)),
+                            "tts_input_mapping_path": str(mapping_path.relative_to(root)),
+                            "duration_seconds": 20,
+                        }
+                    ],
+                },
+            )
+            self.assertIn("boundary whitespace", " | ".join(result["errors"]))
+
+    def test_pronunciation_binding_rejects_decoy_tts_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            formal = root / "formal.txt"
+            exact = root / "exact.txt"
+            decoy = root / "decoy.txt"
+            formal.write_text("eta 是参数", encoding="utf-8")
+            exact.write_text("伊塔 是参数", encoding="utf-8")
+            decoy.write_text("伊塔 是参数", encoding="utf-8")
+            registry = json.loads(CANONICAL_PRONUNCIATION_REGISTRY.read_text(encoding="utf-8"))
+            errors: list[str] = []
+            _validate_pronunciation_binding(
+                token="eta",
+                binding={
+                    "scene_slug": "g001",
+                    "spoken_form": "伊塔",
+                    "tts_input_path": str(decoy.relative_to(root)),
+                    "occurrences": 1,
+                    "route_id": TEST_TTS_ROUTE_ID,
+                },
+                formal_count=1,
+                readiness_stage="pre_tts",
+                repo_root=root,
+                narration_lookup={"g001": formal.read_text(encoding="utf-8")},
+                scene_audio_paths={},
+                author_id="author:test",
+                route_id=TEST_TTS_ROUTE_ID,
+                pronunciation_registry=registry,
+                exact_mapping_evidence={"tts_input": artifact_snapshot(exact, root)},
+                errors=errors,
+            )
+            self.assertIn("must equal the exact-mapped", " | ".join(errors))
 
     def test_promotion_validates_complete_batch_before_copying(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
