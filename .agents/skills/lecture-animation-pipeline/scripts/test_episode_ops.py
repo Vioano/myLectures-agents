@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest import mock
 import wave
 
 from pipeline_v2_lib.core import PipelineError
@@ -21,8 +22,10 @@ from pipeline_v2_lib.episode_ops import (
     artifact_snapshot,
     command_episode_preflight,
     command_promote_scene,
+    run_episode_startup_preflight,
     run_episode_preflight,
     run_portability_audit,
+    validate_episode_startup_contract,
     validate_episode_readiness_receipt,
 )
 from pipeline_v2_lib.metrics import phase_metrics
@@ -114,6 +117,164 @@ def mathematical_fixed_ending_contract() -> dict[str, object]:
 
 
 class EpisodeOpsTests(unittest.TestCase):
+    def _startup_fixture(self, root: Path) -> tuple[Path, Path, dict[str, object]]:
+        canonical = root / "myLectures"
+        canonical.mkdir()
+        episode = canonical / "videos" / "0011-test"
+        evidence_root = episode / "review" / "evolution"
+        evidence_root.mkdir(parents=True)
+        phase_ledger = evidence_root / "episode_phase_events.jsonl"
+        phase_ledger.write_text("", encoding="utf-8")
+        worktree_root = root / "myLectures-worktrees"
+        integration = worktree_root / "codex-0011-test"
+        integration.mkdir(parents=True)
+        roster: list[dict[str, str]] = []
+        for name in ("a", "b", "c", "d"):
+            path = worktree_root / f"ep0011-batch-{name}"
+            path.mkdir()
+            roster.append(
+                {
+                    "agent_id": f"/root/producer-{name}",
+                    "worktree": str(path),
+                    "branch": f"agent/ep0011-batch-{name}",
+                }
+            )
+        brief = episode / "review" / "v2" / "startup_brief.md"
+        brief.parent.mkdir(parents=True)
+        brief.write_text(
+            "Startup constraints bind the main reviewer, four stable producers, "
+            "dedicated worktrees, immediate per-scene review delivery, all prior "
+            "human feedback, the fixed ending, and one canonical evidence root.\n",
+            encoding="utf-8",
+        )
+        receipts_dir = episode / "review" / "v2" / "startup"
+        receipts_dir.mkdir(parents=True)
+        receipt_payloads = {
+            "pipeline_preflight": {
+                "schema": "lecture-animation-pipeline-preflight-v1",
+                "status": "pass",
+            },
+            "delivery_clock": {
+                "schema": "lecture-animation-delivery-clock-v1",
+                "episode": "videos/0011-test",
+                "status": "active",
+                "current_stage": "initialization",
+                "max_production_agents": 4,
+            },
+            "efficiency_contract": {
+                "schema": "lecture-animation-episode-efficiency-contract-v4",
+                "episode": "videos/0011-test",
+            },
+            "metric_policy": {
+                "schema": "lecture-animation-metric-policy-v1",
+                "episode": "videos/0011-test",
+            },
+            "supervisor_session": {
+                "schema": "lecture-animation-supervisor-session-v2",
+                "supervisor_agent_id": "/root",
+                "identity_history": [row["agent_id"] for row in roster],
+                "assignments": {},
+            },
+        }
+        receipt_paths: dict[str, str] = {}
+        for name, payload in receipt_payloads.items():
+            path = receipts_dir / f"{name}.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            receipt_paths[name] = str(path)
+        contract = {
+            "schema": "lecture-animation-episode-startup-v1",
+            "episode": "videos/0011-test",
+            "production_mode": "parallel_batches",
+            "runtime_slots": 9,
+            "planned_batch_count": 4,
+            "main_agent_id": "/root",
+            "acceptance_reviewer_agent_id": "/root",
+            "startup_brief_path": str(brief),
+            "startup_decisions": {
+                "human_feedback_inventory_complete": True,
+                "source_inventory_complete": True,
+                "asset_inventory_complete": True,
+                "fixed_ending_source_locked": True,
+                "reviewer_author_separation_locked": True,
+                "per_scene_review_delivery_locked": True,
+                "canonical_evidence_root_locked": True,
+                "review_delivery_mode": "per_scene_immediate_1080p_or_better",
+                "human_feedback_route": "main_agent_compile_before_authoring",
+            },
+            "canonical_evidence_root": str(evidence_root),
+            "canonical_phase_ledger": str(phase_ledger),
+            "worktree_root": str(worktree_root),
+            "integration_worktree": str(integration),
+            "integration_branch": "codex/0011-test",
+            "producer_roster": roster,
+            "required_receipts": receipt_paths,
+        }
+        return canonical, episode, contract
+
+    def test_episode_startup_seals_four_producers_and_one_reviewer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            canonical, episode, contract = self._startup_fixture(Path(temporary))
+            contract_path = episode / "review" / "v2" / "startup.json"
+            contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+            def identity(path: Path) -> tuple[Path, str, str]:
+                branch = (
+                    "main"
+                    if path == canonical
+                    else "codex/0011-test"
+                    if path.name == "codex-0011-test"
+                    else f"agent/{path.name}"
+                )
+                return path.resolve(), branch, "/tmp/common-git"
+
+            with mock.patch(
+                "pipeline_v2_lib.episode_ops._git_worktree_identity",
+                side_effect=identity,
+            ):
+                result = run_episode_startup_preflight(
+                    repo_root=canonical,
+                    episode=episode,
+                    contract_path=contract_path,
+                )
+            self.assertEqual(result["status"], "pass", result["errors"])
+            self.assertEqual(result["producer_count"], 4)
+
+    def test_episode_startup_rejects_reviewer_as_author_and_silent_understaffing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            canonical, episode, contract = self._startup_fixture(Path(temporary))
+            contract["acceptance_reviewer_agent_id"] = "/root/producer-a"
+            contract["producer_roster"] = contract["producer_roster"][:2]
+            contract["required_receipts"]["delivery_clock"] = contract[
+                "required_receipts"
+            ]["delivery_clock"]
+            delivery_path = Path(contract["required_receipts"]["delivery_clock"])
+            delivery = json.loads(delivery_path.read_text(encoding="utf-8"))
+            delivery["max_production_agents"] = 2
+            delivery_path.write_text(json.dumps(delivery), encoding="utf-8")
+
+            def identity(path: Path) -> tuple[Path, str, str]:
+                branch = (
+                    "main"
+                    if path == canonical
+                    else "codex/0011-test"
+                    if path.name == "codex-0011-test"
+                    else f"agent/{path.name}"
+                )
+                return path.resolve(), branch, "/tmp/common-git"
+
+            with mock.patch(
+                "pipeline_v2_lib.episode_ops._git_worktree_identity",
+                side_effect=identity,
+            ):
+                errors = validate_episode_startup_contract(
+                    contract,
+                    repo_root=canonical,
+                    episode=episode,
+                )
+            joined = " | ".join(errors)
+            self.assertIn("author/reviewer separation", joined)
+            self.assertIn("startup recommendation", joined)
+
     def test_alignment_pace_uses_one_canonical_word_sequence(self) -> None:
         value = {
             "word_cues": [

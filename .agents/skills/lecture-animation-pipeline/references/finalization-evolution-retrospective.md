@@ -206,6 +206,14 @@ removing worktrees, or changing already approved episode content.
 
 ## Resources
 
+- `scripts/pipeline_v2_lib/narration_workflow.py`: profile-bound narration
+  authoring/review state, exact user outcome, TTS lock, animation release, and
+  exceptional post-animation narration repair.
+- `references/narration-workflow.md`: narration lifecycle, permissions,
+  evidence contract, and downstream invalidation rules.
+- `references/audience-profiles/registry.json`: explicit audience profile
+  registry with no global default.
+
 - `scripts/pipeline_v2.py`: backward-compatible CLI entrypoint and domain command adapters.
 - `scripts/pipeline_v2_lib/core.py`: dependency-free hashes, timestamps, errors, and canonical serialization.
 - `scripts/pipeline_v2_lib/storage.py`: process locks, atomic JSON replacement, locked JSONL append/deduplication, and read-modify-write primitives.

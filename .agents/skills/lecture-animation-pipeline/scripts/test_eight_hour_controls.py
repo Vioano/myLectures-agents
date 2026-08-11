@@ -12,6 +12,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("pipeline_v2.py")
@@ -94,6 +95,21 @@ class EightHourControlTests(unittest.TestCase):
             self.assertEqual(args.func(args), 0)
         return output
 
+    def test_initialization_cannot_exit_with_a_prose_only_artifact(self) -> None:
+        episode, clock = self.begin_clock("0100-startup-gate")
+        prose = episode / "startup.md"
+        prose.write_text("Roster and worktrees look ready.", encoding="utf-8")
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "clean executable episode startup receipt",
+        ):
+            self.transition(
+                clock,
+                action="checkpoint",
+                stage="lecture_approval",
+                artifact=str(prose),
+            )
+
     def write_idle_supervisor(self, episode: Path, *, active: bool = False) -> Path:
         path = episode / "review" / "v2" / "supervisor_session.json"
         assignments = {}
@@ -130,6 +146,7 @@ class EightHourControlTests(unittest.TestCase):
             "stage": None,
             "reason": None,
             "artifact": None,
+            "startup_receipt": None,
             "efficiency_contract": None,
             "supervisor_session": None,
             "offline_evidence": None,
@@ -377,15 +394,20 @@ class EightHourControlTests(unittest.TestCase):
     def prepare_finalization_stage(self, episode: Path, clock: Path) -> None:
         draft = episode / "lecture-draft.md"
         draft.write_text("Approved beginner-first lecture draft.", encoding="utf-8")
-        self.assertEqual(
-            self.transition(
-                clock,
-                action="checkpoint",
-                stage="lecture_approval",
-                artifact=str(draft),
-            ),
-            0,
-        )
+        with mock.patch(
+            "pipeline_v2_lib.engine.validate_episode_startup_receipt",
+            return_value=[],
+        ):
+            self.assertEqual(
+                self.transition(
+                    clock,
+                    action="checkpoint",
+                    stage="lecture_approval",
+                    artifact=str(draft),
+                    startup_receipt="startup-receipt.json",
+                ),
+                0,
+            )
         approval = episode / "review" / "lecture-approval.json"
         approval_request = episode / "review" / "lecture-approval-request.json"
         with contextlib.redirect_stdout(io.StringIO()):
@@ -783,12 +805,17 @@ class EightHourControlTests(unittest.TestCase):
         episode, clock = self.begin_clock("0106-wip")
         draft = episode / "lecture.md"
         draft.write_text("Approved beginner lecture.", encoding="utf-8")
-        self.transition(
-            clock,
-            action="checkpoint",
-            stage="lecture_approval",
-            artifact=str(draft),
-        )
+        with mock.patch(
+            "pipeline_v2_lib.engine.validate_episode_startup_receipt",
+            return_value=[],
+        ):
+            self.transition(
+                clock,
+                action="checkpoint",
+                stage="lecture_approval",
+                artifact=str(draft),
+                startup_receipt="startup-receipt.json",
+            )
         approval = episode / "lecture-approval.json"
         approval_request = episode / "lecture-approval-request.json"
         with contextlib.redirect_stdout(io.StringIO()):

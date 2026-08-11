@@ -8,7 +8,13 @@ Do not design the whole episode at equal detail in one pass, and do not jump fro
 4. **Just-in-time narration and visual-scheme co-design.** For the active scene, evolve the scene narration and detailed visual scheme together without writing animation code. Specify the learner state, real mathematical drivers, stage regions and time-varying states, transitions and clearance, identity carriers, composition/hierarchy/negative-space jobs, screen-text necessity, formula memory, and preliminary clause-to-state handoffs. Optional Keynote, grayscale wireframes, or a few critical keyframes may test risky compositions or transitions; they are supporting evidence, not the plan and not a time-based animatic.
    Before any proposed learner-facing literal enters final `scene_plan.json` or
    animation source, run the v1 screen-text decision gate described below.
-5. **Scene-local audio and timing lock.** Lock that scene's exact script, synthesize and listen to its audio, generate reader SRT plus exact word-level SRT/alignment, seal narration QC, and write its local timeline fragment. Select visual anchors from real word timestamps, not sentence estimates. No animation source is authorized yet.
+5. **Scene-local audio and timing lock.** Lock that scene's exact script only
+   after author self-review, distinct independent review, and the user's exact
+   script approval. Then synthesize and listen to its audio, generate reader
+   SRT plus exact word-level SRT/alignment, seal narration QC, and write its
+   local timeline fragment. Select visual anchors from real word timestamps,
+   not sentence estimates. No animation source is authorized yet. ASR is
+   machine evidence and never silently replaces a human listen.
 6. **Complete and independently review the timing-bound visual plan.** Replace every provisional clause handoff with exact word anchors, run deterministic scene-plan validation, then give the complete visual plan to a reviewer who is not its author. The reviewer must pass novice causality, mathematical-object truth, stage choreography/attention, visual composition/finish, and production/audio-handoff feasibility; every stage state and transition receives concrete evidence. Keyframes can strengthen a finding but cannot compensate for a missing plan field. A sealed `visual_plan_review.json`, exact `scene_production.json`, and compiled registry jointly authorize animation production. A later semantic, stage, composition, identity, audio, timing, or handoff change invalidates the corresponding hashes and requires revalidation; material visual-plan changes require another independent plan pass.
 7. **Word-first animation production.** Only after the exact scene WAV, alignment, narration QC, `scene_production.json`, and execution registry exist may final animation source be written. Compile every spoken clause
    into a word-anchored action whose rendered mathematical driver changes by a
@@ -39,6 +45,21 @@ review check passes. Workflow-v2 `phase-start` requires the sealed
 `--visual-plan-review` and exact audio-aligned `--scene-production` before
 authoring or rendering; a workflow-v1 `design_readiness.json` or silent
 animatic cannot substitute for either gate.
+New episodes use workflow v3, which additionally requires the profile-bound
+`--narration-workflow`: TTS/ASR may start only from `tts_input_locked`, and
+animation authoring/render only from `animation_authorized`. The latter state
+is sealed only after exact user script approval and current post-TTS
+readiness/scene-production bindings. See `references/narration-workflow.md`.
+
+If narration is repaired after animation already exists, do not pretend that
+the normal ordering was followed. Open the explicit post-animation narration
+repair state, preserve the previous media lineage, invalidate every affected
+audio/timing/plan/QC/review/assembly artifact, and rebind from current bytes.
+The default is to freeze animation source and reuse pixels only when decoded
+evidence proves they remain valid. Any wording change reopens the full
+author-reviewer-user script gate; pronunciation or delivery-only repair may
+retain the exact script approval but must still rebuild all downstream audio
+and timing evidence.
 Every seal attempt is retained in `visual_plan_review_attempts.jsonl`, including
 probe-backed rejections. Authoring/render phase events retain both the reviewed
 and explicitly supplied scene-production hashes. Use these records in the next

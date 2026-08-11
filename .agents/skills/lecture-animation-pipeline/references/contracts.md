@@ -830,11 +830,31 @@ to spawn. The main agent normally uses the initial three slots for production
 owners and remains the independent acceptance reviewer.
 
 The session also seals `task_queue`. Initial assignments occupy active queue
-rows; `--planned-task TASK_KEY|ROLE|SCOPE` adds later pending work. Assignment
-completion updates both the roster member and its queue row. `status` keeps
-`should_continue_monitoring` true while any task is active, pending, or blocked,
-even if every current agent is momentarily idle. `finish` rejects pending or
-blocked queue rows. Adding work after `begin` is exceptional and requires a
+rows; `--planned-task TASK_KEY|ROLE|SCOPE` adds unowned later work, while
+`--preassigned-task AGENT_ID|TASK_KEY|ROLE|SCOPE|MODEL` adds ordered,
+contract-ready work that only the named stable identity may auto-claim.
+Preassignment preserves role and model and records `queue_position` and
+`claim_policy`. `agent-plan` returns the current assignment, complete
+preauthorized queue, open review-todo count, and pending work requests for one
+roster identity.
+
+`complete-and-claim-next` is one locked transition. It validates the active
+agent/task pair, rejects undelivered review todos, SHA-binds the completion
+evidence, completes the current assignment and queue row, and activates the
+next ordered compatible preassignment. If none exists, it writes a durable
+pending `work_request` with `main_notification_required: true` and returns
+`dispatch_result.action: notify_supervisor`. `request-work` provides the same
+durable request for an already reusable identity. A subsequent `assign-task`
+resolves the request and cannot consume another identity's preassignment;
+`preassign-task` may append compatible future work with a concrete reason.
+`resolve-work-request` may close a request without work only as
+`resolved_no_safe_work` or `cancelled`, both with a concrete reason.
+
+Assignment completion updates both the roster member and its queue row.
+`status` keeps `should_continue_monitoring` true while any task is active,
+pending, or blocked, or any work request remains pending, even if every current
+agent is momentarily idle. `finish` rejects pending or blocked queue rows and
+pending work requests. Adding work after `begin` is exceptional and requires a
 concrete reason; normal episode and batch work must be declared up front.
 
 `assign-task` is the normal rolling transition. It accepts an `idle`,

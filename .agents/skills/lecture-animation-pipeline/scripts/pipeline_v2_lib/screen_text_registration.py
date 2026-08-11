@@ -1269,16 +1269,21 @@ def screen_text_experiment_report(
         status = "target_met" if meets else "target_not_met"
     baseline_escape_issues = baseline.get("human_screen_text_escape_issue_count")
     current_escape_issues = current.get("human_screen_text_escape_issue_count")
+    comparison_observed = current.get("instrumentation_status") == "observed"
     escape_issue_delta = (
         int(current_escape_issues) - int(baseline_escape_issues)
-        if current_escape_issues is not None and baseline_escape_issues is not None
+        if comparison_observed
+        and current_escape_issues is not None
+        and baseline_escape_issues is not None
         else None
     )
     baseline_escape_payloads = baseline.get("human_screen_text_escape_payload_count")
     current_escape_payloads = current.get("human_screen_text_escape_payload_count")
     escape_payload_delta = (
         int(current_escape_payloads) - int(baseline_escape_payloads)
-        if current_escape_payloads is not None and baseline_escape_payloads is not None
+        if comparison_observed
+        and current_escape_payloads is not None
+        and baseline_escape_payloads is not None
         else None
     )
     return {
@@ -1294,19 +1299,38 @@ def screen_text_experiment_report(
         "baseline_evidence_checks": baseline_evidence_checks,
         "current": current,
         "comparison": {
+            "status": (
+                "observed"
+                if comparison_observed
+                else "unknown_missing_current_instrumentation"
+            ),
             "human_screen_text_escape_issue_delta": escape_issue_delta,
             "human_screen_text_escape_payload_delta": escape_payload_delta,
-            "human_screen_text_escape_payload_attribution_coverage": current.get(
-                "human_screen_text_escape_payload_attribution_coverage"
+            "human_screen_text_escape_payload_attribution_coverage": (
+                current.get("human_screen_text_escape_payload_attribution_coverage")
+                if comparison_observed
+                else None
             ),
-            "human_screen_text_overblock_issue_count": current.get(
-                "human_screen_text_overblock_issue_count"
+            "human_screen_text_overblock_issue_count": (
+                current.get("human_screen_text_overblock_issue_count")
+                if comparison_observed
+                else None
             ),
-            "pre_source_prevention_count": current.get(
-                "prevented_before_source_count"
+            "pre_source_prevention_count": (
+                current.get("prevented_before_source_count")
+                if comparison_observed
+                else None
             ),
-            "decision_gate_terminal_coverage": current.get("terminal_coverage"),
-            "scene_gate_coverage": current.get("scene_gate_coverage"),
+            "decision_gate_terminal_coverage": (
+                current.get("terminal_coverage")
+                if comparison_observed
+                else None
+            ),
+            "scene_gate_coverage": (
+                current.get("scene_gate_coverage")
+                if comparison_observed
+                else None
+            ),
             "causal_interpretation": (
                 "A lower post-gate human escape count plus observed pre-source prevention "
                 "supports effectiveness; tooling on the baseline episode alone proves only instrumentation."

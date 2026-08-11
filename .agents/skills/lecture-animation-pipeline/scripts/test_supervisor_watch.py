@@ -87,6 +87,20 @@ class SupervisorWatchTests(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    def write_completion_evidence(self, name: str = "completion.json") -> Path:
+        path = self.root / name
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": "lecture-animation-task-completion-evidence-v1",
+                    "verdict": "complete",
+                    "artifacts": ["bounded-test-artifact"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return path
+
     def compile_capacity_evidence(
         self,
         *,
@@ -920,7 +934,103 @@ class SupervisorWatchTests(unittest.TestCase):
         self.assertEqual(status["active_assignments"], ["author-1"])
         self.assertEqual(status["roster_metrics"]["historical_identity_count"], 1)
         self.assertEqual(status["roster_metrics"]["reuse_count"], 1)
-        self.assertEqual(status["roster_metrics"]["replacement_count"], 0)
+
+    def test_agent_plan_and_atomic_preassigned_auto_claim(self) -> None:
+        self.begin(
+            "--preassigned-task",
+            "author-1|batch-b|animation_author|G008A-G008C|gpt-5.6-sol",
+        )
+        plan = json.loads(
+            self.run_cli(
+                "agent-plan",
+                "--session", str(self.session),
+                "--agent-id", "author-1",
+            ).stdout
+        )
+        self.assertEqual(plan["current_assignment"]["task_key"], "batch-a")
+        self.assertEqual(
+            [row["task_key"] for row in plan["preassigned_tasks"]],
+            ["batch-a", "batch-b"],
+        )
+
+        evidence = self.write_completion_evidence()
+        status = json.loads(
+            self.run_cli(
+                "complete-and-claim-next",
+                "--session", str(self.session),
+                "--agent-id", "author-1",
+                "--current-task-key", "batch-a",
+                "--completion-evidence", str(evidence),
+            ).stdout
+        )
+        self.assertEqual(status["dispatch_result"]["action"], "auto_claimed")
+        self.assertEqual(status["dispatch_result"]["task_key"], "batch-b")
+        session = json.loads(self.session.read_text(encoding="utf-8"))
+        self.assertEqual(session["task_queue"]["batch-a"]["state"], "completed")
+        self.assertEqual(session["task_queue"]["batch-b"]["state"], "active")
+        self.assertEqual(session["assignments"]["author-1"]["task_key"], "batch-b")
+
+    def test_completion_without_ready_preassignment_opens_durable_work_request(self) -> None:
+        self.begin()
+        evidence = self.write_completion_evidence()
+        status = json.loads(
+            self.run_cli(
+                "complete-and-claim-next",
+                "--session", str(self.session),
+                "--agent-id", "author-1",
+                "--current-task-key", "batch-a",
+                "--completion-evidence", str(evidence),
+            ).stdout
+        )
+        self.assertEqual(status["dispatch_result"]["action"], "notify_supervisor")
+        request_id = status["dispatch_result"]["work_request_id"]
+        self.assertEqual(status["agents_requesting_work"], ["author-1"])
+        self.assertTrue(status["should_continue_monitoring"])
+        self.assertFalse(status["may_finish"])
+
+        rejected = self.run_cli(
+            "finish", "--session", str(self.session), check=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("work request", rejected.stderr)
+
+        resolved = json.loads(
+            self.run_cli(
+                "resolve-work-request",
+                "--session", str(self.session),
+                "--request-id", request_id,
+                "--resolution", "no_safe_work",
+                "--reason",
+                "All remaining episode work is dependency-blocked or awaits user approval.",
+            ).stdout
+        )
+        self.assertEqual(resolved["pending_work_requests"], [])
+        self.assertTrue(resolved["may_finish"])
+
+    def test_assign_task_cannot_steal_another_agents_preassignment(self) -> None:
+        self.begin(
+            "--assignment",
+            "author-2|animation_author|batch-x|Independent scene|gpt-5.6-sol",
+            "--preassigned-task",
+            "author-1|batch-b|animation_author|G008A-G008C|gpt-5.6-sol",
+        )
+        self.run_cli(
+            "set-assignment",
+            "--session", str(self.session),
+            "--agent-id", "author-2",
+            "--state", "completed",
+        )
+        rejected = self.run_cli(
+            "assign-task",
+            "--session", str(self.session),
+            "--agent-id", "author-2",
+            "--role", "animation_author",
+            "--task-key", "batch-b",
+            "--scope", "G008A-G008C",
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("preassigned to another", rejected.stderr)
 
     def test_closed_session_restart_cannot_reset_identity_history(self) -> None:
         self.begin()

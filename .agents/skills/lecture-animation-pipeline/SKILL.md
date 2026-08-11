@@ -62,7 +62,10 @@ explicitly says so. The phrase means all of the following, in order:
    Protected assets include the approved final MP4, native final segments,
    final mixed and voice-only WAVs, every approved scene WAV, reader/word
    subtitles and alignment, approved inputs/review packages, final manifest,
-   QC/contact sheet, completion receipt, and portability evidence.
+   QC/contact sheet, completion receipt, portability evidence, the canonical
+   phase/outcome/review/repair ledgers, supervisor session, task capsules, and
+   all human/accepted-agent feedback plus issue records needed for a truthful
+   retrospective.
 3. Promote the protected ignored/generated assets by exact hash into the
    canonical filesystem checkout at `/Volumes/bocchi/myLectures`. A temporary
    worktree checked out on `main` may be used to perform a safe merge, but it
@@ -106,7 +109,7 @@ artifacts by path and hash; it does not paste those artifacts into the prompt.
 |---|---|
 | New episode, initialization, or eight-hour scheduling | `references/eight-hour-production.md`, `references/preflight-portability-and-handoffs.md`, `references/orchestration-and-supervision.md`, and `references/autopilot-efficiency.md` |
 | Production-mode choice, worktrees, stable roster, supervision, or restart | `references/orchestration-and-supervision.md` |
-| Lecture, narration, TTS, alignment, screen text, or progressive locking | `references/progressive-planning-and-audio.md` and `references/preflight-portability-and-handoffs.md` |
+| Lecture, narration writing/review, TTS, alignment, screen text, or progressive locking | `references/narration-workflow.md`, `references/progressive-planning-and-audio.md`, and `references/preflight-portability-and-handoffs.md` |
 | Efficiency contract, phase accounting, metric policy, or batch launch | `references/autopilot-efficiency.md` |
 | Operational overrun, expired wrapper, metric recovery, or special continuation | `references/operational-recovery.md` in addition to the active-phase reference |
 | Scene design, implementation, candidate freeze, self-review, independent review, or repair | `references/authoring-philosophy.md` and `references/scene-production-and-review.md` |
@@ -117,6 +120,59 @@ artifacts by path and hash; it does not paste those artifacts into the prompt.
 when an existing receipt or command names one of its historical schemas. It is
 never part of a new episode's startup context and never establishes a new
 precedent.
+
+## Executable Episode Startup
+
+A new episode may not rely on a chat plan for its startup. The only permitted
+pre-`T0` mutation is Git bootstrap: create one dedicated integration worktree
+under `/Volumes/bocchi/myLectures-worktrees/codex-<episode>` from the current
+canonical commit, without creating episode content. Run repo preflight and
+`begin-delivery-clock` from that integration worktree. The canonical checkout
+at `/Volumes/bocchi/myLectures` remains the final promotion destination; the
+dedicated integration worktree is the live control root until consolidation.
+
+Before leaving the delivery clock's `initialization` stage, create and seal one
+`lecture-animation-episode-startup-v1` contract with
+`seal-episode-startup --require-clean`. It must bind:
+
+- the exact user startup brief and all known human-feedback regressions;
+- production mode, runtime slot count, main reviewer, stable producer IDs,
+  dedicated worktree paths, unique branches, and author/reviewer separation;
+- the pipeline preflight, delivery clock, efficiency contract, metric policy,
+  and one supervisor session;
+- one episode evidence root and shared phase ledger used by every worktree;
+- source/assets inventories, the fixed-ending source, and the rule that every
+  scene review video is delivered immediately at 1080p or better.
+
+Start from
+`references/episode-startup-contract.example.json`; replace every placeholder
+with a live path, branch, stable agent ID, and current receipt. Then seal it:
+
+```bash
+python3 "$SKILL/scripts/pipeline_v2.py" seal-episode-startup \
+  --repo-root . --episode "$EPISODE" \
+  --contract "$EPISODE/review/v2/episode_startup.json" \
+  --output "$EPISODE/review/v2/episode_startup_receipt.json" \
+  --require-clean
+```
+
+For `parallel_batches`, the deterministic starting producer count is
+`min(coherent_batch_count, runtime_slots - 1, 4)`: one runtime slot remains for
+the main acceptance reviewer. A smaller roster requires a concrete capacity
+reason in the startup contract; a larger roster requires the later compiled
+capacity-expansion path. This means a four-slot host normally starts three
+producers, while a sufficiently independent wide episode on a five-or-more-slot
+host normally starts four. Do not make the user discover or correct the roster
+after production begins.
+
+The `lecture_approval` delivery-clock checkpoint still binds the approved
+lecture draft through `--artifact`, and additionally requires the clean startup
+receipt through `--startup-receipt`. Until both pass, subagents may inspect or
+prepare bounded inventories, but they may not receive source-authoring
+authority. Send each retained agent a hash-bound task capsule rather than a
+full chat-history fork. See
+`references/orchestration-and-supervision.md` for the exact topology and
+`references/preflight-portability-and-handoffs.md` for the shared evidence root.
 
 ## Eight-Hour Delivery Contract
 
@@ -147,10 +203,13 @@ Choose and seal exactly one production mode in `episode_visual_spine.json`:
   runtime, cost budget, scene independence, and reviewer capacity. On a
   four-slot host the normal shape is one main reviewer plus three producers;
   another run may deliberately use fewer or more, from one through eight.
-  Start with at most three identities. A larger sealed ceiling is not spawn
-  permission: reuse every opened compatible identity, including one whose task
-  was cancelled, and add a new identity only after fresh availability and
-  compiled reviewer-starvation/cost evidence prove reuse unavailable.
+  Start with the producer count sealed by the executable startup contract,
+  normally three on a four-slot host and up to four for a wide episode with at
+  least five slots and four coherent independent batches. A larger sealed
+  ceiling is not spawn permission: reuse every opened compatible identity,
+  including one whose task was cancelled, and add a new identity only after
+  fresh availability and compiled reviewer-starvation/cost evidence prove
+  reuse unavailable.
   Producers own bounded coherent scene groups in separate `agent/...`
   worktrees.
 
@@ -161,11 +220,32 @@ input paths, hashes, output paths, acceptance checks, and stopping conditions.
 One author owns later repairs for its scene, but the main reviewer—not the
 author—decides acceptance.
 
+Before dispatch, give each producer its current task plus an ordered set of
+compatible, already-safe `--preassigned-task` rows. The producer reads that
+queue with `agent-plan` and, before becoming idle, must call
+`complete-and-claim-next` with hash-bound completion evidence. The transition
+either atomically activates the next preauthorized task or opens a durable
+work request that the producer must immediately send to the main agent. It
+never permits arbitrary self-selection, role/model changes, or bypass of the
+scene's planning, audio, boundary, authoring, review, or user gates. An open
+work request blocks supervisor `finish`.
+
 Production rolls scene by scene. As soon as one scene has a current sealed
 author self-review, the main agent reviews it while that owner advances safe
 work on the next scene. Present each `user_review_pending` 1080p-or-better
 video immediately. Do not wait for an entire group, and do not use low-
 resolution human-review renders when rendering is not the bottleneck.
+
+Production independence means separate bounded ownership, worktree/source,
+scene-local locks, implementation, and review evidence. Content continuity
+means adjacent learner state, mathematical identity carriers, narration/audio
+handoff, and visual exit/entry state agree. The main-authored boundary handoff
+contract unifies them: `adjacency_contracts` inside a batch and matching
+`batch_exit_contract`/`batch_entry_contract` across batches freeze the shared
+edge while `freedom_inside` leaves the interior independent. Therefore only an
+unresolved defect that crosses a scene's exact dependency boundary may block
+dependent implementation; other contract-ready scenes and non-authoring safe
+work continue.
 
 Report only important milestones by default: a new blocker requiring a user
 decision, a scene ready for human review, a human verdict applied, final
@@ -190,13 +270,34 @@ is timing evidence, not narration truth. Every formal token used in TTS has an
 explicit tested spoken form; ambiguous symbols are never left to provider
 guesswork.
 
+Narration uses the profile-bound state machine in
+`references/narration-workflow.md`. An explicit audience profile, frozen
+script candidate, author self-review, distinct independent review, and exact
+user approval are required before TTS input can lock. TTS lock is not animation
+authority. New episodes use workflow gate v3: TTS/ASR require
+`tts_input_locked`, while animation authoring/render require
+`animation_authorized`, sealed from current post-TTS readiness and the exact
+scene-production inventory. The normal route is always script approval before
+animation.
+
+Changing narration after animation exists is a named exceptional repair, not
+a shortcut and not the next episode's default. It requires exact user
+authority, the current approved media lineage, affected scenes and cue
+windows, and complete downstream invalidation. A wording change reopens the
+full author -> independent reviewer -> user script gate; delivery-only repair
+may retain exact script approval but still rebuilds audio, ASR, alignment,
+subtitles, timeline, planning bindings, QC, review manifests, and final
+assembly. Animation source stays frozen unless the user explicitly authorizes
+source changes.
+
 ## Scene State Machine
 
 Use the canonical CLI under `scripts/pipeline_v2.py`; do not hand-edit receipts
 or replace failed gates with prose. A normal scene advances only through:
 
-`profile compiled -> first-principles design -> exact script/audio listening
-and alignment lock -> final word-timed detailed plan -> independent plan review
+`profile compiled -> first-principles design -> exact script author/reviewer/user
+approval -> TTS/listening/ASR/alignment lock -> narration animation release ->
+final word-timed detailed plan -> independent plan review
 -> authoring -> candidate freeze ->
 five-layer author self-review -> distinct five-layer independent review ->
 user_review_pending -> human approve/revise`.

@@ -1,0 +1,14 @@
+{
+  "schema": "lecture-animation-audience-profile-registry-v1",
+  "default_profile_id": null,
+  "selection_policy": "explicit_only",
+  "profiles": [
+    {
+      "profile_id": "mpm_mass_access_undergraduate_60_after_one_year_r01",
+      "path": "references/audience-profiles/math-physics-methods-mass-access-r01.json",
+      "course_scope": "数学物理方法大众本科课程",
+      "status": "active"
+    }
+  ],
+  "future_profile_policy": "Other series must add and explicitly bind their own profile. No course silently inherits this profile."
+}

@@ -8,7 +8,9 @@ the canonical Skill.
 
 ## 1. Clock and terminal state
 
-Run `preflight-pipeline-release` at repository scope before the episode exists.
+Before the episode exists, create only the empty dedicated integration Git
+worktree described by the canonical Skill; this Git bootstrap may not create
+episode files or production artifacts. Run `preflight-pipeline-release` there.
 `begin-delivery-clock` is then the first episode command. Its emitted timestamp is
 `T0`; it creates the previously absent or empty episode directory before the
 production mode, roster, source inventory, user authority, or any other
@@ -26,6 +28,15 @@ python3 "$SKILL/scripts/pipeline_v2.py" begin-delivery-clock \
   --max-production-agents 3 --max-frozen-candidates 2 \
   --output "$DELIVERY_CLOCK"
 ```
+
+Initialization is not complete when these files merely exist. After creating
+the stable roster and producer worktrees, run `seal-episode-startup
+--require-clean`. The first `checkpoint --stage lecture_approval` keeps the
+approved lecture draft as `--artifact` and requires this receipt separately as
+`--startup-receipt`; a prose checklist cannot substitute for it. This makes
+worktree topology, reviewer separation, user constraints, fixed ending,
+review-video delivery, and the shared evidence root executable rather than
+advisory.
 
 Pause the active clock only for:
 
@@ -221,8 +232,12 @@ time rather than a chat estimate.
 Use one supervisor session, the sealed number of long-lived batch tasks, and
 the original scene owner for repairs. Reuse every compatible reusable roster
 member before authorizing another identity; a cancelled batch does not cancel
-the opened identity. The ceiling is flexible from one through eight, but start
-with at most three producers and expand only from compiled evidence. When the
+the opened identity. The ceiling is flexible from one through eight. The
+startup producer count is `min(coherent_batch_count, runtime_slots - 1, 4)`,
+so it is three on a four-slot host and may be four on a wide independent
+episode with at least five slots. Start below that value only with a concrete
+capacity reason sealed by `seal-episode-startup`; expand beyond it only from
+compiled evidence. When the
 sealed cap has unused room, `authorize-capacity` still requires a fresh sealed
 availability snapshot, an exact pending task, zero queued
 candidates, at least five measured reviewer-wait minutes, positive cumulative
@@ -520,7 +535,9 @@ tracker assembled and writes the canonical completion receipt. Then advance
 each already approved delivery-board scene exactly once to `assembled`, using
 that completion receipt as `--evidence`. Do not hand-edit the board or skip a
 scene. Run the passing portability audit only after the canonical final bytes
-are in place. The clock recompiles all three sources, compares the final-video
+and the phase/outcome/review/repair ledgers, supervisor session, task capsules,
+human feedback, accepted-agent feedback, and issue records are in place. The
+clock recompiles all three sources, compares the final-video
 path and SHA-256 across the completion and portability receipts, and only then
 enters `upload_ready`:
 

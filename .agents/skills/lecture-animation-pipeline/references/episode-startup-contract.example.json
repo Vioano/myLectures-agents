@@ -1,0 +1,56 @@
+{
+  "schema": "lecture-animation-episode-startup-v1",
+  "episode": "videos/NNNN-slug",
+  "production_mode": "parallel_batches",
+  "runtime_slots": 5,
+  "planned_batch_count": 4,
+  "main_agent_id": "/root",
+  "acceptance_reviewer_agent_id": "/root",
+  "startup_brief_path": "videos/NNNN-slug/review/v2/episode_startup_brief.md",
+  "startup_decisions": {
+    "human_feedback_inventory_complete": true,
+    "source_inventory_complete": true,
+    "asset_inventory_complete": true,
+    "fixed_ending_source_locked": true,
+    "reviewer_author_separation_locked": true,
+    "per_scene_review_delivery_locked": true,
+    "canonical_evidence_root_locked": true,
+    "review_delivery_mode": "per_scene_immediate_1080p_or_better",
+    "human_feedback_route": "main_agent_compile_before_authoring"
+  },
+  "canonical_evidence_root": "videos/NNNN-slug/review/evolution",
+  "canonical_phase_ledger": "videos/NNNN-slug/review/evolution/episode_phase_events.jsonl",
+  "worktree_root": "/Volumes/bocchi/myLectures-worktrees",
+  "integration_worktree": "/Volumes/bocchi/myLectures-worktrees/codex-NNNN-slug",
+  "integration_branch": "codex/NNNN-slug",
+  "producer_roster": [
+    {
+      "agent_id": "/root/batch-a",
+      "worktree": "/Volumes/bocchi/myLectures-worktrees/epNNNN-batch-a",
+      "branch": "agent/epNNNN-batch-a"
+    },
+    {
+      "agent_id": "/root/batch-b",
+      "worktree": "/Volumes/bocchi/myLectures-worktrees/epNNNN-batch-b",
+      "branch": "agent/epNNNN-batch-b"
+    },
+    {
+      "agent_id": "/root/batch-c",
+      "worktree": "/Volumes/bocchi/myLectures-worktrees/epNNNN-batch-c",
+      "branch": "agent/epNNNN-batch-c"
+    },
+    {
+      "agent_id": "/root/batch-d",
+      "worktree": "/Volumes/bocchi/myLectures-worktrees/epNNNN-batch-d",
+      "branch": "agent/epNNNN-batch-d"
+    }
+  ],
+  "capacity_reason": "",
+  "required_receipts": {
+    "pipeline_preflight": ".pipeline-preflight.json",
+    "delivery_clock": "videos/NNNN-slug/review/evolution/delivery_clock.json",
+    "efficiency_contract": "videos/NNNN-slug/review/evolution/episode_efficiency_contract.json",
+    "metric_policy": "videos/NNNN-slug/review/evolution/metric_policy.json",
+    "supervisor_session": "videos/NNNN-slug/review/v2/supervisor_session.json"
+  }
+}

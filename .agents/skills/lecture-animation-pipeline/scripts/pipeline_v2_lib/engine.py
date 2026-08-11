@@ -36,6 +36,7 @@ from .episode_ops import (
     add_episode_ops_subparsers,
     command_episode_preflight,
     run_portability_audit,
+    validate_episode_startup_receipt,
     validate_episode_readiness_receipt,
 )
 from .metrics import (
@@ -46,6 +47,10 @@ from .metrics import (
     phase_metrics,
     shared_phase_accounting_identity,
     unique_phase_events,
+)
+from .narration_workflow import (
+    add_narration_workflow_subparsers,
+    validate_narration_workflow_for_phase,
 )
 from .presentation_boundary import presentation_boundary_violation
 from .review_state import commit_review_attempt, create_review_session, record_human_false_pass
@@ -14602,6 +14607,28 @@ def command_transition_delivery_clock(args: argparse.Namespace) -> int:
                 raise PipelineError(
                     "delivery checkpoint requires the stage exit artifact"
                 )
+            if args.stage == "lecture_approval":
+                if not args.startup_receipt:
+                    raise PipelineError(
+                        "lecture-approval entry requires the clean executable "
+                        "episode startup receipt"
+                    )
+                episode = resolve_stored_path(
+                    str(clock["episode"]), repo_root
+                ).resolve()
+                startup_path = resolve_stored_path(
+                    args.startup_receipt, repo_root
+                ).resolve()
+                startup_errors = validate_episode_startup_receipt(
+                    startup_path,
+                    repo_root=repo_root,
+                    episode=episode,
+                )
+                if startup_errors:
+                    raise PipelineError(
+                        "lecture-approval entry requires the clean executable "
+                        "episode startup receipt: " + " | ".join(startup_errors)
+                    )
             if args.stage == "episode_spine":
                 approval_path = resolve_stored_path(
                     args.artifact, repo_root
@@ -15324,7 +15351,7 @@ def validate_episode_efficiency_contract(
         )
     except (TypeError, ValueError):
         workflow_gate_version = 0
-    if workflow_gate_version not in {1, 2}:
+    if workflow_gate_version not in {1, 2, 3}:
         errors.append("episode efficiency workflow_gate_version is invalid")
     errors.extend(
         validate_efficiency_budget_data(
@@ -31772,6 +31799,46 @@ def command_phase_start(args: argparse.Namespace) -> int:
         workflow_gate_version >= 2
         and args.phase in {"tts", "asr"}
     )
+    workflow_v3_narration_phase = (
+        workflow_gate_version >= 3
+        and args.phase in {"tts", "asr", "authoring", "render"}
+    )
+    narration_workflow_binding: dict[str, Any] = {}
+    if workflow_v3_narration_phase:
+        narration_workflow_raw = str(
+            getattr(args, "narration_workflow", "") or ""
+        ).strip()
+        if not narration_workflow_raw:
+            raise PipelineError(
+                "workflow v3 requires --narration-workflow; animation cannot "
+                "start before exact user script approval, TTS/ASR/alignment, "
+                "and the sealed narration animation release"
+            )
+        narration_workflow_path = resolve_stored_path(
+            narration_workflow_raw,
+            repo_root,
+        )
+        narration_workflow = validate_narration_workflow_for_phase(
+            narration_workflow_path,
+            repo_root=repo_root,
+            phase=str(args.phase),
+        )
+        narration_workflow_binding = {
+            "narration_workflow_path": relative_or_absolute(
+                narration_workflow_path,
+                repo_root,
+            ),
+            "narration_workflow_state_hash": narration_workflow.get(
+                "state_hash"
+            ),
+            "narration_workflow_status": narration_workflow.get("status"),
+            "narration_candidate_hash": (
+                narration_workflow.get("current_candidate") or {}
+            ).get("candidate_hash"),
+            "narration_animation_release_sha256": (
+                narration_workflow.get("animation_release") or {}
+            ).get("sha256"),
+        }
     expensive_phase = args.phase == "tts" or (
         args.phase == "render"
         and phase_purpose in {"candidate", "repair_rerender", "technical_retry"}
@@ -31879,6 +31946,7 @@ def command_phase_start(args: argparse.Namespace) -> int:
                 ),
             }
         )
+        readiness_binding.update(narration_workflow_binding)
     elif workflow_v2_audio_phase:
         episode_readiness_path = getattr(args, "episode_readiness", None)
         if not episode_readiness_path:
@@ -31908,6 +31976,7 @@ def command_phase_start(args: argparse.Namespace) -> int:
             ),
             "episode_readiness_hash": episode_readiness.get("receipt_hash"),
         }
+        episode_readiness_binding.update(narration_workflow_binding)
     elif expensive_phase:
         episode_readiness_path = getattr(args, "episode_readiness", None)
         if not episode_readiness_path:
@@ -36837,6 +36906,19 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         )
         if path.is_file() and clean_path(path)
     ]
+    legacy_cutoff = datetime.fromisoformat("2026-07-24T00:00:00+00:00")
+    latest_master_created_at: datetime | None = None
+    if latest_approved_master:
+        try:
+            latest_master_created_at = datetime.fromisoformat(
+                str(latest_approved_master[1].get("created_at", ""))
+            )
+        except (TypeError, ValueError):
+            latest_master_created_at = None
+    legacy_master_eligible = bool(
+        latest_master_created_at
+        and latest_master_created_at.astimezone(timezone.utc) < legacy_cutoff
+    )
     if (
         completion_receipts
         and latest_approved_master
@@ -36855,6 +36937,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         and passing_portability
         and final_videos
         and portability_receipt_matches_latest
+        and legacy_master_eligible
     ):
         completion_status = "legacy_approved_master"
     else:
@@ -37076,6 +37159,36 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
             for path in sorted(final_videos)
         ],
     }
+    supplement_path = (
+        episode / "review" / "evolution" / "retrospective_supplement.json"
+    )
+    supplemental_production_evidence: dict[str, Any] | None = None
+    if supplement_path.is_file():
+        supplement = load_json(supplement_path)
+        if (
+            supplement.get("schema")
+            == "lecture-animation-retrospective-supplement-v1"
+            and validate_hashed_record(supplement, "supplement_hash")
+            and isinstance(supplement.get("evidence"), dict)
+        ):
+            supplemental_production_evidence = dict(supplement["evidence"])
+            evidence_paths["retrospective_supplement"] = artifact_snapshot(
+                supplement_path,
+                repo_root,
+            )
+        else:
+            bottleneck_signals.append(
+                {
+                    "signal_type": "observability_gap",
+                    "category": "invalid_retrospective_supplement",
+                    "value": 1,
+                    "unit": "invalid_artifact",
+                    "evidence": relative_or_absolute(
+                        supplement_path,
+                        repo_root,
+                    ),
+                }
+            )
     review_root = episode / "review"
     review_artifacts = [
         path
@@ -37091,10 +37204,49 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         and ("review" in path.name.lower() or path.name == "review.mp4")
     ]
     efficiency_target = default_efficiency_budget()
-    efficiency_token_status = token_budget_observation(
-        metrics.get("token_usage", {}),
-        efficiency_target,
+    token_event_coverage = float(
+        metrics.get("observability", {}).get(
+            "token_usage_coverage",
+            0.0,
+        )
+        or 0.0
     )
+    if token_event_coverage <= 0.0:
+        efficiency_token_status = {
+            "observation_status": "unknown_no_token_telemetry",
+            "observed": None,
+            "limits": {
+                field: int(efficiency_target.get(field, 0) or 0)
+                for field in (
+                    "raw_input_plus_output_tokens",
+                    "uncached_input_tokens",
+                    "output_tokens",
+                    "reasoning_tokens",
+                )
+            },
+            "ratios": None,
+            "warning_fraction": float(
+                efficiency_target.get("warning_fraction", 0.75) or 0.75
+            ),
+            "near_limit": None,
+            "exceeded": None,
+            "within_budget": None,
+        }
+    else:
+        efficiency_token_status = token_budget_observation(
+            metrics.get("token_usage", {}),
+            efficiency_target,
+        )
+        efficiency_token_status["observation_status"] = (
+            "observed_complete"
+            if token_event_coverage >= 1.0
+            else "observed_incomplete"
+        )
+        if (
+            token_event_coverage < 1.0
+            and not efficiency_token_status["exceeded"]
+        ):
+            efficiency_token_status["within_budget"] = None
     phase_pair_coverage = float(
         metrics.get("phase_pair_scene_coverage", 0.0) or 0.0
     )
@@ -37113,7 +37265,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         active_budget_status = "unknown_incomplete_phase_coverage"
     else:
         active_budget_status = "within_budget"
-    if efficiency_token_status["exceeded"]:
+    if efficiency_token_status.get("exceeded"):
         token_budget_status = "exceeded"
     elif float(
         metrics.get("observability", {}).get(
@@ -37125,6 +37277,36 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         token_budget_status = "unknown_incomplete_coverage"
     else:
         token_budget_status = "within_budget"
+
+    reported_metrics = json.loads(json.dumps(metrics))
+    if not ledger_rows.get("outcomes"):
+        for key in (
+            "outcome_events",
+            "human_judged",
+            "human_judged_scenes",
+            "human_rejections",
+            "human_rejection_rate",
+            "candidate_human_rejection_rate",
+            "human_rejected_scene_count",
+            "human_rejected_scene_rate",
+            "scene_ever_rejected_rate",
+            "false_passes",
+            "false_pass_rate",
+            "candidate_false_pass_rate",
+            "false_pass_scene_count",
+            "false_pass_scene_rate",
+            "scene_false_pass_rate",
+        ):
+            reported_metrics[key] = None
+    if not metrics.get("scenes_planned") and not ledger_rows.get("phases"):
+        for key in (
+            "scenes_observed",
+            "scenes_with_any_events",
+            "scenes_with_phase_telemetry",
+            "scenes_planned",
+            "scene_count",
+        ):
+            reported_metrics[key] = None
 
     result: dict[str, Any] = {
         "schema": "lecture-animation-episode-retrospective-v2",
@@ -37157,8 +37339,10 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
                 and completion_receipt_matches_latest
                 and portability_receipt_matches_latest
             ),
+            "legacy_master_eligible": legacy_master_eligible,
+            "legacy_completion_cutoff": legacy_cutoff.isoformat(),
         },
-        "metrics": metrics,
+        "metrics": reported_metrics,
         "source_coverage": {
             "required_logs_expected": len(required_log_kinds),
             "required_logs_observed": len(observed_log_kinds),
@@ -37186,7 +37370,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
                 4,
             )
             if int(metrics.get("scene_count", 0) or 0)
-            else 0.0,
+            else None,
             "missing_sources": source_gaps,
             "screen_text_decision_gate_status": screen_text_experiment.get(
                 "current", {}
@@ -37231,10 +37415,16 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         "coordination_summary": {
             "supervisor_session_count": len(supervisor_summaries),
             "max_identity_count": max(identity_counts, default=None),
-            "replacement_count": sum(replacement_counts),
-            "task_count": sum(task_counts),
-            "task_reopen_count": sum(reopen_counts),
-            "review_todo_count": sum(todo_counts),
+            "replacement_count": (
+                sum(replacement_counts) if supervisor_summaries else None
+            ),
+            "task_count": sum(task_counts) if supervisor_summaries else None,
+            "task_reopen_count": (
+                sum(reopen_counts) if supervisor_summaries else None
+            ),
+            "review_todo_count": (
+                sum(todo_counts) if supervisor_summaries else None
+            ),
             "sessions": supervisor_summaries,
         },
         "review_artifact_summary": {
@@ -37281,6 +37471,10 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
             "root_cause_reference": "references/postmortem.md",
         },
     }
+    if supplemental_production_evidence is not None:
+        result["supplemental_production_evidence"] = (
+            supplemental_production_evidence
+        )
     result["retrospective_hash"] = object_hash(result)
     return result
 
@@ -41091,6 +41285,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_transition_parser.add_argument("--reason")
     delivery_transition_parser.add_argument("--artifact")
+    delivery_transition_parser.add_argument("--startup-receipt")
     delivery_transition_parser.add_argument("--efficiency-contract")
     delivery_transition_parser.add_argument("--supervisor-session")
     delivery_transition_parser.add_argument("--offline-evidence")
@@ -41124,11 +41319,11 @@ def build_parser() -> argparse.ArgumentParser:
     efficiency_parser.add_argument(
         "--workflow-gate-version",
         type=int,
-        choices=(1, 2),
-        default=2,
+        choices=(1, 2, 3),
+        default=3,
         help=(
-            "v2 requires exact scene audio/timing, then independent detailed "
-            "visual-plan review, before animation production"
+            "v3 adds the profile-bound script/user/TTS narration release to "
+            "the v2 exact scene audio/timing and visual-plan gates"
         ),
     )
     efficiency_parser.add_argument(
@@ -42255,6 +42450,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     phase_start_parser.add_argument(
+        "--narration-workflow",
+        help=(
+            "profile-bound narration workflow; workflow v3 requires "
+            "tts_input_locked for TTS/ASR and animation_authorized for "
+            "authoring/render"
+        ),
+    )
+    phase_start_parser.add_argument(
         "--episode-readiness",
         help="fresh episode-level readiness receipt required by TTS and final renders",
     )
@@ -42580,6 +42783,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--output")
     compare_parser.set_defaults(func=command_compare_iterations)
     add_screen_text_registration_subparsers(subparsers)
+    add_narration_workflow_subparsers(subparsers)
     add_episode_ops_subparsers(subparsers)
     return parser
 

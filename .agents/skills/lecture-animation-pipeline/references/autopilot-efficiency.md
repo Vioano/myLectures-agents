@@ -2,6 +2,15 @@
 
 Before planning begins, the main agent must create one episode-level efficiency contract in the canonical production checkout. It fixes the eight-hour Initialization-to-upload-ready delivery target, a separate forty-five-minute retrospective reserve, cumulative token observations or ceilings, quality targets, workflow-v2 pre-production gates, and one canonical phase ledger shared by every worktree. Rerunning the command is idempotent while the contract is active and cannot reset consumed time or tokens.
 
+The efficiency contract is necessary but not a complete startup. Before the
+delivery clock leaves `initialization`, `seal-episode-startup --require-clean`
+must bind it together with the stable roster, dedicated integration/producer
+worktrees, main acceptance reviewer, supervisor, metric policy, exact user
+startup brief, review-video delivery mode, and the canonical phase ledger.
+`transition-delivery-clock --stage lecture_approval` keeps the approved lecture
+draft as its `--artifact` and additionally rejects a missing or stale
+`--startup-receipt`.
+
 ```bash
 EFFICIENCY="$EPISODE/review/evolution/episode_efficiency_contract.json"
 python3 "$SKILL/scripts/pipeline_v2.py" begin-episode-efficiency \

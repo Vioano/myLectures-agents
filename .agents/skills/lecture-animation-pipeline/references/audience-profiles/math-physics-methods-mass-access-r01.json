@@ -1,0 +1,43 @@
+{
+  "schema": "lecture-animation-audience-profile-v1",
+  "profile_id": "mpm_mass_access_undergraduate_60_after_one_year_r01",
+  "display_name": "数学物理方法大众课程：先修课六十分且闲置一年",
+  "status": "active",
+  "scope": {
+    "course_collection": "数学物理方法",
+    "course_type": "大众化本科课程",
+    "binding_mode": "explicit_only",
+    "global_default": false,
+    "automatic_inheritance_by_other_series": false
+  },
+  "learner_snapshot": {
+    "education_stage": "本科生",
+    "prior_courses": ["微积分", "线性代数", "基础微分方程"],
+    "prior_grade_model": "约六十分，刚刚及格",
+    "time_since_use": "约一年未系统使用",
+    "current_state": "只保留名称和公式外形的模糊印象，不能可靠回忆定义、条件、系数、适用范围或操作步骤",
+    "working_memory": "通常只保留当前句和上一句；场景切换后清空"
+  },
+  "recognition_without_mastery": {
+    "taylor_baseline": "只模糊记得函数有时能写成幂的级数；不默认记得展开点、系数、收敛半径、成立区域或可展开条件",
+    "visual_recovery": "不得让画面替口播补上缺失的函数、条件或因果",
+    "ambiguity_policy": "优先测试日常语言、制作黑话和其他学科中的误读，不替观众作专家式脑补"
+  },
+  "narration_policy": {
+    "local_refresh": "当前推理依赖的函数、展开点、区域、条件或术语含义必须出现在当前句或上一句",
+    "term_first_use": "复分析术语先给具体对象和可操作解释，再给名称；一拍最多引入一个核心术语",
+    "algebra_steps": "一次至多省略一个对刚及格本科生显然的代数步骤；两步以上拆开或由画面逐步执行",
+    "formula_audio_visual_split": "短公式可以念；长公式留在画面，口播只说条件、操作、规律和结论",
+    "production_boundary": "观众不关心制作过程；卡、轨道、身份、推进、做代数等制作黑话不得成为数学解释",
+    "tone": "自然、轻松、尊重；可有少量不承担数学定义的《孤独摇滚》圈内梗，数学必须先完整",
+    "density": "每个固定口播窗口不得超过十二个 speech units 每秒"
+  },
+  "review_questions": [
+    "只凭当前句和上一句，能否说出当前函数、展开点、区域、条件和正在执行的操作？",
+    "是否把听过名称误当成掌握定义、条件或调用方法？",
+    "新术语是否先有具体对象和可操作含义，并且一拍只有一个？",
+    "是否用日常可误解的词或制作黑话替代了数学动作？",
+    "是否清楚区分形式级数、近似式和在指定区域成立的严格等式？",
+    "笑点删掉以后，数学因果是否仍然完整？"
+  ]
+}

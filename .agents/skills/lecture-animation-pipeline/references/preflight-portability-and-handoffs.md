@@ -274,6 +274,14 @@ or the ending changes.
 
 ## 2. Lossless low-token subagent handoffs
 
+Before the first handoff, seal `lecture-animation-episode-startup-v1`. Its
+`canonical_evidence_root` and `canonical_phase_ledger` are the only shared
+episode evidence destinations for the live run; every producer worktree keeps
+scene-local working evidence but writes the same phase event exactly once to
+that shared ledger. The startup contract also binds the retained agent IDs and
+worktrees, so a task capsule cannot silently authorize a replacement identity
+or a checkout outside `/Volumes/bocchi/myLectures-worktrees`.
+
 Do not transmit large source files, CLI logs, or repeated policy prose through
 chat. Put the complete bounded state on disk and send only its path and hash.
 
@@ -340,6 +348,14 @@ promoted destination is removed.
 Keep one current review package per scene or final episode. Older generated
 review variants may be removed after their issue history and accepted findings
 have been preserved as text records.
+
+Episode promotion is incomplete until the canonical checkout also contains
+the phase, outcome, review-attempt, author-self-review, repair-attempt, and
+screen-text ledgers; the final supervisor session and task capsules; and every
+human/accepted-agent feedback plus issue JSON. `episode-retrospective` must be
+able to observe those records from the canonical episode tree. A final MP4
+with those ledgers stranded only in producer worktrees is a portability pass
+for media, but not a complete process closeout.
 
 ## 4. Portability audit before final delivery or worktree cleanup
 

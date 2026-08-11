@@ -10575,6 +10575,21 @@ class PipelineV2Tests(unittest.TestCase):
         )
 
     def test_episode_retrospective_reports_coverage_before_interpretation(self) -> None:
+        supplement = {
+            "schema": "lecture-animation-retrospective-supplement-v1",
+            "evidence": {
+                "reason": "test recovered evidence",
+                "planned_scene_count": 1,
+            },
+        }
+        supplement["supplement_hash"] = pipeline.object_hash(supplement)
+        self.write_json(
+            self.episode
+            / "review"
+            / "evolution"
+            / "retrospective_supplement.json",
+            supplement,
+        )
         feedback_dir = self.episode / "review" / "human-feedback"
         feedback_dir.mkdir(parents=True, exist_ok=True)
         (feedback_dir / "real-feedback.md").write_text(
@@ -10604,7 +10619,20 @@ class PipelineV2Tests(unittest.TestCase):
             0.0,
         )
         self.assertEqual(partial["source_coverage"]["required_logs_observed"], 0)
+        self.assertIsNone(
+            partial["source_coverage"]["human_outcome_coverage"]
+        )
         self.assertEqual(partial["feedback_count"], 1)
+        self.assertEqual(
+            partial["supplemental_production_evidence"][
+                "planned_scene_count"
+            ],
+            1,
+        )
+        self.assertIn(
+            "retrospective_supplement",
+            partial["evidence_paths"],
+        )
         self.assertFalse(
             any(
                 "/._" in path
@@ -10618,10 +10646,42 @@ class PipelineV2Tests(unittest.TestCase):
             partial["interpretation_contract"]["missing_is_not_zero"]
         )
         self.assertIsNone(partial["metrics"]["review_attempts"])
+        self.assertIsNone(partial["metrics"]["scene_count"])
+        self.assertIsNone(partial["metrics"]["outcome_events"])
+        self.assertIsNone(partial["metrics"]["human_rejections"])
+        self.assertIsNone(partial["metrics"]["false_passes"])
+        self.assertIsNone(
+            partial["coordination_summary"]["task_reopen_count"]
+        )
         self.assertIsNone(
             partial["metrics"]["author_self_review_attempts"]
         )
         self.assertIsNone(partial["metrics"]["repair_attempts"])
+        self.assertEqual(
+            partial["efficiency_target"]["token_observation"][
+                "observation_status"
+            ],
+            "unknown_no_token_telemetry",
+        )
+        self.assertIsNone(
+            partial["efficiency_target"]["token_observation"]["observed"]
+        )
+        self.assertIsNone(
+            partial["efficiency_target"]["token_observation"][
+                "within_budget"
+            ]
+        )
+        self.assertEqual(
+            partial["screen_text_preregistration_experiment"]["comparison"][
+                "status"
+            ],
+            "unknown_missing_current_instrumentation",
+        )
+        self.assertIsNone(
+            partial["screen_text_preregistration_experiment"]["comparison"][
+                "human_screen_text_escape_issue_delta"
+            ]
+        )
         self.assertEqual(
             partial["metrics"]["observability"][
                 "ledger_metric_status"
@@ -10736,6 +10796,49 @@ class PipelineV2Tests(unittest.TestCase):
             ]
         )
         self.assertTrue(parsed.require_finalized)
+
+    def test_episode_retrospective_legacy_completion_requires_old_master(self) -> None:
+        final_dir = self.episode / "exports" / "final" / "approved_v01"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        video = final_dir / "upload.mp4"
+        video.write_bytes(b"legacy-video")
+        approved = final_dir / "approved_upload_master.json"
+        self.write_json(
+            approved,
+            {
+                "schema": "lecture-animation-approved-upload-master-v2",
+                "created_at": "2026-08-10T00:00:00+00:00",
+                "approval_source": "user",
+                "upload_mp4_sha256": "legacy-video-sha",
+            },
+        )
+        portability = {
+            "schema": "lecture-animation-portability-audit-v2",
+            "created_at": "2026-08-10T00:01:00+00:00",
+            "status": "pass",
+            "required_artifacts": {
+                "final_video": {"sha256": "legacy-video-sha"},
+            },
+        }
+        portability["receipt_hash"] = pipeline.object_hash(portability)
+        self.write_json(
+            self.episode / "review" / "portability.json",
+            portability,
+        )
+        current = pipeline.retrospective_evidence_data(self.root, self.episode)
+        self.assertEqual(current["completion_status"], "partial")
+        self.assertFalse(
+            current["finalization_lineage"]["legacy_master_eligible"]
+        )
+
+        old = pipeline.load_json(approved)
+        old["created_at"] = "2026-07-22T00:00:00+00:00"
+        self.write_json(approved, old)
+        legacy = pipeline.retrospective_evidence_data(self.root, self.episode)
+        self.assertEqual(legacy["completion_status"], "legacy_approved_master")
+        self.assertTrue(
+            legacy["finalization_lineage"]["legacy_master_eligible"]
+        )
 
     def test_episode_retrospective_discovers_nested_parallel_ledgers(self) -> None:
         nested = self.episode / "review" / "v2" / "batch_a" / "current"

@@ -79,6 +79,24 @@ PORTABILITY_REQUIRED_ROLES = {
     "final_srt",
     "final_manifest",
 }
+EPISODE_STARTUP_SCHEMA = "lecture-animation-episode-startup-v1"
+EPISODE_STARTUP_RECEIPT_SCHEMA = "lecture-animation-episode-startup-receipt-v1"
+EPISODE_STARTUP_REQUIRED_RECEIPTS = {
+    "pipeline_preflight": "lecture-animation-pipeline-preflight-v1",
+    "delivery_clock": "lecture-animation-delivery-clock-v1",
+    "efficiency_contract": "lecture-animation-episode-efficiency-contract-v4",
+    "metric_policy": "lecture-animation-metric-policy-v1",
+    "supervisor_session": "lecture-animation-supervisor-session-v2",
+}
+EPISODE_STARTUP_REQUIRED_DECISIONS = {
+    "human_feedback_inventory_complete",
+    "source_inventory_complete",
+    "asset_inventory_complete",
+    "fixed_ending_source_locked",
+    "reviewer_author_separation_locked",
+    "per_scene_review_delivery_locked",
+    "canonical_evidence_root_locked",
+}
 PRONUNCIATION_SENSITIVE_TOKENS = (
     "alpha",
     "beta",
@@ -192,6 +210,330 @@ def artifact_snapshot(path: Path, repo_root: Path) -> dict[str, Any]:
         "size": size,
         "file_count": count,
     }
+
+
+def _git_worktree_identity(path: Path) -> tuple[Path | None, str | None, str | None]:
+    """Return top-level, branch, and common Git directory for one worktree."""
+
+    if not path.is_dir():
+        return None, None, None
+
+    def run(*args: str) -> str | None:
+        result = subprocess.run(
+            ["git", "-C", str(path), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        value = result.stdout.strip()
+        return value if result.returncode == 0 and value else None
+
+    top_raw = run("rev-parse", "--show-toplevel")
+    branch = run("branch", "--show-current")
+    common_raw = run("rev-parse", "--git-common-dir")
+    top = Path(top_raw).resolve() if top_raw else None
+    common = None
+    if common_raw:
+        common_value = Path(common_raw)
+        common = (
+            common_value.resolve()
+            if common_value.is_absolute()
+            else (path / common_value).resolve()
+        )
+    return top, branch, str(common) if common else None
+
+
+def validate_episode_startup_contract(
+    contract: dict[str, Any],
+    *,
+    repo_root: Path,
+    episode: Path,
+) -> list[str]:
+    """Validate the one executable Initialization exit contract.
+
+    This deliberately checks the live Git/worktree topology instead of trusting
+    a prose roster.  It is sealed after the delivery clock starts and before
+    lecture work leaves Initialization.
+    """
+
+    errors: list[str] = []
+    expected_episode = _relative(episode, repo_root)
+    if contract.get("schema") != EPISODE_STARTUP_SCHEMA:
+        errors.append(f"schema must be {EPISODE_STARTUP_SCHEMA}")
+    if contract.get("episode") != expected_episode:
+        errors.append("episode binding does not match the startup checkout")
+    if contract.get("production_mode") not in {"main_producer", "parallel_batches"}:
+        errors.append("production_mode must be main_producer or parallel_batches")
+
+    main_agent_id = str(contract.get("main_agent_id", "") or "").strip()
+    reviewer_id = str(contract.get("acceptance_reviewer_agent_id", "") or "").strip()
+    if not main_agent_id:
+        errors.append("main_agent_id is required")
+    if not reviewer_id:
+        errors.append("acceptance_reviewer_agent_id is required")
+
+    startup_brief = _resolve(contract.get("startup_brief_path", ""), repo_root)
+    if (
+        not startup_brief.is_file()
+        or startup_brief.suffix.lower() != ".md"
+        or len(startup_brief.read_text(encoding="utf-8", errors="ignore").strip()) < 120
+    ):
+        errors.append("startup_brief_path must bind a nontrivial Markdown brief")
+
+    decisions = contract.get("startup_decisions")
+    if not isinstance(decisions, dict):
+        errors.append("startup_decisions must be an object")
+        decisions = {}
+    for key in sorted(EPISODE_STARTUP_REQUIRED_DECISIONS):
+        if decisions.get(key) is not True:
+            errors.append(f"startup decision is not locked: {key}")
+    if decisions.get("review_delivery_mode") != "per_scene_immediate_1080p_or_better":
+        errors.append(
+            "review_delivery_mode must be per_scene_immediate_1080p_or_better"
+        )
+    if decisions.get("human_feedback_route") != "main_agent_compile_before_authoring":
+        errors.append(
+            "human_feedback_route must be main_agent_compile_before_authoring"
+        )
+
+    evidence_root = _resolve(contract.get("canonical_evidence_root", ""), repo_root)
+    try:
+        evidence_root.relative_to(episode.resolve())
+    except ValueError:
+        errors.append("canonical_evidence_root must live inside the episode")
+    if not evidence_root.is_dir():
+        errors.append("canonical_evidence_root must already exist")
+    phase_ledger = _resolve(contract.get("canonical_phase_ledger", ""), repo_root)
+    try:
+        phase_ledger.relative_to(evidence_root.resolve())
+    except ValueError:
+        errors.append("canonical_phase_ledger must live inside canonical_evidence_root")
+    if not phase_ledger.exists():
+        errors.append("canonical_phase_ledger must already exist, even when empty")
+
+    worktree_root = _resolve(contract.get("worktree_root", ""), repo_root)
+    if worktree_root.name != "myLectures-worktrees" or not worktree_root.is_dir():
+        errors.append("worktree_root must be the existing myLectures-worktrees directory")
+
+    canonical_top, _, canonical_common = _git_worktree_identity(repo_root)
+    if canonical_top != repo_root.resolve() or not canonical_common:
+        errors.append("repo_root must be a Git worktree root")
+
+    integration_path = _resolve(contract.get("integration_worktree", ""), repo_root)
+    integration_branch = str(contract.get("integration_branch", "") or "").strip()
+    if integration_path.parent != worktree_root.resolve():
+        errors.append("integration_worktree must be a direct child of worktree_root")
+    top, branch, common = _git_worktree_identity(integration_path)
+    if top != integration_path.resolve() or common != canonical_common:
+        errors.append("integration_worktree is not attached to the canonical Git repository")
+    if branch != integration_branch or not integration_branch.startswith("codex/"):
+        errors.append("integration worktree branch must match and use the codex/... prefix")
+
+    runtime_slots = contract.get("runtime_slots")
+    planned_batch_count = contract.get("planned_batch_count")
+    if not isinstance(runtime_slots, int) or runtime_slots < 2:
+        errors.append("runtime_slots must be an integer of at least 2")
+        runtime_slots = 0
+    if not isinstance(planned_batch_count, int) or planned_batch_count < 1:
+        errors.append("planned_batch_count must be a positive integer")
+        planned_batch_count = 0
+
+    roster = contract.get("producer_roster")
+    if not isinstance(roster, list):
+        errors.append("producer_roster must be a list")
+        roster = []
+    if contract.get("production_mode") == "parallel_batches" and not roster:
+        errors.append("parallel_batches requires at least one producer")
+    if contract.get("production_mode") == "main_producer" and roster:
+        errors.append("main_producer must not declare production subagents")
+    if runtime_slots and len(roster) > runtime_slots - 1:
+        errors.append("producer roster leaves no runtime slot for the main reviewer")
+    recommended = min(planned_batch_count, max(runtime_slots - 1, 0), 4)
+    if (
+        contract.get("production_mode") == "parallel_batches"
+        and len(roster) < recommended
+        and len(str(contract.get("capacity_reason", "") or "").strip()) < 24
+    ):
+        errors.append(
+            "producer roster is below the deterministic startup recommendation "
+            "without a concrete capacity_reason"
+        )
+
+    agent_ids: set[str] = set()
+    worktrees: set[str] = set()
+    branches: set[str] = set()
+    for index, row in enumerate(roster):
+        if not isinstance(row, dict):
+            errors.append(f"producer_roster[{index}] must be an object")
+            continue
+        agent_id = str(row.get("agent_id", "") or "").strip()
+        path = _resolve(row.get("worktree", ""), repo_root)
+        declared_branch = str(row.get("branch", "") or "").strip()
+        if not agent_id or agent_id in agent_ids:
+            errors.append(f"producer_roster[{index}] has a missing or duplicate agent_id")
+        if agent_id in {main_agent_id, reviewer_id}:
+            errors.append(f"producer_roster[{index}] violates author/reviewer separation")
+        if str(path) in worktrees or path.parent != worktree_root.resolve():
+            errors.append(f"producer_roster[{index}] has a duplicate or misplaced worktree")
+        if declared_branch in branches or not declared_branch.startswith("agent/"):
+            errors.append(f"producer_roster[{index}] branch must be unique and use agent/...")
+        row_top, row_branch, row_common = _git_worktree_identity(path)
+        if row_top != path.resolve() or row_common != canonical_common:
+            errors.append(f"producer_roster[{index}] worktree is not attached to canonical Git")
+        if row_branch != declared_branch:
+            errors.append(f"producer_roster[{index}] live branch differs from the contract")
+        agent_ids.add(agent_id)
+        worktrees.add(str(path))
+        branches.add(declared_branch)
+
+    receipts = contract.get("required_receipts")
+    if not isinstance(receipts, dict):
+        errors.append("required_receipts must be an object")
+        receipts = {}
+    receipt_snapshots: dict[str, dict[str, Any]] = {}
+    receipt_payloads: dict[str, dict[str, Any]] = {}
+    for name, schema in EPISODE_STARTUP_REQUIRED_RECEIPTS.items():
+        raw = receipts.get(name)
+        path = _resolve(raw or "", repo_root)
+        try:
+            payload = load_json(path)
+            receipt_payloads[name] = payload
+            receipt_snapshots[name] = artifact_snapshot(path, repo_root)
+        except PipelineError as exc:
+            errors.append(f"required_receipts.{name}: {exc}")
+            continue
+        if payload.get("schema") != schema:
+            errors.append(f"required_receipts.{name} has the wrong schema")
+    preflight = receipt_payloads.get("pipeline_preflight", {})
+    if preflight and preflight.get("status") != "pass":
+        errors.append("pipeline_preflight must be green")
+    clock = receipt_payloads.get("delivery_clock", {})
+    if clock:
+        if clock.get("episode") != expected_episode:
+            errors.append("delivery_clock is bound to another episode")
+        if clock.get("status") != "active" or clock.get("current_stage") != "initialization":
+            errors.append("delivery_clock must still be active in initialization")
+        if int(clock.get("max_production_agents", -1) or -1) < len(roster):
+            errors.append(
+                "delivery_clock max_production_agents is smaller than the sealed roster"
+            )
+    efficiency = receipt_payloads.get("efficiency_contract", {})
+    if efficiency and efficiency.get("episode") != expected_episode:
+        errors.append("efficiency_contract is bound to another episode")
+    policy = receipt_payloads.get("metric_policy", {})
+    if policy and policy.get("episode") != expected_episode:
+        errors.append("metric_policy is bound to another episode")
+    supervisor = receipt_payloads.get("supervisor_session", {})
+    if supervisor:
+        if supervisor.get("supervisor_agent_id") != main_agent_id:
+            errors.append("supervisor_session main agent differs from the startup contract")
+        known_agents = set(supervisor.get("identity_history", []) or []) | set(
+            (supervisor.get("assignments", {}) or {}).keys()
+        )
+        missing_agents = sorted(agent_ids - known_agents)
+        if missing_agents:
+            errors.append(
+                "supervisor_session is missing producer identities: "
+                + ", ".join(missing_agents)
+            )
+
+    contract["_startup_receipt_snapshots"] = receipt_snapshots
+    return errors
+
+
+def run_episode_startup_preflight(
+    *,
+    repo_root: Path,
+    episode: Path,
+    contract_path: Path,
+) -> dict[str, Any]:
+    contract = load_json(contract_path)
+    working = json.loads(json.dumps(contract))
+    errors = validate_episode_startup_contract(
+        working,
+        repo_root=repo_root,
+        episode=episode,
+    )
+    snapshots = working.pop("_startup_receipt_snapshots", {})
+    result = {
+        "schema": EPISODE_STARTUP_RECEIPT_SCHEMA,
+        "created_at": utc_now(),
+        "episode": _relative(episode, repo_root),
+        "status": "blocked" if errors else "pass",
+        "errors": errors,
+        "contract": artifact_snapshot(contract_path, repo_root),
+        "production_mode": contract.get("production_mode"),
+        "main_agent_id": contract.get("main_agent_id"),
+        "acceptance_reviewer_agent_id": contract.get("acceptance_reviewer_agent_id"),
+        "producer_count": len(contract.get("producer_roster", []) or []),
+        "runtime_slots": contract.get("runtime_slots"),
+        "integration_worktree": contract.get("integration_worktree"),
+        "canonical_evidence_root": contract.get("canonical_evidence_root"),
+        "required_receipts": snapshots,
+    }
+    result["receipt_hash"] = object_hash(result)
+    return result
+
+
+def validate_episode_startup_receipt(
+    receipt_path: Path,
+    *,
+    repo_root: Path,
+    episode: Path,
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        receipt = load_json(receipt_path)
+    except PipelineError as exc:
+        return [str(exc)]
+    if receipt.get("schema") != EPISODE_STARTUP_RECEIPT_SCHEMA:
+        errors.append("startup receipt has the wrong schema")
+    expected_hash = receipt.get("receipt_hash")
+    hash_input = dict(receipt)
+    hash_input.pop("receipt_hash", None)
+    if expected_hash != object_hash(hash_input):
+        errors.append("startup receipt hash is invalid")
+    if receipt.get("status") != "pass" or receipt.get("errors"):
+        errors.append("startup receipt is not a clean pass")
+    if receipt.get("episode") != _relative(episode, repo_root):
+        errors.append("startup receipt is bound to another episode")
+    contract_snapshot = receipt.get("contract")
+    if not isinstance(contract_snapshot, dict):
+        errors.append("startup receipt has no contract snapshot")
+        return errors
+    contract_path = _resolve(contract_snapshot.get("path", ""), repo_root)
+    try:
+        current_snapshot = artifact_snapshot(contract_path, repo_root)
+    except PipelineError as exc:
+        errors.append(str(exc))
+        return errors
+    if any(
+        current_snapshot.get(field) != contract_snapshot.get(field)
+        for field in ("path", "sha256", "size", "file_count")
+    ):
+        errors.append("startup contract changed after the receipt was sealed")
+        return errors
+    fresh = run_episode_startup_preflight(
+        repo_root=repo_root,
+        episode=episode,
+        contract_path=contract_path,
+    )
+    if fresh.get("status") != "pass":
+        errors.extend(f"current startup contract: {error}" for error in fresh["errors"])
+    return errors
+
+
+def command_seal_episode_startup(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).resolve()
+    episode = _resolve(args.episode, repo_root)
+    result = run_episode_startup_preflight(
+        repo_root=repo_root,
+        episode=episode,
+        contract_path=_resolve(args.contract, repo_root),
+    )
+    write_json(_resolve(args.output, repo_root), result)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 2 if args.require_clean and result["status"] == "blocked" else 0
 
 
 def _load_contract(path: Path) -> dict[str, Any]:
@@ -2698,6 +3040,20 @@ def command_promote_scene(args: argparse.Namespace) -> int:
 
 
 def add_episode_ops_subparsers(subparsers: argparse._SubParsersAction) -> None:
+    startup = subparsers.add_parser(
+        "seal-episode-startup",
+        help=(
+            "seal the executable Initialization exit: stable roster, dedicated "
+            "worktrees, reviewer separation, user constraints, and one evidence root"
+        ),
+    )
+    startup.add_argument("--repo-root", default=".")
+    startup.add_argument("--episode", required=True)
+    startup.add_argument("--contract", required=True)
+    startup.add_argument("--output", required=True)
+    startup.add_argument("--require-clean", action="store_true")
+    startup.set_defaults(func=command_seal_episode_startup)
+
     preflight = subparsers.add_parser(
         "episode-preflight",
         help="block TTS/final rendering on duplicate narration, pace, novice, duration, text, ending, and pronunciation failures",

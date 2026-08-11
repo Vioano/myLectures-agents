@@ -10,9 +10,11 @@ review records, Git evidence, or efficiency measures to inspect.
 
 Resolve the episode from the current conversation and checkout. If neither
 names it, select the newest episode with a valid completion receipt. For an
-older episode that predates completion receipts, accept an approved final
-master plus a passing portability receipt as legacy completion evidence and
-label that distinction. Ask only when two candidates are equally current.
+older episode whose approved master predates the completion-receipt migration
+cutoff (`2026-07-24T00:00:00Z`), accept an approved final master plus a passing
+portability receipt as legacy completion evidence and label that distinction.
+A newer master without a matching completion receipt is `partial`, not legacy.
+Ask only when two candidates are equally current.
 
 "Valid" means current-release valid, not merely present. When more than one
 approved upload master exists, the newest master by recorded creation time must

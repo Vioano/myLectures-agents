@@ -370,6 +370,21 @@ class ScreenTextRegistrationTests(unittest.TestCase):
             missing["human_screen_text_escape_payload_attribution_coverage"], 1.0
         )
         self.assertEqual(missing["human_screen_text_overblock_issue_count"], 1)
+        missing_report = screen_text_experiment_report(
+            self.episode, issues, Path(__file__).resolve().parents[4]
+        )
+        self.assertEqual(
+            missing_report["comparison"]["status"],
+            "unknown_missing_current_instrumentation",
+        )
+        self.assertIsNone(
+            missing_report["comparison"][
+                "human_screen_text_escape_issue_delta"
+            ]
+        )
+        self.assertIsNone(
+            missing_report["comparison"]["pre_source_prevention_count"]
+        )
         preregistration = build_screen_text_preregistration(
             self.profile,
             self.candidate("奇点为什么会阻止围道收缩？"),
