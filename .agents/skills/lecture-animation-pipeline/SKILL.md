@@ -39,13 +39,26 @@ users invoke this Skill without a version suffix.
   timing/attention, novice causality, and visual finish are five simultaneous
   hard-gate layers. Adding a mathematical gate never removes composition or
   finish inspection.
-- Evolve scene policy during production only through a hash-bound live-policy
+- Evolve scene policy during production through a hash-bound live-policy
   overlay. Human feedback invalidates the current profile and manifest
-  immediately. Global Skill, CLI, schema, and test changes are legal only
-  before `T0` or in the post-upload retrospective; a missing enforcement
-  capability isolates the affected scene and uses the pinned last-known-good
-  release without starting a live tooling project.
+  immediately. Core Skill, CLI, schema, and state-authority semantics remain
+  frozen after `T0`; however, a production blocker may be repaired by one
+  episode-local, hash-bound hotfix plugin with explicit scope, rollback,
+  canary, and regression receipts. A hotfix may wrap the pinned core but may
+  not fork or duplicate it, and it grants no authority until the canonical
+  CLI admits it. Promote or reject the plugin only in retrospective.
 - Never let a production or review subagent skip a V2 CLI gate, replace a CLI output with hand-written prose, or continue from a failed/stale contract. The main agent owns assignment boundaries and verifies current hashes before accepting any subagent artifact.
+- A reviewer may stop execution at the first hard failure, but must continue
+  the read-only review to exhaustion. Do not authorize a repair from an
+  intermediate finding. Seal one complete blocker bundle, audited coverage,
+  explicit unreviewed surfaces, and miss classification first. A later
+  detectable finding against unchanged bytes is a `reviewer_miss`, not an
+  ordinary new issue.
+- Separate media/source revisions from contract, evidence, validator, and
+  infrastructure revisions. Four contract/infra revisions, two failed real
+  executions, two author-detectable misses, or two reviewer misses trigger
+  `ROOT_CAUSE_RESET_REQUIRED`; no further micro-revision is allowed until an
+  exhaustive blocker set and shared-executor replan are sealed.
 
 ## Consolidate Git State
 
@@ -112,7 +125,7 @@ artifacts by path and hash; it does not paste those artifacts into the prompt.
 | Lecture, narration writing/review, TTS, alignment, screen text, or progressive locking | `references/narration-workflow.md`, `references/progressive-planning-and-audio.md`, and `references/preflight-portability-and-handoffs.md` |
 | Efficiency contract, phase accounting, metric policy, or batch launch | `references/autopilot-efficiency.md` |
 | Operational overrun, expired wrapper, metric recovery, or special continuation | `references/operational-recovery.md` in addition to the active-phase reference |
-| Scene design, implementation, candidate freeze, self-review, independent review, or repair | `references/authoring-philosophy.md` and `references/scene-production-and-review.md` |
+| Scene design, implementation, candidate freeze, self-review, independent review, repair, or live tooling blocker | `references/authoring-philosophy.md`, `references/scene-production-and-review.md`, and `references/live-hotfix-and-revision-governance.md` |
 | User review, final assembly, upload-ready handoff, or process evolution | `references/finalization-evolution-retrospective.md` and `references/preflight-portability-and-handoffs.md` |
 | User says `复盘一下` | `references/postmortem.md` and `references/evolution.md` |
 
@@ -220,32 +233,11 @@ input paths, hashes, output paths, acceptance checks, and stopping conditions.
 One author owns later repairs for its scene, but the main reviewer—not the
 author—decides acceptance.
 
-Before dispatch, give each producer its current task plus an ordered set of
-compatible, already-safe `--preassigned-task` rows. The producer reads that
-queue with `agent-plan` and, before becoming idle, must call
-`complete-and-claim-next` with hash-bound completion evidence. The transition
-either atomically activates the next preauthorized task or opens a durable
-work request that the producer must immediately send to the main agent. It
-never permits arbitrary self-selection, role/model changes, or bypass of the
-scene's planning, audio, boundary, authoring, review, or user gates. An open
-work request blocks supervisor `finish`.
-
 Production rolls scene by scene. As soon as one scene has a current sealed
 author self-review, the main agent reviews it while that owner advances safe
 work on the next scene. Present each `user_review_pending` 1080p-or-better
 video immediately. Do not wait for an entire group, and do not use low-
 resolution human-review renders when rendering is not the bottleneck.
-
-Production independence means separate bounded ownership, worktree/source,
-scene-local locks, implementation, and review evidence. Content continuity
-means adjacent learner state, mathematical identity carriers, narration/audio
-handoff, and visual exit/entry state agree. The main-authored boundary handoff
-contract unifies them: `adjacency_contracts` inside a batch and matching
-`batch_exit_contract`/`batch_entry_contract` across batches freeze the shared
-edge while `freedom_inside` leaves the interior independent. Therefore only an
-unresolved defect that crosses a scene's exact dependency boundary may block
-dependent implementation; other contract-ready scenes and non-authoring safe
-work continue.
 
 Report only important milestones by default: a new blocker requiring a user
 decision, a scene ready for human review, a human verdict applied, final
@@ -343,6 +335,16 @@ assembly, subtitles, BGM, sprite/QC treatment, completion evidence, and the
 portable upload package. Final media and evidence are protected assets. Do not
 claim upload-ready from a Git merge, a low-resolution proxy, or unverified
 ignored files.
+
+The viewer-facing bytes must pass `seal-upload-package` before
+`finalize-episode`; changed video/audio/SRT/alignment/manifest bytes invalidate
+the receipt. The fixed spoken ending is one next-topic preview followed by
+`我是结束乐队的键盘手，下个视频见`, with one registered Sumino identity
+overlay and no identity/farewell screen text. Sprite rhythm has no episode-wide
+count cap: semantic word ownership, local entrance density, simultaneous safe
+regions, and zero formula/subtitle/active-object collision are the hard gates.
+See `references/finalization-evolution-retrospective.md` for the complete media
+and editorial contract.
 
 `可以收尾了` authorizes the documented post-approval finishing path, not an
 upload or destructive cleanup. `复盘一下` authorizes the bounded retrospective

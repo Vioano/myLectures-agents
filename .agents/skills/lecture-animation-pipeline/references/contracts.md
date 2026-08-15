@@ -830,31 +830,11 @@ to spawn. The main agent normally uses the initial three slots for production
 owners and remains the independent acceptance reviewer.
 
 The session also seals `task_queue`. Initial assignments occupy active queue
-rows; `--planned-task TASK_KEY|ROLE|SCOPE` adds unowned later work, while
-`--preassigned-task AGENT_ID|TASK_KEY|ROLE|SCOPE|MODEL` adds ordered,
-contract-ready work that only the named stable identity may auto-claim.
-Preassignment preserves role and model and records `queue_position` and
-`claim_policy`. `agent-plan` returns the current assignment, complete
-preauthorized queue, open review-todo count, and pending work requests for one
-roster identity.
-
-`complete-and-claim-next` is one locked transition. It validates the active
-agent/task pair, rejects undelivered review todos, SHA-binds the completion
-evidence, completes the current assignment and queue row, and activates the
-next ordered compatible preassignment. If none exists, it writes a durable
-pending `work_request` with `main_notification_required: true` and returns
-`dispatch_result.action: notify_supervisor`. `request-work` provides the same
-durable request for an already reusable identity. A subsequent `assign-task`
-resolves the request and cannot consume another identity's preassignment;
-`preassign-task` may append compatible future work with a concrete reason.
-`resolve-work-request` may close a request without work only as
-`resolved_no_safe_work` or `cancelled`, both with a concrete reason.
-
-Assignment completion updates both the roster member and its queue row.
-`status` keeps `should_continue_monitoring` true while any task is active,
-pending, or blocked, or any work request remains pending, even if every current
-agent is momentarily idle. `finish` rejects pending or blocked queue rows and
-pending work requests. Adding work after `begin` is exceptional and requires a
+rows; `--planned-task TASK_KEY|ROLE|SCOPE` adds later pending work. Assignment
+completion updates both the roster member and its queue row. `status` keeps
+`should_continue_monitoring` true while any task is active, pending, or blocked,
+even if every current agent is momentarily idle. `finish` rejects pending or
+blocked queue rows. Adding work after `begin` is exceptional and requires a
 concrete reason; normal episode and batch work must be declared up front.
 
 `assign-task` is the normal rolling transition. It accepts an `idle`,
@@ -1447,7 +1427,7 @@ already present in the authority discovery bundle are rejected. A pass records
 
 `batch-status` reports batch and episode critical-path time, aggregate agent-seconds, concurrency overlap, token totals and ratios, full versus diagnostic review counts, review-artifact count, phase-telemetry gaps, stale human outcomes, and recurrence of previously accepted human-review regressions. `EPISODE_ACTIVE_BUDGET_EXCEEDED` and `EPISODE_TOKEN_BUDGET_EXCEEDED` are hard failures. `TOKEN_BUDGET_NEAR_LIMIT` is advisory and requires task compaction and replanning. When a prior `must_check_in_future` `pattern_key` appears again as a current human-review issue, `KNOWN_HUMAN_REGRESSION_RECURRED` makes `--require-clean` fail. `--require-clean` also turns duplicate shared-phase identities, incomplete phase/token evidence, stale human outcomes, semantic escapes, and artifact explosion into a nonzero gate. `--historical` permits read-only post-integration analysis when the original worktree or planning hashes have advanced, while recording those differences as alerts. Budget failure is an escalation signal, never a quality exemption.
 
-`record-outcome` derives `outcome_key` from the complete outcome payload and appends it exactly once, so retrying a command does not inflate human-review counts. `finalize-episode` is the only normal media/production close transition. It requires one durable human-pass outcome per scene, terminal issue statuses, scene-local exact artifacts, required final media/timing artifacts, a `--finalization-manifest`, and complete batch coverage in parallel mode. The finalization manifest must bind the exact upload MP4, every editorial character clip and asset hash, word window, semantic anchor, protected rectangle, standard rhythm cue or evidence-backed omission, and one before/on pixel-difference row per overlay. If the final alignment contains `我是结束乐队的键盘手`, the CLI requires exactly one Sumino carrier covering the complete identity word window while the identity/farewell remain absent from the final SRT. The action is not fixed to `talking`; it must be nonempty, registered in the bound Sumino asset metadata, semantically appropriate for the narration, and pass every clip/asset, timing, protected-region, pixel-QC, density, subtitle, and screen-text gate. Parallel completion additionally requires the v2 supervisor session to have passed `finish`, with no active/blocked assignment, pending/blocked task, or unused replacement authorization. The completion receipt records historical identity and replacement counts plus the finalization-manifest hash and sprite verdict. Finalization atomically marks scenes `assembled`, closes supplied batch contracts, seals the final assembly, and writes `lecture-animation-episode-completion-v2`. A missing outcome, stale open issue, provisional scene, missing file, uncovered parallel scene, live supervisor roster, stale sprite hash, missing pixel evidence, or absent mandatory sign-off blocks completion.
+`record-outcome` derives `outcome_key` from the complete outcome payload and appends it exactly once, so retrying a command does not inflate human-review counts. `finalize-episode` is the only normal media/production close transition. It requires one durable human-pass outcome per scene, terminal issue statuses, scene-local exact artifacts, required final media/timing artifacts, a `--finalization-manifest`, and complete batch coverage in parallel mode. The finalization manifest must bind the exact upload MP4, every editorial character clip and asset hash, word window, semantic anchor, protected rectangle, standard rhythm cue or evidence-backed omission, and one before/on pixel-difference row per overlay. The final alignment must contain a short next-topic preview followed by the exact phrase `我是结束乐队的键盘手，下个视频见`; the CLI requires exactly one Sumino carrier covering that complete sign-off word window while the identity/farewell remain absent from the final SRT. The action is not fixed to `talking`; it must be nonempty, registered in the bound Sumino asset metadata, semantically appropriate for the narration, and pass every clip/asset, timing, protected-region, pixel-QC, density, subtitle, and screen-text gate. Parallel completion additionally requires the v2 supervisor session to have passed `finish`, with no active/blocked assignment, pending/blocked task, or unused replacement authorization. The completion receipt records historical identity and replacement counts plus the finalization-manifest hash and sprite verdict. Finalization atomically marks scenes `assembled`, closes supplied batch contracts, seals the final assembly, and writes `lecture-animation-episode-completion-v2`. A missing outcome, stale open issue, provisional scene, missing file, uncovered parallel scene, live supervisor roster, stale sprite hash, missing pixel evidence, or absent mandatory sign-off blocks completion.
 
 For every directional sprite action, the same manifest additionally records
 `asset_facing_direction`, the explicit `mirrored_horizontally` boolean,

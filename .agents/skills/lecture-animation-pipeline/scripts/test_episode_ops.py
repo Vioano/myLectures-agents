@@ -5,6 +5,8 @@ import hashlib
 import io
 from pathlib import Path
 from contextlib import redirect_stdout
+import shutil
+import subprocess
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ from pipeline_v2_lib.episode_ops import (
     _alignment_words,
     _registry_occurrences,
     _rolling_pace,
+    _wav_duration,
     _validate_independent_review,
     _validate_pronunciation_binding,
     artifact_snapshot,
@@ -942,6 +945,63 @@ class EpisodeOpsTests(unittest.TestCase):
             self.assertEqual(result["status"], "blocked")
             self.assertEqual(len(result["dangling_worktree_references"]), 1)
             json.dumps(result)
+
+    def test_portability_audit_excludes_its_own_prior_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            episode = root / "videos" / "0007-test"
+            source = episode / "src"
+            source.mkdir(parents=True)
+            (source / "render.py").write_text("VALUE = 1\n", encoding="utf-8")
+            prior_receipt = source / "portability_audit.json"
+            prior_receipt.write_text(
+                json.dumps(
+                    {
+                        "old_reference": (
+                            "/Volumes/bocchi/myLectures-worktrees/agent-a/video.py"
+                        )
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifact = episode / "final.mp4"
+            artifact.write_bytes(b"final")
+            result = run_portability_audit(
+                root,
+                episode,
+                {"final": str(artifact.relative_to(root))},
+                [str(source.relative_to(root))],
+                excluded_paths={prior_receipt},
+            )
+            self.assertEqual(result["dangling_worktree_references"], [])
+            self.assertEqual(
+                result["authoritative_roots"][0]["text_files_scanned"],
+                1,
+            )
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"),
+        "ffmpeg and ffprobe are required",
+    )
+    def test_portability_audio_probe_accepts_ieee_float_wav(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            wav_path = Path(temporary) / "float32.wav"
+            subprocess.run(
+                [
+                    shutil.which("ffmpeg") or "ffmpeg",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=0.25",
+                    "-c:a",
+                    "pcm_f32le",
+                    str(wav_path),
+                ],
+                check=True,
+            )
+            self.assertGreater(_wav_duration(wav_path), 0.1)
 
     def test_portability_audit_cannot_pass_empty_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

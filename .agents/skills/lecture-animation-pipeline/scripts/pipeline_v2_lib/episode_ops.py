@@ -566,8 +566,45 @@ def _boundary_duplicates(left: str, right: str) -> list[str]:
 
 
 def _wav_duration(path: Path) -> float:
-    with wave.open(str(path), "rb") as handle:
-        return handle.getnframes() / max(handle.getframerate(), 1)
+    try:
+        with wave.open(str(path), "rb") as handle:
+            return handle.getnframes() / max(handle.getframerate(), 1)
+    except (wave.Error, EOFError) as wave_error:
+        # Python's stdlib wave reader rejects valid IEEE-float WAV (format 3),
+        # which is common for post-production masters. Fall back to the same
+        # media probe used for final delivery instead of misclassifying the
+        # file as corrupt.
+        ffprobe = shutil.which("ffprobe")
+        if not ffprobe:
+            raise wave_error
+        probe = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type:format=duration",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode != 0:
+            raise wave.Error(probe.stderr.strip() or str(wave_error)) from wave_error
+        try:
+            payload = json.loads(probe.stdout)
+            streams = payload.get("streams", [])
+            duration = float(payload.get("format", {}).get("duration", 0) or 0)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise wave.Error("ffprobe returned invalid WAV metadata") from exc
+        if not streams or streams[0].get("codec_type") != "audio" or duration <= 0:
+            raise wave.Error("ffprobe found no positive-duration audio stream")
+        return duration
 
 
 def _alignment_words(value: Any) -> list[dict[str, Any]]:
@@ -2792,6 +2829,8 @@ def run_portability_audit(
     episode: Path,
     required_artifacts: dict[str, str],
     authoritative_roots: list[str],
+    *,
+    excluded_paths: set[Path] | None = None,
 ) -> dict[str, Any]:
     errors: list[str] = []
     if not required_artifacts:
@@ -2828,6 +2867,9 @@ def run_portability_audit(
             errors=errors,
         )
 
+    excluded_resolved = {
+        path.resolve() for path in (excluded_paths or set())
+    }
     roots: list[dict[str, Any]] = []
     dangling_references: list[dict[str, Any]] = []
     for raw in authoritative_roots:
@@ -2849,6 +2891,8 @@ def run_portability_audit(
             continue
         scanned = 0
         for path in _text_files(root):
+            if path.resolve() in excluded_resolved:
+                continue
             scanned += 1
             text = path.read_text(encoding="utf-8", errors="ignore")
             for match in WORKTREE_REFERENCE.finditer(text):
@@ -2896,13 +2940,15 @@ def run_portability_audit(
 def command_audit_portability(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root).resolve()
     episode = _resolve(args.episode, repo_root)
+    output_path = _resolve(args.output, repo_root)
     result = run_portability_audit(
         repo_root,
         episode,
         _parse_named_paths(args.required_artifact),
         args.authoritative_root or [],
+        excluded_paths={output_path},
     )
-    write_json(_resolve(args.output, repo_root), result)
+    write_json(output_path, result)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if args.require_clean and result["status"] == "blocked" else 0
 

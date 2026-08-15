@@ -841,6 +841,118 @@ def command_seal_narration_animation_release(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_rebind_narration_animation_release(args: argparse.Namespace) -> int:
+    """Rebind one authorized candidate to fresh, non-broadening release evidence."""
+
+    root = Path(args.repo_root).resolve()
+    state_path = _resolve(root, args.state)
+    release = _snapshot(root, args.release, require_json=True)
+    data = _artifact_data(release)
+    with locked_paths([state_path]):
+        state = _load_current(state_path, args.expected_state_hash)
+        _assert_actor(state, "coordinator", args.actor_id)
+        if state["status"] != "animation_authorized":
+            raise PipelineError(
+                "animation release rebind requires animation_authorized state"
+            )
+        candidate = state.get("current_candidate") or {}
+        current_release = state.get("animation_release") or {}
+        current_data = _artifact_data(
+            _snapshot(root, current_release.get("path", ""), require_json=True)
+        )
+        if data.get("schema") != ANIMATION_RELEASE_SCHEMA:
+            raise PipelineError(
+                f"animation release schema must be {ANIMATION_RELEASE_SCHEMA}"
+            )
+        if (
+            data.get("workflow_id") != state.get("workflow_id")
+            or data.get("candidate_hash") != candidate.get("candidate_hash")
+            or data.get("verdict") != "animation_authorized"
+            or data.get("human_audio_gate") != "user_authorized_machine_pending"
+        ):
+            raise PipelineError(
+                "animation release rebind changes workflow, candidate, verdict or audio gate"
+            )
+        for key in (
+            "workflow_id",
+            "candidate_hash",
+            "verdict",
+            "human_audio_gate",
+            "word_alignment_gate",
+            "unit_window_design",
+            "scene_production_inventory",
+            "distinct_unit_window_review",
+            "delegated_visual_direction_gate",
+            "screen_text_registry",
+            "scope",
+            "forbidden_claims",
+            "invalidation_rule",
+        ):
+            if data.get(key) != current_data.get(key):
+                raise PipelineError(
+                    f"animation release rebind changes protected field: {key}"
+                )
+        old_authority = current_data.get(
+            "delegated_episode_provisional_authority", {}
+        )
+        new_authority = data.get(
+            "delegated_episode_provisional_authority", {}
+        )
+        if (
+            old_authority.get("sha256")
+            != "165729e8bf552aeb5940e8fd33de7a02c49d9f84425679a896509456df9a544e"
+            or new_authority.get("sha256")
+            != "db7b677597cc0961255e2fc6972e53e637652956875bd3d1cd26aeaa6d4f4b48"
+        ):
+            raise PipelineError(
+                "animation release rebind is not the exact G012-G015 authority supersession"
+            )
+        _verify_descriptor(root, new_authority, "delegated_episode_provisional_authority")
+        authority_data = _artifact_data(
+            _snapshot(root, new_authority.get("path", ""), require_json=True)
+        )
+        if (
+            authority_data.get("schema")
+            != "lecture-animation-delegated-unit-window-machine-pending-provisional-animation-authority-v1"
+            or authority_data.get("episode") != state.get("episode")
+            or not any(
+                f"/{scene}/" in f"/{_relative(state_path, root)}/"
+                for scene in authority_data.get("scene_scope", [])
+            )
+            or authority_data.get("supersession", {}).get(
+                "superseded_authority_sha256"
+            )
+            != old_authority.get("sha256")
+        ):
+            raise PipelineError("animation release rebind authority is invalid")
+        _verify_descriptor(root, data.get("post_tts_readiness"), "post_tts_readiness")
+        _verify_descriptor(
+            root,
+            data.get("scene_production_inventory"),
+            "scene_production_inventory",
+        )
+        state["animation_release"] = {
+            key: release[key] for key in ("path", "sha256", "size")
+        }
+        _event(
+            state,
+            event_type="narration_animation_release_rebound",
+            actor_id=args.actor_id,
+            from_state="animation_authorized",
+            to_state="animation_authorized",
+            evidence={
+                "candidate_hash": candidate.get("candidate_hash"),
+                "previous_release_sha256": current_release.get("sha256"),
+                "release_sha256": release.get("sha256"),
+                "superseding_authority_sha256": new_authority.get("sha256"),
+            },
+        )
+        state = _rehash(state)
+        atomic_write_json_unlocked(state_path, state)
+    print_json(state)
+    return 0
+
+
 def command_open_post_animation_narration_repair(args: argparse.Namespace) -> int:
     """Open the exceptional path for narration repair after animation exists."""
 
@@ -1086,6 +1198,17 @@ def add_narration_workflow_subparsers(subparsers: argparse._SubParsersAction) ->
     _add_state_mutation_args(release)
     release.add_argument("--release", required=True)
     release.set_defaults(func=command_seal_narration_animation_release)
+
+    release_rebind = subparsers.add_parser(
+        "rebind-narration-animation-release",
+        help=(
+            "rebind an already-authorized candidate to the exact superseding "
+            "G012-G015 unit-window provisional authority"
+        ),
+    )
+    _add_state_mutation_args(release_rebind)
+    release_rebind.add_argument("--release", required=True)
+    release_rebind.set_defaults(func=command_rebind_narration_animation_release)
 
     repair = subparsers.add_parser(
         "open-post-animation-narration-repair",

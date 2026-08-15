@@ -18,6 +18,8 @@ import sys
 from typing import Any, Iterable
 import wave
 
+from PIL import Image, UnidentifiedImageError
+
 from .core import PipelineError, canonical_json, object_hash, read_text, utc_now
 from .governance import (
     review_session_governance,
@@ -39,6 +41,10 @@ from .episode_ops import (
     validate_episode_startup_receipt,
     validate_episode_readiness_receipt,
 )
+from .final_media import (
+    command_seal_upload_package,
+    validate_upload_package_receipt,
+)
 from .metrics import (
     TOKEN_FIELDS,
     classify_findings,
@@ -50,6 +56,7 @@ from .metrics import (
 )
 from .narration_workflow import (
     add_narration_workflow_subparsers,
+    command_rebind_narration_animation_release,
     validate_narration_workflow_for_phase,
 )
 from .presentation_boundary import presentation_boundary_violation
@@ -7540,9 +7547,18 @@ def review_strategy_data(
     else:
         mode = "diagnostic"
         reasons = ["hash-bound impact proof localizes the repair while semantic contracts remain fixed"]
-    escalation = full_count >= 3 and mode == "full_regression"
+    iteration_governance = review_iteration_governance_data(
+        scene_slug, prior_attempts or []
+    )
+    escalation = (
+        (full_count >= 2 and mode == "full_regression")
+        or iteration_governance["root_cause_reset_required"]
+    )
     if escalation:
-        reasons.append("three or more prior full reviews require root-cause re-planning before another broad rerender loop")
+        reasons.append(
+            "revision circuit breaker requires one exhaustive blocker set and "
+            "root-cause re-planning before another repair or rerender"
+        )
     strategy: dict[str, Any] = {
         "schema": "lecture-animation-review-strategy-v2",
         "scene_slug": scene_slug,
@@ -7557,12 +7573,85 @@ def review_strategy_data(
         "next_review_mode": mode,
         "reasons": reasons,
         "full_reviews_for_scene": full_count,
+        "iteration_governance": iteration_governance,
         "root_cause_escalation_required": escalation,
+        "micro_patch_allowed": not escalation,
+        "repair_requires_exhaustive_finding_bundle": True,
         "final_full_review_always_required": True,
         "layout_gate_remains_mandatory": True,
     }
     strategy["strategy_hash"] = object_hash(strategy)
     return strategy
+
+
+def review_iteration_governance_data(
+    scene_slug: str,
+    attempts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compile the repair-loop circuit breaker from append-only attempt rows.
+
+    This deliberately counts failed and rejected work as operational evidence.
+    Acceptance logs may still use their narrower gate semantics elsewhere, but
+    repeated failed previews must not disappear merely because no gate accepted
+    them.
+    """
+
+    rows = [
+        row for row in attempts
+        if isinstance(row, dict)
+        and str(row.get("scene_slug", "")) == str(scene_slug)
+    ]
+    contract_revisions = sum(
+        1 for row in rows
+        if str(row.get("revision_kind") or row.get("artifact_kind") or "")
+        in {"contract", "evidence", "infra", "validator"}
+    )
+    media_revisions = sum(
+        1 for row in rows
+        if str(row.get("revision_kind") or row.get("artifact_kind") or "")
+        in {"media", "scene_source"}
+    )
+    actual_execution_failures = sum(
+        1 for row in rows
+        if row.get("actual_execution") is True
+        and (
+            row.get("exit_code") not in {None, 0}
+            or str(row.get("result", ""))
+            in {"failed", "failed_closed", "revise"}
+        )
+    )
+    author_detectable_misses = sum(
+        1 for row in rows if row.get("author_detectable_miss") is True
+    )
+    reviewer_misses = sum(
+        1 for row in rows if row.get("reviewer_miss") is True
+    )
+    triggers: list[str] = []
+    if contract_revisions >= 4:
+        triggers.append("contract_or_infra_revision_limit")
+    if actual_execution_failures >= 2:
+        triggers.append("actual_execution_failure_limit")
+    if author_detectable_misses >= 2:
+        triggers.append("author_detectable_miss_limit")
+    if reviewer_misses >= 2:
+        triggers.append("reviewer_miss_limit")
+    return {
+        "scene_slug": scene_slug,
+        "attempt_rows": len(rows),
+        "contract_or_infra_revisions": contract_revisions,
+        "media_or_scene_source_revisions": media_revisions,
+        "actual_execution_failures": actual_execution_failures,
+        "author_detectable_misses": author_detectable_misses,
+        "reviewer_misses": reviewer_misses,
+        "triggers": triggers,
+        "root_cause_reset_required": bool(triggers),
+        "next_action": (
+            "seal_exhaustive_blocker_set_then_replan_shared_executor"
+            if triggers
+            else "continue_current_review_epoch"
+        ),
+        "new_micro_revision_allowed": not triggers,
+    }
 
 
 def merged_windows(windows: list[tuple[float, float]], duration: float) -> list[list[float]]:
@@ -7727,11 +7816,28 @@ def reviewer_health(rows: list[dict[str, Any]], reviewer_model: str) -> dict[str
     human_reviewed = [row for row in relevant if row.get("human_verdict") in {"pass", "revise"}]
     automatic_passes = [row for row in relevant if str(row.get("automatic_verdict", "")).startswith("pass")]
     judged_automatic_passes = [row for row in automatic_passes if row.get("human_verdict") in {"pass", "revise"}]
-    misses = [row for row in judged_automatic_passes if row.get("human_verdict") == "revise"]
+    false_pass_misses = [
+        row for row in judged_automatic_passes
+        if row.get("human_verdict") == "revise"
+    ]
+    explicit_review_misses = [
+        row for row in relevant if row.get("reviewer_miss") is True
+    ]
+    misses_by_id = {
+        str(row.get("event_id") or f"row:{index}"): row
+        for index, row in enumerate(
+            [*false_pass_misses, *explicit_review_misses]
+        )
+    }
+    misses = list(misses_by_id.values())
     zero_finding_passes = [row for row in automatic_passes if int(row.get("reviewer_findings", 0) or 0) == 0]
     miss_rate = len(misses) / len(judged_automatic_passes) if judged_automatic_passes else 0.0
     zero_rate = len(zero_finding_passes) / len(automatic_passes) if automatic_passes else 0.0
-    anomalous = (len(judged_automatic_passes) >= 3 and misses and miss_rate > 0.20) or (len(automatic_passes) >= 4 and zero_rate >= 0.80)
+    anomalous = (
+        (len(judged_automatic_passes) >= 3 and false_pass_misses and miss_rate > 0.20)
+        or len(explicit_review_misses) >= 2
+        or (len(automatic_passes) >= 4 and zero_rate >= 0.80)
+    )
     triggers = misses[-5:] if misses else zero_finding_passes[-4:]
     return {
         "reviewer_model": reviewer_model,
@@ -7740,6 +7846,7 @@ def reviewer_health(rows: list[dict[str, Any]], reviewer_model: str) -> dict[str
         "automatic_passes": len(automatic_passes),
         "automatic_passes_human_reviewed": len(judged_automatic_passes),
         "false_passes": len(misses),
+        "explicit_reviewer_misses": len(explicit_review_misses),
         "false_pass_rate": round(miss_rate, 4),
         "zero_finding_pass_rate": round(zero_rate, 4),
         "anomalous": anomalous,
@@ -8369,6 +8476,7 @@ def review_exhaustion_draft_data(review: dict[str, Any], manifest: dict[str, Any
         )
     return {
         "schema": "lecture-animation-review-exhaustion-v2",
+        "review_exhaustion_contract_version": 2,
         "manifest_hash": manifest.get("manifest_hash"),
         "scene_slug": manifest.get("scene_slug"),
         "review_core_hash": review_core_hash(review),
@@ -8377,6 +8485,19 @@ def review_exhaustion_draft_data(review: dict[str, Any], manifest: dict[str, Any
             {"layer": layer, "performed": False, "query": "", "result": "", "evidence": []}
             for layer in HARD_GATE_LAYERS
         ],
+        "finding_classifications": [
+            {
+                "finding_id": str(item.get("finding_id", "")),
+                "origin_class": "",
+                "detectable_in_prior_artifact": None,
+                "prior_manifest_hash": None,
+                "reason": "",
+            }
+            for item in review.get("findings", [])
+            if isinstance(item, dict)
+        ],
+        "unreviewed_surfaces": [],
+        "reviewer_miss_count": 0,
         "coverage_complete": False,
         "reviewer_statement": "",
         "verdict": "draft",
@@ -8426,6 +8547,8 @@ def validate_review_exhaustion_data(
     evidence_root = (repo_root or Path.cwd()).resolve()
     if exhaustion.get("schema") != "lecture-animation-review-exhaustion-v2":
         errors.append("review exhaustion schema is invalid")
+    if int(exhaustion.get("review_exhaustion_contract_version", 0) or 0) < 2:
+        errors.append("review exhaustion contract version must classify review misses")
     if require_hash and not validate_hashed_record(exhaustion, "exhaustion_hash"):
         errors.append("review exhaustion hash is invalid")
     if exhaustion.get("manifest_hash") != manifest.get("manifest_hash"):
@@ -8519,6 +8642,52 @@ def validate_review_exhaustion_data(
         errors.append("review exhaustion must cluster every open finding exactly once")
     if len(supplied_roots) != len(set(supplied_roots)):
         errors.append("review exhaustion must use one cluster per root_issue_id")
+    classifications = {
+        str(item.get("finding_id")): item
+        for item in exhaustion.get("finding_classifications", [])
+        if isinstance(item, dict) and item.get("finding_id")
+    }
+    if set(classifications) != set(open_findings):
+        errors.append("review exhaustion must classify every finding exactly once")
+    allowed_origins = {
+        "pre_existing_review_miss",
+        "newly_introduced_by_repair",
+        "runtime_only",
+    }
+    counted_reviewer_misses = 0
+    for finding_id, classification in classifications.items():
+        origin = str(classification.get("origin_class", ""))
+        if origin not in allowed_origins:
+            errors.append(f"{finding_id}: invalid review finding origin_class")
+        if not isinstance(classification.get("detectable_in_prior_artifact"), bool):
+            errors.append(f"{finding_id}: detectable_in_prior_artifact must be boolean")
+        if len(str(classification.get("reason", "")).strip()) < 24:
+            errors.append(f"{finding_id}: finding origin classification needs a concrete reason")
+        if origin == "pre_existing_review_miss":
+            counted_reviewer_misses += 1
+            if classification.get("detectable_in_prior_artifact") is not True:
+                errors.append(f"{finding_id}: a review miss must have been detectable in prior bytes")
+            if len(str(classification.get("prior_manifest_hash", "")).strip()) < 16:
+                errors.append(f"{finding_id}: a review miss requires prior_manifest_hash")
+        elif origin == "runtime_only" and classification.get(
+            "detectable_in_prior_artifact"
+        ) is not False:
+            errors.append(f"{finding_id}: runtime_only cannot claim prior detectability")
+    if exhaustion.get("reviewer_miss_count") != counted_reviewer_misses:
+        errors.append("review exhaustion reviewer_miss_count is stale")
+    if not isinstance(exhaustion.get("unreviewed_surfaces"), list):
+        errors.append("review exhaustion unreviewed_surfaces must be an explicit list")
+    else:
+        for index, surface in enumerate(exhaustion.get("unreviewed_surfaces", []), 1):
+            if not isinstance(surface, dict) or any(
+                len(str(surface.get(field, "")).strip()) < minimum
+                for field, minimum in (
+                    ("surface", 4), ("reason", 16), ("next_evidence", 16)
+                )
+            ):
+                errors.append(
+                    f"review exhaustion unreviewed surface {index} requires surface, reason, and next_evidence"
+                )
     searches = {
         str(item.get("layer")): item
         for item in exhaustion.get("unclustered_searches", [])
@@ -9956,6 +10125,467 @@ def validate_visual_plan_review_receipt_path(
     if errors:
         raise PipelineError("visual plan review receipt failed: " + " | ".join(errors))
     return review
+
+
+UNIT_WINDOW_PHASE_COMPATIBILITY_SCHEMA = (
+    "lecture-animation-provisional-unit-window-phase-start-compatibility-receipt-v1"
+)
+UNIT_WINDOW_DESIGN_SCHEMA = (
+    "lecture-animation-approved-text-unit-window-formal-design-v1"
+)
+UNIT_WINDOW_SCENE_PRODUCTION_SCHEMA = (
+    "lecture-animation-scene-production-provisional-unit-window-v1"
+)
+UNIT_WINDOW_PROVISIONAL_AUTHORITY_SHA256 = (
+    "db7b677597cc0961255e2fc6972e53e637652956875bd3d1cd26aeaa6d4f4b48"
+)
+
+
+def _load_unit_window_compatibility_input(
+    receipt: dict[str, Any],
+    key: str,
+    repo_root: Path,
+    errors: list[str],
+) -> tuple[dict[str, Any], Path | None]:
+    binding = receipt.get("inputs", {}).get(key)
+    if not isinstance(binding, dict):
+        errors.append(f"unit-window compatibility input is missing: {key}")
+        return {}, None
+    errors.extend(
+        validate_artifact_descriptor(
+            binding,
+            repo_root,
+            f"unit-window compatibility {key}",
+        )
+    )
+    raw_path = str(binding.get("path", "")).strip()
+    if not raw_path:
+        return {}, None
+    path = resolve_stored_path(raw_path, repo_root).resolve()
+    try:
+        return load_json(path), path
+    except (PipelineError, json.JSONDecodeError) as exc:
+        errors.append(f"unit-window compatibility cannot read {key}: {exc}")
+        return {}, path
+
+
+def validate_unit_window_phase_compatibility_data(
+    receipt: dict[str, Any],
+    repo_root: Path,
+    scene_slug: str,
+) -> list[str]:
+    """Validate the narrow machine-pending unit-window bridge.
+
+    This is deliberately separate from the exact word-timed visual-plan gate.
+    It grants only provisional authoring/render admission after the already
+    sealed unit-window technical, delegated, release and post-TTS gates.
+    """
+    errors: list[str] = []
+    if receipt.get("schema") != UNIT_WINDOW_PHASE_COMPATIBILITY_SCHEMA:
+        errors.append("unit-window compatibility schema is invalid")
+    if not validate_hashed_record(receipt, "receipt_hash"):
+        errors.append("unit-window compatibility receipt hash is invalid")
+    if receipt.get("compiler") != (
+        "pipeline_v2.seal-provisional-unit-window-phase-start-compatibility"
+    ):
+        errors.append("unit-window compatibility compiler is invalid")
+    if receipt.get("episode") != "videos/0011-mpm-11-analyticity":
+        errors.append("unit-window compatibility targets another episode")
+    if receipt.get("scene_slug") != scene_slug:
+        errors.append("unit-window compatibility targets another scene")
+    if receipt.get("allowed_phases") != ["authoring", "render"]:
+        errors.append("unit-window compatibility phase scope is invalid")
+    if receipt.get("timing_authority") != "approved_tts_unit_windows_only":
+        errors.append("unit-window compatibility timing authority is invalid")
+    boundary = receipt.get("truth_boundary", {})
+    expected_boundary = {
+        "human_audio_pending": True,
+        "asr_pending": True,
+        "word_alignment_pending": True,
+        "exact_seconds_pending": True,
+        "standard_visual_plan_claimed": False,
+        "finalization_authorized": False,
+        "assembly_authorized": False,
+        "git_authorized": False,
+    }
+    if not isinstance(boundary, dict) or boundary != expected_boundary:
+        errors.append("unit-window compatibility truth boundary is invalid")
+
+    loaded: dict[str, dict[str, Any]] = {}
+    paths: dict[str, Path | None] = {}
+    for key in (
+        "unit_window_design",
+        "static_audit",
+        "author_self_review",
+        "distinct_technical_review",
+        "delegated_visual_direction",
+        "scene_production",
+        "animation_release",
+        "narration_workflow",
+        "post_tts_readiness",
+        "delegated_episode_provisional_authority",
+    ):
+        loaded[key], paths[key] = _load_unit_window_compatibility_input(
+            receipt, key, repo_root, errors
+        )
+
+    bindings = receipt.get("inputs", {})
+    design = loaded["unit_window_design"]
+    design_sha = bindings.get("unit_window_design", {}).get("sha256")
+    if (
+        design.get("schema") != UNIT_WINDOW_DESIGN_SCHEMA
+        or design.get("scene_slug") != scene_slug
+        or design.get("status")
+        != "candidate_for_distinct_unit_window_design_review_only"
+    ):
+        errors.append("unit-window compatibility design state is invalid")
+    design_boundary = design.get("authority_boundary", {})
+    if (
+        design_boundary.get("human_audio_pending") is not True
+        or design_boundary.get("word_alignment_available") is not False
+        or design_boundary.get("exact_seconds_claimed") is not False
+        or design_boundary.get("source_authoring_authorized") is not False
+        or design_boundary.get("render_authorized") is not False
+        or design_boundary.get("finalization_authorized") is not False
+    ):
+        errors.append("unit-window compatibility design boundary is invalid")
+
+    static_audit = loaded["static_audit"]
+    required_static_checks = (
+        "all_exact_seconds_absent",
+        "all_stage_actions_bound_to_approved_text_units",
+        "all_windows_include_M_D_A",
+        "all_windows_include_real_math_driver",
+        "every_unit_covered_once",
+        "screen_text_payloads_match_current_registry_byte_for_byte",
+        "unit_order_matches_tts_plan_exactly",
+    )
+    if (
+        static_audit.get("schema")
+        != "lecture-animation-approved-text-unit-window-static-audit-v1"
+        or static_audit.get("scene_slug") != scene_slug
+        or static_audit.get("design_sha256") != design_sha
+        or static_audit.get("verdict")
+        != "pass_for_distinct_unit_window_design_review_only"
+        or any(
+            static_audit.get("checks", {}).get(key) is not True
+            for key in required_static_checks
+        )
+    ):
+        errors.append("unit-window compatibility static audit is invalid")
+
+    author_self = loaded["author_self_review"]
+    static_sha = bindings.get("static_audit", {}).get("sha256")
+    author_self_sha = bindings.get("author_self_review", {}).get("sha256")
+    if (
+        author_self.get("schema")
+        != "lecture-animation-approved-text-unit-window-author-self-review-v1"
+        or author_self.get("scene_slug") != scene_slug
+        or author_self.get("design_sha256") != design_sha
+        or author_self.get("static_audit_sha256") != static_sha
+        or author_self.get("decision")
+        != "pass_for_distinct_unit_window_design_review_only"
+        or author_self.get("findings") != []
+        or any(
+            author_self.get("authorization_boundary", {}).get(key) is not False
+            for key in (
+                "exact_timing_approved",
+                "finalization_authorized",
+                "human_audio_approved",
+                "render_authorized",
+                "source_authoring_authorized",
+            )
+        )
+    ):
+        errors.append("unit-window compatibility author self-review is invalid")
+
+    technical = loaded["distinct_technical_review"]
+    technical_sha = bindings.get("distinct_technical_review", {}).get("sha256")
+    if (
+        technical.get("schema")
+        != "lecture-animation-independent-approved-text-unit-window-design-technical-review-v1"
+        or technical.get("episode") != receipt.get("episode")
+        or technical.get("scene_slug") != scene_slug
+        or technical.get("candidate", {}).get("sha256") != design_sha
+        or technical.get("author_chain", {})
+        .get("static_audit", {})
+        .get("sha256")
+        != static_sha
+        or technical.get("author_chain", {})
+        .get("author_self_review", {})
+        .get("sha256")
+        != author_self_sha
+        or technical.get("reviewer_agent_id")
+        == author_self.get("author_agent_id")
+        or technical.get("verdict")
+        != "PASS_FOR_DELEGATED_UNIT_WINDOW_VISUAL_DIRECTION_GATE_ONLY"
+        or technical.get("findings") != []
+        or any(
+            technical.get("authorization_boundary", {}).get(key) is not False
+            for key in (
+                "human_audio_approved",
+                "word_alignment_available",
+                "exact_timing_approved",
+                "source_authoring_authorized",
+                "render_authorized",
+                "finalization_or_git_authorized",
+            )
+        )
+    ):
+        errors.append("unit-window compatibility distinct technical review is invalid")
+
+    proxy = loaded["delegated_visual_direction"]
+    proxy_sha = bindings.get("delegated_visual_direction", {}).get("sha256")
+    user_sha = bindings.get(
+        "delegated_episode_provisional_authority", {}
+    ).get("sha256")
+    if (
+        proxy.get("schema")
+        != "lecture-animation-delegated-approved-text-unit-window-visual-direction-verdict-v1"
+        or proxy.get("episode") != receipt.get("episode")
+        or proxy.get("scene_slug") != scene_slug
+        or proxy.get("verdict")
+        != "APPROVE_PROVISIONAL_UNIT_WINDOW_VISUAL_DIRECTION_HUMAN_AUDIO_AND_EXACT_TIMING_PENDING"
+        or proxy.get("exact_bindings", {}).get("unit_window_design_sha256")
+        != design_sha
+        or proxy.get("exact_bindings", {}).get("static_audit_sha256")
+        != static_sha
+        or proxy.get("exact_bindings", {}).get("author_self_review_sha256")
+        != author_self_sha
+        or proxy.get("exact_bindings", {}).get("distinct_technical_review_sha256")
+        != technical_sha
+        or proxy.get("exact_bindings", {}).get(
+            "delegated_episode_provisional_authority_sha256"
+        )
+        != "165729e8bf552aeb5940e8fd33de7a02c49d9f84425679a896509456df9a544e"
+        or proxy.get("authorization", {}).get("human_audio_approved") is not False
+        or proxy.get("authorization", {}).get("word_alignment_available") is not False
+        or proxy.get("authorization", {}).get("exact_timing_approved") is not False
+        or proxy.get("authorization", {}).get(
+            "source_authoring_authorized_by_this_verdict_alone"
+        )
+        is not False
+        or proxy.get("authorization", {}).get(
+            "render_authorized_by_this_verdict_alone"
+        )
+        is not False
+        or proxy.get("authorization", {}).get(
+            "finalization_assembly_or_git_authorized"
+        )
+        is not False
+    ):
+        errors.append("unit-window compatibility delegated direction is invalid")
+
+    scene_production = loaded["scene_production"]
+    scene_production_sha = bindings.get("scene_production", {}).get("sha256")
+    design_bindings = design.get("bindings", {})
+    production_artifacts = scene_production.get("artifacts", {})
+    if (
+        scene_production.get("schema") != UNIT_WINDOW_SCENE_PRODUCTION_SCHEMA
+        or scene_production.get("episode") != receipt.get("episode")
+        or scene_production.get("scene_slug") != scene_slug
+        or scene_production.get("state")
+        != "approved_text_unit_windows_machine_pending"
+        or scene_production.get("exact_timing_available") is not False
+        or any(
+            scene_production.get("pending", {}).get(key) is not True
+            for key in ("asr", "exact_seconds", "human_audio", "word_alignment")
+        )
+        or production_artifacts.get("unit_window_design", {}).get("sha256")
+        != design_sha
+        or production_artifacts.get("proxy_direction", {}).get("sha256")
+        != proxy_sha
+        or production_artifacts.get("audio", {}).get("sha256")
+        != design_bindings.get("decoded_audio", {}).get("sha256")
+        or production_artifacts.get("script", {}).get("sha256")
+        != design_bindings.get("approved_text", {}).get("sha256")
+        or production_artifacts.get("tts_unit_plan", {}).get("sha256")
+        != design_bindings.get("tts_unit_plan", {}).get("sha256")
+        or production_artifacts.get("screen_text_registry", {}).get("sha256")
+        != design_bindings.get("screen_text_registry", {}).get("sha256")
+    ):
+        errors.append("unit-window compatibility scene production is invalid")
+
+    release = loaded["animation_release"]
+    release_sha = bindings.get("animation_release", {}).get("sha256")
+    if (
+        release.get("schema")
+        != "lecture-animation-narration-animation-release-v1"
+        or release.get("verdict") != "animation_authorized"
+        or release.get("human_audio_gate") != "user_authorized_machine_pending"
+        or release.get("word_alignment_gate")
+        != "pending_not_required_for_unit_window_provisional_render"
+        or release.get("unit_window_design", {}).get("sha256") != design_sha
+        or release.get("scene_production_inventory", {}).get("sha256")
+        != scene_production_sha
+        or release.get("distinct_unit_window_review", {}).get("sha256")
+        != technical_sha
+        or release.get("delegated_visual_direction_gate", {}).get("sha256")
+        != proxy_sha
+        or release.get("delegated_episode_provisional_authority", {}).get(
+            "sha256"
+        )
+        != user_sha
+        or not all(
+            required in release.get("forbidden_claims", [])
+            for required in (
+                "human audio PASS",
+                "ASR or word alignment available",
+                "exact phrase or word seconds",
+                "final candidate acceptance",
+                "assembly, finalization or Git authorization",
+            )
+        )
+    ):
+        errors.append("unit-window compatibility animation release is invalid")
+
+    workflow = loaded["narration_workflow"]
+    if (
+        workflow.get("schema") != "lecture-animation-narration-workflow-v2"
+        or workflow.get("episode") != receipt.get("episode")
+        or workflow.get("status") != "animation_authorized"
+        or not validate_hashed_record(workflow, "state_hash")
+        or workflow.get("workflow_id") != release.get("workflow_id")
+        or workflow.get("current_candidate", {}).get("candidate_hash")
+        != release.get("candidate_hash")
+        or workflow.get("animation_release", {}).get("sha256") != release_sha
+        or paths["animation_release"] is None
+        or workflow.get("animation_release", {}).get("path")
+        != relative_or_absolute(paths["animation_release"], repo_root)
+    ):
+        errors.append("unit-window compatibility narration workflow is invalid")
+
+    readiness = loaded["post_tts_readiness"]
+    readiness_path = paths["post_tts_readiness"]
+    if readiness_path is None:
+        errors.append("unit-window compatibility post-TTS readiness is absent")
+    else:
+        try:
+            episode_path = resolve_stored_path(
+                str(readiness.get("episode", "")), repo_root
+            ).resolve()
+            validate_episode_readiness_receipt(
+                readiness_path,
+                repo_root,
+                episode_path,
+                scene_slug=scene_slug,
+                required_stage="post_tts",
+            )
+        except PipelineError as exc:
+            errors.append(f"unit-window compatibility post-TTS readiness failed: {exc}")
+
+    authority = loaded["delegated_episode_provisional_authority"]
+    if (
+        user_sha != UNIT_WINDOW_PROVISIONAL_AUTHORITY_SHA256
+        or authority.get("schema")
+        != "lecture-animation-delegated-unit-window-machine-pending-provisional-animation-authority-v1"
+        or authority.get("episode") != receipt.get("episode")
+        or scene_slug not in authority.get("scene_scope", [])
+        or authority.get("result")
+        != "AUTHORIZE_G012_G015_UNIT_WINDOW_MACHINE_PENDING_PROVISIONAL_SOURCE_AND_LOW_RES_AUDIBLE_REVIEW_ONLY_AFTER_FULL_EXACT_CHAIN"
+        or authority.get("supersession", {}).get("superseded_authority_sha256")
+        != "165729e8bf552aeb5940e8fd33de7a02c49d9f84425679a896509456df9a544e"
+        or authority.get("truth_boundary", {})
+        != {
+            "asr_pending": True,
+            "episode_assembly_authorized": False,
+            "exact_phrase_or_word_seconds_pending": True,
+            "final_candidate_acceptance_authorized": False,
+            "finalization_authorized": False,
+            "git_authorized": False,
+            "human_audio_pass_claim_allowed": False,
+            "human_audio_pending": True,
+            "publication_authorized": False,
+            "standard_exact_audio_visual_plan_claimed": False,
+            "word_alignment_pending": True,
+        }
+    ):
+        errors.append("unit-window compatibility delegated user authority is invalid")
+    return errors
+
+
+def validate_unit_window_phase_compatibility_path(
+    receipt_path: Path,
+    *,
+    repo_root: Path,
+    scene_slug: str,
+) -> dict[str, Any]:
+    receipt = load_json(receipt_path)
+    errors = validate_unit_window_phase_compatibility_data(
+        receipt, repo_root, scene_slug
+    )
+    if errors:
+        raise PipelineError(
+            "unit-window phase compatibility receipt failed: "
+            + " | ".join(errors)
+        )
+    return receipt
+
+
+def command_seal_unit_window_phase_compatibility(
+    args: argparse.Namespace,
+) -> int:
+    repo_root = Path(args.repo_root).resolve()
+    output = resolve_stored_path(args.output, repo_root).resolve()
+    input_paths = {
+        "unit_window_design": args.unit_window_design,
+        "static_audit": args.static_audit,
+        "author_self_review": args.author_self_review,
+        "distinct_technical_review": args.distinct_technical_review,
+        "delegated_visual_direction": args.delegated_visual_direction,
+        "scene_production": args.scene_production,
+        "animation_release": args.animation_release,
+        "narration_workflow": args.narration_workflow,
+        "post_tts_readiness": args.post_tts_readiness,
+        "delegated_episode_provisional_authority": (
+            args.delegated_episode_provisional_authority
+        ),
+    }
+    receipt: dict[str, Any] = {
+        "schema": UNIT_WINDOW_PHASE_COMPATIBILITY_SCHEMA,
+        "compiler": (
+            "pipeline_v2.seal-provisional-unit-window-phase-start-compatibility"
+        ),
+        "created_at": utc_now(),
+        "episode": args.episode,
+        "scene_slug": args.scene_slug,
+        "allowed_phases": ["authoring", "render"],
+        "timing_authority": "approved_tts_unit_windows_only",
+        "truth_boundary": {
+            "human_audio_pending": True,
+            "asr_pending": True,
+            "word_alignment_pending": True,
+            "exact_seconds_pending": True,
+            "standard_visual_plan_claimed": False,
+            "finalization_authorized": False,
+            "assembly_authorized": False,
+            "git_authorized": False,
+        },
+        "inputs": {
+            key: artifact_snapshot(resolve_stored_path(path, repo_root), repo_root)
+            for key, path in input_paths.items()
+        },
+    }
+    receipt["receipt_hash"] = object_hash(receipt)
+    errors = validate_unit_window_phase_compatibility_data(
+        receipt, repo_root, str(args.scene_slug)
+    )
+    if errors:
+        raise PipelineError(
+            "cannot seal unit-window phase compatibility: "
+            + " | ".join(errors)
+        )
+    write_json(output, receipt)
+    print(
+        json.dumps(
+            {
+                "unit_window_phase_compatibility": str(output),
+                "receipt_hash": receipt["receipt_hash"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
 
 
 def command_validate_authoring_qc(args: argparse.Namespace) -> int:
@@ -12182,6 +12812,42 @@ DEFAULT_EPISODE_QUALITY_TARGET = {
 
 
 DELIVERY_CLOCK_SCHEMA = "lecture-animation-delivery-clock-v1"
+DELIVERY_CAPACITY_REPLAN_AUTHORITY_SCHEMA = (
+    "lecture-animation-delivery-capacity-replan-authority-v1"
+)
+DELIVERY_CAPACITY_REPLAN_AUTHORITY_FIELDS = {
+    "schema",
+    "episode",
+    "clock_path",
+    "expected_clock_hash",
+    "owner_agent_id",
+    "scene_allowlist",
+    "sealed_user_authority",
+    "expected_sealed_user_authority",
+    "requested_capacity",
+    "human_outcome_mutation",
+    "scene_state_mutation",
+    "finalization_authorized",
+    "assembly_authorized",
+    "git_authorized",
+    "publication_authorized",
+    "owner_reassignment_authorized",
+    "authority_hash",
+}
+DELIVERY_CAPACITY_REPLAN_TRUST_ROOTS = {
+    "videos/0011-mpm-11-analyticity": {
+        "user_authority": {
+            "repo_root": "/Volumes/bocchi/myLectures-worktrees/ep0011-batch-c",
+            "path": "videos/0011-mpm-11-analyticity/review/v2/night_reviewer/delegated_episode_provisional_animation_before_human_audio_authority_r01.json",
+            "sha256": "165729e8bf552aeb5940e8fd33de7a02c49d9f84425679a896509456df9a544e",
+        },
+        "authoring_ready_inventory": {
+            "repo_root": "/Volumes/bocchi/myLectures-worktrees/ep0011-batch-c",
+            "path": "videos/0011-mpm-11-analyticity/review/v2/batch_c/g010_g015_authoring_candidate_capacity_inventory_r03.json",
+            "sha256": "648db17d411f5f5446b0496361bad178e49ad2e513bea8a727b16ed3c884bdd3",
+        },
+    }
+}
 HUMAN_WAIT_REQUEST_SCHEMA = "lecture-animation-human-wait-request-v1"
 MACHINE_OFFLINE_EVIDENCE_SCHEMA = (
     "lecture-animation-machine-offline-evidence-v1"
@@ -12232,6 +12898,31 @@ DELIVERY_SCENE_STATES = (
     "approved",
     "assembled",
 )
+
+
+def phase_minimum_delivery_stage(phase: str) -> str | None:
+    """Return the earliest delivery stage at which a production phase may start.
+
+    TTS and ASR intentionally begin after the approved episode spine. Their
+    exact audio and alignment are inputs to the representative scene's final,
+    word-timed detailed plan; requiring a Sol-passed plan here would create a
+    circular dependency. Authoring and render remain behind the representative
+    production and exact-plan gates checked below.
+    """
+
+    return {
+        "planning": "episode_spine",
+        "design": "episode_spine",
+        "tts": "episode_spine",
+        "asr": "episode_spine",
+        "authoring": "representative_production",
+        "render": "representative_production",
+        "review": "representative_production",
+        "repair": "representative_production",
+        "finalization": "finalization",
+    }.get(phase)
+
+
 REPRESENTATIVE_RELEASE_SCHEMA = (
     "lecture-animation-representative-release-v1"
 )
@@ -12275,7 +12966,10 @@ def delivery_clock_initial_hash(clock: dict[str, Any]) -> str:
             "retrospective_reserve_seconds"
         ),
         "max_production_agents": clock.get("max_production_agents"),
-        "max_frozen_candidates": clock.get("max_frozen_candidates"),
+        "max_frozen_candidates": clock.get(
+            "max_frozen_candidates_at_t0",
+            clock.get("max_frozen_candidates"),
+        ),
         "sol_review_model": clock.get("sol_review_model"),
         "pipeline_preflight": clock.get("pipeline_preflight"),
         "pipeline_preflight_hash": clock.get("pipeline_preflight_hash"),
@@ -12334,6 +13028,60 @@ def validate_delivery_clock(
         errors.append("delivery clock production-agent limit is invalid")
     if not 1 <= max_frozen <= 8:
         errors.append("delivery clock frozen-candidate limit is invalid")
+    if "max_frozen_candidates_at_t0" in clock:
+        try:
+            initial_max_frozen = int(clock.get("max_frozen_candidates_at_t0", 0))
+        except (TypeError, ValueError):
+            initial_max_frozen = 0
+        if not 1 <= initial_max_frozen <= max_frozen:
+            errors.append("delivery clock initial frozen-candidate limit is invalid")
+    owner_capacity = clock.get("frozen_candidate_capacity_by_owner", {})
+    if owner_capacity is None:
+        owner_capacity = {}
+    if not isinstance(owner_capacity, dict):
+        errors.append("delivery clock owner frozen-capacity map is invalid")
+    else:
+        board = clock.get("scene_board", {})
+        for owner, entry in owner_capacity.items():
+            if not str(owner).strip() or not isinstance(entry, dict):
+                errors.append("delivery clock owner frozen-capacity entry is invalid")
+                continue
+            try:
+                capacity = int(entry.get("capacity", 0))
+            except (TypeError, ValueError):
+                capacity = 0
+            if not 1 <= capacity <= 8:
+                errors.append("delivery clock owner frozen capacity is invalid")
+            scenes = entry.get("scene_allowlist")
+            if not isinstance(scenes, list) or not scenes or any(
+                not isinstance(scene, str) or not scene.strip() for scene in scenes
+            ):
+                errors.append("delivery clock owner frozen scene allowlist is invalid")
+                continue
+            if len(set(scenes)) != len(scenes):
+                errors.append("delivery clock owner frozen scene allowlist has duplicates")
+            for scene in scenes:
+                row = board.get(scene, {}) if isinstance(board, dict) else {}
+                if not isinstance(row, dict) or row.get("owner_agent_id") != owner:
+                    errors.append(
+                        "delivery clock owner frozen allowlist contains an unowned scene"
+                    )
+            authority = entry.get("authority")
+            replan = entry.get("replan")
+            if not isinstance(authority, dict) or not delivery_artifact_snapshot_is_current(
+                authority, repo_root=repo_root
+            ):
+                errors.append("delivery clock owner frozen authority is stale")
+            if (
+                not isinstance(replan, dict)
+                or replan.get("schema")
+                != "lecture-animation-delivery-capacity-replan-v1"
+                or not validate_hashed_record(replan, "replan_hash")
+                or replan.get("owner_agent_id") != owner
+                or replan.get("scene_allowlist") != scenes
+                or replan.get("new_capacity", {}).get("owner") != capacity
+            ):
+                errors.append("delivery clock owner frozen replan is invalid")
     current_stage = str(clock.get("current_stage", ""))
     if (
         current_stage in DELIVERY_STAGE_SEQUENCE[
@@ -14181,8 +14929,8 @@ def command_update_delivery_board(args: argparse.Namespace) -> int:
         overloaded_active = sorted(
             owner for owner, count in active_by_owner.items() if count > 1
         )
-        overloaded_frozen = sorted(
-            owner for owner, count in frozen_by_owner.items() if count > 1
+        overloaded_frozen = delivery_board_overloaded_frozen_owners(
+            clock, board, frozen_queue
         )
         if overloaded_active:
             raise PipelineError(
@@ -14201,6 +14949,496 @@ def command_update_delivery_board(args: argparse.Namespace) -> int:
         clock["clock_hash"] = _delivery_clock_hash(clock)
         atomic_write_json_unlocked(clock_path, clock)
     print(json.dumps(delivery_clock_status_data(clock), ensure_ascii=False, indent=2))
+    return 0
+
+
+def delivery_board_overloaded_frozen_owners(
+    clock: dict[str, Any],
+    board: dict[str, Any],
+    frozen_queue: list[str],
+) -> list[str]:
+    """Return owners whose frozen queue exceeds their exact scoped authority."""
+
+    owner_capacity = clock.get("frozen_candidate_capacity_by_owner", {})
+    if not isinstance(owner_capacity, dict):
+        owner_capacity = {}
+    frozen_by_owner: Counter[str] = Counter(
+        str(board[scene].get("owner_agent_id", ""))
+        for scene in frozen_queue
+    )
+    overloaded: list[str] = []
+    for owner, count in frozen_by_owner.items():
+        entry = owner_capacity.get(owner, {})
+        capacity = (
+            int(entry.get("capacity", 1)) if isinstance(entry, dict) else 1
+        )
+        allowlist = (
+            set(entry.get("scene_allowlist", []))
+            if isinstance(entry, dict)
+            else set()
+        )
+        owner_frozen = {
+            scene
+            for scene in frozen_queue
+            if str(board[scene].get("owner_agent_id", "")) == owner
+        }
+        if count > capacity or (
+            count > 1 and not owner_frozen.issubset(allowlist)
+        ):
+            overloaded.append(owner)
+    return sorted(overloaded)
+
+
+def delivery_capacity_user_authority_errors(
+    authority: dict[str, Any],
+    *,
+    episode_identity: str,
+) -> list[str]:
+    errors: list[str] = []
+    if (
+        authority.get("schema")
+        != "lecture-animation-delegated-episode-provisional-animation-authority-v1"
+    ):
+        errors.append("sealed user authority schema is invalid")
+    if authority.get("episode") != episode_identity:
+        errors.append("sealed user authority targets another episode")
+    if (
+        authority.get("result")
+        != "AUTHORIZE_PROVISIONAL_SOURCE_AND_REVIEW_RENDER_FOR_ELIGIBLE_EXACT_PLAN_SCENES"
+    ):
+        errors.append("sealed user authority result is invalid")
+    labels = authority.get("mandatory_provisional_labels", {})
+    required_labels = {
+        "human_audio_pending": True,
+        "audio_pass_claim_allowed": False,
+        "render_kind": "provisional_review_candidate",
+        "user_wake_review_required": True,
+        "audio_or_timing_repair_may_require_rerender": True,
+        "final_render_or_authoritative_candidate_claim_allowed": False,
+    }
+    if not isinstance(labels, dict) or any(
+        labels.get(key) != value for key, value in required_labels.items()
+    ):
+        errors.append("sealed user authority provisional labels are invalid")
+    forbidden = authority.get("strictly_not_authorized")
+    required_forbidden_phrases = (
+        "claiming human audio PASS",
+        "episode assembly",
+        "finalization",
+        "stage or commit",
+        "merge or push",
+        "publication or upload",
+    )
+    if not isinstance(forbidden, list) or any(
+        not any(phrase in str(item) for item in forbidden)
+        for phrase in required_forbidden_phrases
+    ):
+        errors.append("sealed user authority prohibition boundary is invalid")
+    return errors
+
+
+def delivery_capacity_inventory_errors(
+    inventory: dict[str, Any],
+    *,
+    episode_identity: str,
+    owner_agent_id: str,
+    scene_allowlist: list[str],
+    repo_root: Path,
+) -> list[str]:
+    errors: list[str] = []
+    if inventory.get("schema") not in {
+        "lecture-animation-authoring-ready-inventory-v1",
+        "lecture-animation-authoring-capacity-inventory-v1",
+    }:
+        errors.append("authoring-ready inventory schema is invalid")
+    if inventory.get("episode") != episode_identity:
+        errors.append("authoring-ready inventory targets another episode")
+    inventory_owner = inventory.get("author_agent_id", inventory.get("owner_agent_id"))
+    if inventory_owner != owner_agent_id:
+        errors.append("authoring-ready inventory targets another owner")
+    boundary = inventory.get("truth_boundary", {})
+    ready_boundary = {
+        "human_audio_pending": True,
+        "word_alignment_pending": True,
+        "exact_timing_pending": True,
+        "source_created_by_this_inventory": False,
+        "render_started_by_this_inventory": False,
+        "finalization_authorized": False,
+    }
+    capacity_boundary = {
+        "read_only_governance_snapshot": True,
+        "scene_changed": False,
+        "human_outcome_changed": False,
+        "source_changed": False,
+        "render_changed": False,
+        "finalization_authorized": False,
+        "git_authorized": False,
+        "human_audio_pass_claimed": False,
+    }
+    expected_boundary = (
+        capacity_boundary
+        if inventory.get("schema")
+        == "lecture-animation-authoring-capacity-inventory-v1"
+        else ready_boundary
+    )
+    if not isinstance(boundary, dict) or any(
+        boundary.get(key) != value for key, value in expected_boundary.items()
+    ):
+        errors.append("authoring-ready inventory truth boundary is invalid")
+    rows = inventory.get("scenes")
+    rows_by_scene = {
+        str(row.get("scene_slug", "")): row
+        for row in rows or []
+        if isinstance(row, dict)
+    }
+    if not isinstance(rows, list) or len(rows_by_scene) != len(rows):
+        errors.append("authoring-ready inventory scenes are invalid")
+        return errors
+    for scene in scene_allowlist:
+        row = rows_by_scene.get(scene)
+        if not isinstance(row, dict):
+            errors.append(f"authoring-ready inventory lacks scene: {scene}")
+            continue
+        workflow_row = row.get("workflow", row)
+        release_row = row.get("release", row)
+        if workflow_row.get("status", row.get("workflow_status")) != "animation_authorized":
+            errors.append(f"authoring-ready workflow is not authorized: {scene}")
+            continue
+        workflow_path = resolve_stored_path(
+            str(workflow_row.get("path", row.get("workflow_path", ""))), repo_root
+        ).resolve()
+        if not workflow_path.is_file() or hashlib.sha256(workflow_path.read_bytes()).hexdigest() != row.get(
+            "workflow_file_sha256", workflow_row.get("sha256")
+        ):
+            errors.append(f"authoring-ready workflow bytes are stale: {scene}")
+            continue
+        workflow = load_json_unlocked(workflow_path)
+        if (
+            workflow.get("schema")
+            != "lecture-animation-narration-workflow-v2"
+            or workflow.get("episode") != episode_identity
+            or workflow.get("status") != "animation_authorized"
+            or not str(workflow.get("workflow_id", "")).strip()
+            or not str(
+                workflow.get("current_candidate", {}).get(
+                    "candidate_hash", ""
+                )
+            ).strip()
+            or workflow.get("state_hash")
+            != row.get("workflow_state_hash", workflow_row.get("state_hash"))
+            or not validate_hashed_record(workflow, "state_hash")
+        ):
+            errors.append(f"authoring-ready workflow state is invalid: {scene}")
+        release_path = resolve_stored_path(
+            str(release_row.get("path", row.get("release_path", ""))), repo_root
+        ).resolve()
+        if not release_path.is_file() or hashlib.sha256(release_path.read_bytes()).hexdigest() != row.get(
+            "release_sha256", release_row.get("sha256")
+        ):
+            errors.append(f"authoring-ready release bytes are stale: {scene}")
+            continue
+        release = load_json_unlocked(release_path)
+        if (
+            release.get("schema")
+            != "lecture-animation-narration-animation-release-v1"
+            or release.get("workflow_id") != workflow.get("workflow_id")
+            or release.get("candidate_hash")
+            != workflow.get("current_candidate", {}).get("candidate_hash")
+            or release.get("verdict") != "animation_authorized"
+            or release.get("human_audio_gate")
+            != "user_authorized_machine_pending"
+            or release.get("delegated_episode_provisional_authority", {}).get(
+                "sha256"
+            )
+            != DELIVERY_CAPACITY_REPLAN_TRUST_ROOTS[episode_identity][
+                "user_authority"
+            ]["sha256"]
+            or workflow.get("animation_release", {}).get("path")
+            != relative_or_absolute(release_path, repo_root)
+            or workflow.get("animation_release", {}).get("sha256")
+            != row.get("release_sha256", release_row.get("sha256"))
+            or f"/{scene}/"
+            not in f"/{relative_or_absolute(workflow_path, repo_root)}/"
+            or f"/{scene}/"
+            not in f"/{relative_or_absolute(release_path, repo_root)}/"
+        ):
+            errors.append(f"authoring-ready release state is invalid: {scene}")
+    return errors
+
+
+def command_authorize_delivery_capacity_replan(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).resolve()
+    clock_path = resolve_stored_path(args.clock, repo_root).resolve()
+    authority_path = resolve_stored_path(args.authority, repo_root).resolve()
+    output_path = resolve_stored_path(args.output_replan, repo_root).resolve()
+    trusted_user_authority_path = resolve_stored_path(
+        args.trusted_user_authority, repo_root
+    ).resolve()
+    trusted_inventory_path = resolve_stored_path(
+        args.trusted_authoring_ready_inventory, repo_root
+    ).resolve()
+    trusted_user_authority_sha256 = str(
+        args.trusted_user_authority_sha256 or ""
+    ).strip()
+    trusted_inventory_sha256 = str(
+        args.trusted_authoring_ready_inventory_sha256 or ""
+    ).strip()
+    expected_hash = str(args.expected_clock_hash or "").strip()
+    owner = str(args.owner_agent_id or "").strip()
+    reason = str(args.reason or "").strip()
+    try:
+        new_global = int(args.new_max_frozen_candidates)
+        new_owner = int(args.new_owner_max_frozen_candidates)
+    except (TypeError, ValueError) as exc:
+        raise PipelineError("delivery capacity replan limits must be integers") from exc
+    if not owner:
+        raise PipelineError("delivery capacity replan requires an owner agent id")
+    if len(reason) < 16:
+        raise PipelineError("delivery capacity replan requires a concrete reason")
+    if not 1 <= new_global <= 8 or not 1 <= new_owner <= 8:
+        raise PipelineError("delivery capacity replan limits must be between one and eight")
+    if len(
+        {
+            clock_path,
+            authority_path,
+            output_path,
+            trusted_user_authority_path,
+            trusted_inventory_path,
+        }
+    ) != 5:
+        raise PipelineError("delivery capacity replan paths must be distinct")
+    if output_path.exists():
+        raise PipelineError("delivery capacity replan output already exists")
+    with locked_paths(
+        [
+            clock_path,
+            authority_path,
+            output_path,
+            trusted_user_authority_path,
+            trusted_inventory_path,
+        ]
+    ):
+        clock = load_json_unlocked(clock_path)
+        if clock.get("clock_hash") != expected_hash:
+            raise PipelineError("delivery capacity replan expected clock hash is stale")
+        errors = validate_delivery_clock(clock, repo_root=repo_root)
+        if errors:
+            raise PipelineError("delivery capacity replan clock failed: " + " | ".join(errors))
+        authority = load_json_unlocked(authority_path)
+        if authority.get("schema") != DELIVERY_CAPACITY_REPLAN_AUTHORITY_SCHEMA:
+            raise PipelineError("delivery capacity replan authority schema is invalid")
+        if not validate_hashed_record(authority, "authority_hash"):
+            raise PipelineError("delivery capacity replan authority hash is invalid")
+        unknown_fields = set(authority) - DELIVERY_CAPACITY_REPLAN_AUTHORITY_FIELDS
+        missing_fields = DELIVERY_CAPACITY_REPLAN_AUTHORITY_FIELDS - set(authority)
+        if unknown_fields or missing_fields:
+            raise PipelineError("delivery capacity replan authority schema is not closed")
+        if authority.get("episode") != clock.get("episode"):
+            raise PipelineError("delivery capacity replan authority targets another episode")
+        trust_root = DELIVERY_CAPACITY_REPLAN_TRUST_ROOTS.get(
+            str(clock.get("episode", ""))
+        )
+        if not isinstance(trust_root, dict):
+            raise PipelineError("delivery capacity replan episode has no trust root")
+        episode_path = resolve_stored_path(
+            str(clock.get("episode", "")), repo_root
+        ).resolve()
+        episode_review_path = (episode_path / "review").resolve()
+        if output_path != episode_review_path and episode_review_path not in output_path.parents:
+            raise PipelineError("delivery capacity replan output must remain in episode review")
+        if authority.get("clock_path") != relative_or_absolute(clock_path, repo_root):
+            raise PipelineError("delivery capacity replan authority targets another clock")
+        if authority.get("expected_clock_hash") != expected_hash:
+            raise PipelineError("delivery capacity replan authority clock hash is stale")
+        if authority.get("owner_agent_id") != owner:
+            raise PipelineError("delivery capacity replan authority targets another owner")
+        scenes = authority.get("scene_allowlist")
+        if not isinstance(scenes, list) or not scenes or len(set(scenes)) != len(scenes):
+            raise PipelineError("delivery capacity replan scene allowlist is invalid")
+        board = clock.get("scene_board", {})
+        for scene in scenes:
+            row = board.get(scene, {}) if isinstance(board, dict) else {}
+            if not isinstance(row, dict) or row.get("owner_agent_id") != owner:
+                raise PipelineError("delivery capacity replan allowlist contains an unowned scene")
+        sealed_user_authority = authority.get("sealed_user_authority")
+        expected_user_authority = authority.get("expected_sealed_user_authority")
+        trusted_user_authority_snapshot = artifact_snapshot(
+            trusted_user_authority_path, repo_root
+        )
+        pinned_user_authority = dict(trust_root.get("user_authority", {}))
+        pinned_user_repo_root = pinned_user_authority.pop("repo_root", None)
+        if (
+            str(repo_root) != pinned_user_repo_root
+            or {
+                key: trusted_user_authority_snapshot.get(key)
+                for key in ("path", "sha256")
+            }
+            != {
+                key: pinned_user_authority.get(key)
+                for key in ("path", "sha256")
+            }
+        ):
+            raise PipelineError("trusted user authority differs from the pinned root")
+        if (
+            trusted_user_authority_snapshot.get("sha256")
+            != trusted_user_authority_sha256
+        ):
+            raise PipelineError("trusted user authority SHA differs")
+        if (
+            not isinstance(expected_user_authority, dict)
+            or sealed_user_authority != expected_user_authority
+            or sealed_user_authority != trusted_user_authority_snapshot
+        ):
+            raise PipelineError("delivery capacity replan user authority binding differs")
+        if not isinstance(sealed_user_authority, dict) or not delivery_artifact_snapshot_is_current(
+            sealed_user_authority, repo_root=repo_root
+        ):
+            raise PipelineError("delivery capacity replan user authority is stale")
+        sealed_user_authority_path = resolve_stored_path(
+            str(sealed_user_authority.get("path", "")), repo_root
+        ).resolve()
+        sealed_user_authority_record = load_json_unlocked(
+            sealed_user_authority_path
+        )
+        user_authority_errors = delivery_capacity_user_authority_errors(
+            sealed_user_authority_record,
+            episode_identity=str(clock.get("episode", "")),
+        )
+        if user_authority_errors:
+            raise PipelineError(
+                "delivery capacity replan user authority failed: "
+                + " | ".join(user_authority_errors)
+            )
+        trusted_inventory_snapshot = artifact_snapshot(
+            trusted_inventory_path, repo_root
+        )
+        pinned_inventory = dict(trust_root.get("authoring_ready_inventory", {}))
+        pinned_inventory_repo_root = pinned_inventory.pop("repo_root", None)
+        if (
+            str(repo_root) != pinned_inventory_repo_root
+            or {
+                key: trusted_inventory_snapshot.get(key)
+                for key in ("path", "sha256")
+            }
+            != {
+                key: pinned_inventory.get(key)
+                for key in ("path", "sha256")
+            }
+        ):
+            raise PipelineError(
+                "trusted authoring-ready inventory differs from the pinned root"
+            )
+        if trusted_inventory_snapshot.get("sha256") != trusted_inventory_sha256:
+            raise PipelineError("trusted authoring-ready inventory SHA differs")
+        inventory = load_json_unlocked(trusted_inventory_path)
+        inventory_errors = delivery_capacity_inventory_errors(
+            inventory,
+            episode_identity=str(clock.get("episode", "")),
+            owner_agent_id=owner,
+            scene_allowlist=scenes,
+            repo_root=repo_root,
+        )
+        if inventory_errors:
+            raise PipelineError(
+                "delivery capacity replan authoring-ready inventory failed: "
+                + " | ".join(inventory_errors)
+            )
+        required_false = (
+            "human_outcome_mutation",
+            "scene_state_mutation",
+            "finalization_authorized",
+            "assembly_authorized",
+            "git_authorized",
+            "publication_authorized",
+            "owner_reassignment_authorized",
+        )
+        if any(authority.get(field) is not False for field in required_false):
+            raise PipelineError("delivery capacity replan authority requests a forbidden mutation")
+        requested = authority.get("requested_capacity", {})
+        if not isinstance(requested, dict) or requested.get("episode") != new_global or requested.get("owner") != new_owner:
+            raise PipelineError("delivery capacity replan limits differ from authority")
+        current_global = int(clock.get("max_frozen_candidates", 2) or 2)
+        capacity_map = json.loads(json.dumps(clock.get("frozen_candidate_capacity_by_owner", {})))
+        if not isinstance(capacity_map, dict):
+            capacity_map = {}
+        current_owner = int(capacity_map.get(owner, {}).get("capacity", 1)) if isinstance(capacity_map.get(owner, {}), dict) else 1
+        if new_global < current_global or new_owner < current_owner:
+            raise PipelineError("delivery capacity replan must be monotonic")
+        previous_entry = capacity_map.get(owner, {})
+        previous_allowlist = set(
+            previous_entry.get("scene_allowlist", [])
+            if isinstance(previous_entry, dict)
+            else []
+        )
+        frozen_states = {"rendered", "self_review_passed", "sol_reviewed"}
+        current_frozen = {
+            scene
+            for scene, row in board.items()
+            if isinstance(row, dict)
+            and row.get("owner_agent_id") == owner
+            and row.get("state") in frozen_states
+        }
+        new_allowlist = set(scenes)
+        if not previous_allowlist.issubset(new_allowlist):
+            raise PipelineError("delivery capacity replan cannot shrink its scene allowlist")
+        if not current_frozen.issubset(new_allowlist):
+            raise PipelineError("delivery capacity replan omits a current frozen scene")
+        before_protected = {
+            key: clock.get(key)
+            for key in (
+                "scene_board", "status", "current_stage", "representative_scene",
+                "representative_release", "t0", "created_at",
+            )
+        }
+        replan = {
+            "schema": "lecture-animation-delivery-capacity-replan-v1",
+            "episode": clock.get("episode"),
+            "clock_path": relative_or_absolute(clock_path, repo_root),
+            "previous_clock_hash": expected_hash,
+            "previous_capacity": {"episode": current_global, "owner": current_owner},
+            "new_capacity": {"episode": new_global, "owner": new_owner},
+            "owner_agent_id": owner,
+            "scene_allowlist": scenes,
+            "authority": artifact_snapshot(authority_path, repo_root),
+            "trusted_user_authority": trusted_user_authority_snapshot,
+            "trusted_authoring_ready_inventory": trusted_inventory_snapshot,
+            "reason": reason,
+            "recorded_at": utc_now(),
+            "human_outcome_mutation": False,
+            "scene_state_mutation": False,
+            "finalization_authorized": False,
+            "assembly_authorized": False,
+            "git_authorized": False,
+            "publication_authorized": False,
+            "owner_reassignment_authorized": False,
+            "authoritative_only_when_embedded_in_current_clock": True,
+        }
+        replan["replan_hash"] = object_hash(replan)
+        capacity_map[owner] = {
+            "capacity": new_owner,
+            "scene_allowlist": scenes,
+            "authority": artifact_snapshot(authority_path, repo_root),
+            "replan": replan,
+        }
+        updated = dict(clock)
+        updated.pop("clock_hash", None)
+        updated.setdefault("max_frozen_candidates_at_t0", current_global)
+        updated["max_frozen_candidates"] = new_global
+        updated["frozen_candidate_capacity_by_owner"] = capacity_map
+        history = list(updated.get("delivery_capacity_replans", []))
+        history.append(replan)
+        updated["delivery_capacity_replans"] = history
+        updated["updated_at"] = utc_now()
+        after_protected = {key: updated.get(key) for key in before_protected}
+        if object_hash(before_protected) != object_hash(after_protected):
+            raise PipelineError("delivery capacity replan changed protected clock state")
+        updated["clock_hash"] = _delivery_clock_hash(updated)
+        post_errors = validate_delivery_clock(updated, repo_root=repo_root)
+        if post_errors:
+            raise PipelineError("delivery capacity replan result failed: " + " | ".join(post_errors))
+        atomic_write_json_unlocked(output_path, replan)
+        atomic_write_json_unlocked(clock_path, updated)
+    print(json.dumps({"replan": relative_or_absolute(output_path, repo_root), "replan_hash": replan["replan_hash"], "clock_hash": updated["clock_hash"]}, ensure_ascii=False))
     return 0
 
 
@@ -14466,13 +15704,74 @@ def command_transition_delivery_clock(args: argparse.Namespace) -> int:
     with locked_paths([clock_path]):
         clock = load_json_unlocked(clock_path)
         errors = validate_delivery_clock(clock, repo_root=repo_root)
+        if args.action == "refresh-preflight":
+            errors = [
+                error
+                for error in errors
+                if error
+                not in {
+                    "pipeline preflight is stale for the current Skill tree",
+                    "delivery clock pipeline preflight hash is stale",
+                }
+            ]
         if errors:
             raise PipelineError("delivery clock failed: " + " | ".join(errors))
         now = utc_now()
         action = args.action
         clock = json.loads(json.dumps(clock))
         clock.pop("clock_hash", None)
-        if action in {"pause-human", "pause-offline"}:
+        if action == "refresh-preflight":
+            reason = str(args.reason or "").strip()
+            if len(reason) < 16:
+                raise PipelineError(
+                    "preflight refresh requires a concrete Skill-change reason"
+                )
+            preflight_raw = str(
+                getattr(args, "preflight_receipt", "") or ""
+            ).strip()
+            if not preflight_raw:
+                raise PipelineError(
+                    "preflight refresh requires --preflight-receipt"
+                )
+            preflight_path = resolve_stored_path(
+                preflight_raw, repo_root
+            ).resolve()
+            preflight = load_json_unlocked(preflight_path)
+            preflight_errors = validate_pipeline_preflight_receipt(
+                preflight, repo_root=repo_root
+            )
+            if preflight_errors:
+                raise PipelineError(
+                    "preflight refresh failed: "
+                    + " | ".join(preflight_errors)
+                )
+            old_preflight = clock.get("pipeline_preflight")
+            old_preflight_hash = clock.get("pipeline_preflight_hash")
+            clock["pipeline_preflight"] = artifact_snapshot(
+                preflight_path, repo_root
+            )
+            clock["pipeline_preflight_hash"] = preflight.get(
+                "receipt_hash"
+            )
+            refreshes = clock.setdefault("preflight_refreshes", [])
+            if not isinstance(refreshes, list):
+                raise PipelineError(
+                    "delivery clock preflight refresh history is invalid"
+                )
+            refreshes.append(
+                {
+                    "created_at": now,
+                    "reason": reason,
+                    "old_preflight": old_preflight,
+                    "old_preflight_hash": old_preflight_hash,
+                    "new_preflight": artifact_snapshot(
+                        preflight_path, repo_root
+                    ),
+                    "new_preflight_hash": preflight.get("receipt_hash"),
+                    "stage_preserved": clock.get("current_stage"),
+                }
+            )
+        elif action in {"pause-human", "pause-offline"}:
             if clock.get("status") != "active":
                 raise PipelineError("only an active delivery clock can pause")
             reason = str(args.reason or "").strip()
@@ -31005,18 +32304,7 @@ def command_phase_start(args: argparse.Namespace) -> int:
             raise PipelineError("production phase requires an active delivery clock")
         current_stage = str(delivery_clock.get("current_stage", ""))
         stage_index = DELIVERY_STAGE_SEQUENCE.index(current_stage)
-        minimum_stage_by_phase = {
-            "planning": "episode_spine",
-            "design": "episode_spine",
-            "tts": "representative_design",
-            "asr": "representative_design",
-            "authoring": "representative_production",
-            "render": "representative_production",
-            "review": "representative_production",
-            "repair": "representative_production",
-            "finalization": "finalization",
-        }
-        minimum_stage = minimum_stage_by_phase.get(str(args.phase))
+        minimum_stage = phase_minimum_delivery_stage(str(args.phase))
         if args.phase == "planning" and phase_purpose == "lecture_draft":
             if current_stage not in {"initialization", "lecture_approval"}:
                 raise PipelineError(
@@ -31844,35 +33132,62 @@ def command_phase_start(args: argparse.Namespace) -> int:
         and phase_purpose in {"candidate", "repair_rerender", "technical_retry"}
     )
     if workflow_v2_plan_gated_phase:
+        unit_window_compatibility_raw = str(
+            getattr(args, "unit_window_phase_compatibility", "") or ""
+        ).strip()
         visual_plan_review_raw = str(
             getattr(args, "visual_plan_review", "") or ""
         ).strip()
-        if not visual_plan_review_raw:
+        if visual_plan_review_raw and unit_window_compatibility_raw:
             raise PipelineError(
-                "workflow v2 requires --visual-plan-review before "
-                "animation production; Keynote and "
-                "keyframes cannot substitute for the reviewed detailed plan"
+                "workflow v2 accepts either --visual-plan-review or "
+                "--unit-window-phase-compatibility, never both"
             )
-        visual_plan_review_path = resolve_stored_path(
-            visual_plan_review_raw,
-            repo_root,
-        )
-        visual_plan_review = validate_visual_plan_review_receipt_path(
-            visual_plan_review_path,
-            repo_root=repo_root,
-            scene_slug=str(args.scene_slug),
-        )
-        readiness_binding = {
-            "visual_plan_review_path": relative_or_absolute(
-                visual_plan_review_path,
+        if not visual_plan_review_raw and not unit_window_compatibility_raw:
+            raise PipelineError(
+                "workflow v2 requires --visual-plan-review or a sealed "
+                "--unit-window-phase-compatibility before animation production"
+            )
+        if unit_window_compatibility_raw:
+            compatibility_path = resolve_stored_path(
+                unit_window_compatibility_raw, repo_root
+            )
+            compatibility = validate_unit_window_phase_compatibility_path(
+                compatibility_path,
+                repo_root=repo_root,
+                scene_slug=str(args.scene_slug),
+            )
+            readiness_binding = {
+                "unit_window_phase_compatibility_path": relative_or_absolute(
+                    compatibility_path, repo_root
+                ),
+                "unit_window_phase_compatibility_hash": compatibility.get(
+                    "receipt_hash"
+                ),
+                "visual_plan_review_gate_version": "unit_window_provisional_v1",
+                "visual_plan_review_scene_production_hash": None,
+            }
+        else:
+            visual_plan_review_path = resolve_stored_path(
+                visual_plan_review_raw,
                 repo_root,
-            ),
-            "visual_plan_review_hash": visual_plan_review.get("review_hash"),
-            "visual_plan_review_gate_version": 1,
-            "visual_plan_review_scene_production_hash": (
-                visual_plan_review.get("scene_production_hash")
-            ),
-        }
+            )
+            visual_plan_review = validate_visual_plan_review_receipt_path(
+                visual_plan_review_path,
+                repo_root=repo_root,
+                scene_slug=str(args.scene_slug),
+            )
+            readiness_binding = {
+                "visual_plan_review_path": relative_or_absolute(
+                    visual_plan_review_path,
+                    repo_root,
+                ),
+                "visual_plan_review_hash": visual_plan_review.get("review_hash"),
+                "visual_plan_review_gate_version": 1,
+                "visual_plan_review_scene_production_hash": (
+                    visual_plan_review.get("scene_production_hash")
+                ),
+            }
 
         episode_readiness_path = getattr(args, "episode_readiness", None)
         if not episode_readiness_path:
@@ -31918,22 +33233,46 @@ def command_phase_start(args: argparse.Namespace) -> int:
             repo_root,
         )
         scene_production = load_json(scene_production_path)
-        scene_production_errors = validate_scene_production_data(
-            scene_production,
-            repo_root,
-            str(args.scene_slug),
-        )
-        if scene_production_errors:
-            raise PipelineError(
-                "workflow v2 scene production contract failed: "
-                + " | ".join(scene_production_errors)
+        if unit_window_compatibility_raw:
+            expected_production = compatibility.get("inputs", {}).get(
+                "scene_production", {}
             )
-        if scene_production.get(
-            "scene_production_hash"
-        ) != visual_plan_review.get("scene_production_hash"):
-            raise PipelineError(
-                "workflow v2 animation production scene contract differs "
-                "from the exact scene production reviewed with the visual plan"
+            current_production = artifact_snapshot(
+                scene_production_path, repo_root
+            )
+            if (
+                scene_production.get("schema")
+                != UNIT_WINDOW_SCENE_PRODUCTION_SCHEMA
+                or current_production.get("sha256")
+                != expected_production.get("sha256")
+                or current_production.get("path")
+                != expected_production.get("path")
+            ):
+                raise PipelineError(
+                    "workflow v2 unit-window scene production differs from "
+                    "the exact compatibility receipt"
+                )
+            scene_production_hash = current_production.get("sha256")
+        else:
+            scene_production_errors = validate_scene_production_data(
+                scene_production,
+                repo_root,
+                str(args.scene_slug),
+            )
+            if scene_production_errors:
+                raise PipelineError(
+                    "workflow v2 scene production contract failed: "
+                    + " | ".join(scene_production_errors)
+                )
+            if scene_production.get(
+                "scene_production_hash"
+            ) != visual_plan_review.get("scene_production_hash"):
+                raise PipelineError(
+                    "workflow v2 animation production scene contract differs "
+                    "from the exact scene production reviewed with the visual plan"
+                )
+            scene_production_hash = scene_production.get(
+                "scene_production_hash"
             )
         readiness_binding.update(
             {
@@ -31941,9 +33280,7 @@ def command_phase_start(args: argparse.Namespace) -> int:
                     scene_production_path,
                     repo_root,
                 ),
-                "scene_production_hash": scene_production.get(
-                    "scene_production_hash"
-                ),
+                "scene_production_hash": scene_production_hash,
             }
         )
         readiness_binding.update(narration_workflow_binding)
@@ -36744,7 +38081,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         or metrics.get("independent_findings_after_self_review")
         or any(
             "repair" in phases
-            for phases in metrics.get("phase_pairs_by_scene", {}).values()
+            for phases in (metrics.get("phase_pairs_by_scene") or {}).values()
         )
     )
     repair_log_observed = bool(ledger_rows.get("repair_attempts"))
@@ -36758,7 +38095,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
     issue_sources: Counter[str] = Counter()
     issue_statuses: Counter[str] = Counter()
     issue_field_counts: Counter[str] = Counter()
-    planned_scene_set = set(map(str, metrics.get("scenes_planned", [])))
+    planned_scene_set = set(map(str, metrics.get("scenes_planned") or []))
     human_issue_scenes: set[str] = set()
     global_human_issue_count = 0
     for _, issue in issue_records:
@@ -37026,7 +38363,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
         if item.get("review_todo_count") is not None
     ]
 
-    phase_seconds = metrics.get("phase_seconds", {})
+    phase_seconds = metrics.get("phase_seconds") or {}
     bottleneck_signals: list[dict[str, Any]] = [
         {
             "signal_type": "measured_phase_wall_time",
@@ -37365,7 +38702,7 @@ def retrospective_evidence_data(repo_root: Path, episode: Path) -> dict[str, Any
                 {},
             ).get("token_usage_coverage"),
             "human_outcome_coverage": round(
-                len(metrics.get("human_judged_scenes", []))
+                len(metrics.get("human_judged_scenes") or [])
                 / max(int(metrics.get("scene_count", 0) or 0), 1),
                 4,
             )
@@ -38118,6 +39455,47 @@ def production_metrics(episode: Path) -> dict[str, Any]:
             "repair_attempts",
             "repair_attempt_scene_count",
             "repair_attempt_scene_coverage",
+        ):
+            result[key] = None
+    if not ledger_observed["outcomes"]:
+        for key in (
+            "outcome_events",
+            "human_judged",
+            "human_judged_scenes",
+            "human_rejections",
+            "human_rejection_rate",
+            "candidate_human_rejection_rate",
+            "human_rejected_scene_count",
+            "human_rejected_scene_rate",
+            "scene_ever_rejected_rate",
+            "false_passes",
+            "false_pass_rate",
+            "candidate_false_pass_rate",
+            "false_pass_scene_count",
+            "false_pass_scene_rate",
+            "scene_false_pass_rate",
+        ):
+            result[key] = None
+    if not planned_scenes and not observed_scenes:
+        for key in (
+            "scene_count",
+            "phase_pair_scene_coverage",
+            "review_mp4_per_scene",
+            "tokens_per_scene",
+        ):
+            result[key] = None
+    if not ledger_observed["phases"]:
+        for key in (
+            "phase_events",
+            "avoidable_retry_seconds",
+            "critical_path_minutes",
+            "aggregate_agent_minutes",
+            "concurrency_overlap_minutes",
+            "total_measured_minutes",
+            "total_observed_tokens",
+            "uncached_input_tokens",
+            "cache_hit_ratio",
+            "workflow_v2_animation_phase_events",
         ):
             result[key] = None
     return result
@@ -39396,14 +40774,16 @@ def validate_finalization_human_override(
         errors.append("constraints are missing")
         constraints = {}
     required_constraints = {
-        "maximum_sprite_overlay_records": 12,
+        "sprite_count_policy": "no_whole_episode_cap",
+        "sprite_density_unit": "rolling_eight_second_entrance_window",
+        "simultaneous_sprite_policy": "disjoint_safe_regions_evidence_reviewed_semantics",
         "mathematical_attention_priority": "hard_gate",
-        "identity_phrase": "我是结束乐队的键盘手",
+        "identity_phrase": "我是结束乐队的键盘手，下个视频见",
         "identity_character": "sumino",
         "identity_character_count": 1,
         "identity_action": "any_existing_semantically_appropriate_action",
         "identity_action_talking_required": False,
-        "identity_window_coverage": "complete_word_aligned_phrase",
+        "identity_window_coverage": "complete_word_aligned_signoff",
         "identity_and_farewell_in_subtitles": False,
         "identity_and_farewell_in_screen_text": False,
     }
@@ -39422,8 +40802,10 @@ def validate_finalization_human_override(
         "scope": override.get("scope"),
         "identity_character": constraints.get("identity_character"),
         "identity_action_policy": constraints.get("identity_action"),
-        "maximum_sprite_overlay_records": constraints.get(
-            "maximum_sprite_overlay_records"
+        "sprite_count_policy": constraints.get("sprite_count_policy"),
+        "sprite_density_unit": constraints.get("sprite_density_unit"),
+        "simultaneous_sprite_policy": constraints.get(
+            "simultaneous_sprite_policy"
         ),
     }
 
@@ -39516,6 +40898,68 @@ def validate_finalization_manifest_contract(
         else None
     )
     errors: list[str] = []
+
+    def validate_qc_evidence(
+        row: dict[str, Any],
+        label: str,
+        *,
+        evidence_kind: str,
+        matching_fields: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        raw_path = str(row.get("evidence_path", "") or "").strip()
+        expected_sha = str(row.get("evidence_sha256", "") or "").strip()
+        if not raw_path or not expected_sha:
+            errors.append(f"{label} lacks a hash-bound evidence file")
+            return None
+        evidence_path = resolve_stored_path(raw_path, repo_root)
+        if not evidence_path.is_file():
+            errors.append(f"{label} evidence path is stale")
+            return None
+        if hashlib.sha256(evidence_path.read_bytes()).hexdigest() != expected_sha:
+            errors.append(f"{label} evidence sha256 is stale")
+            return None
+        try:
+            evidence = load_json(evidence_path)
+        except PipelineError:
+            errors.append(f"{label} evidence is not a valid JSON object")
+            return None
+        if evidence.get("schema") != "lecture-animation-finalization-qc-evidence-v1":
+            errors.append(f"{label} evidence has the wrong schema")
+            return None
+        if evidence.get("evidence_kind") != evidence_kind:
+            errors.append(f"{label} evidence has the wrong evidence_kind")
+            return None
+        if evidence.get("status") != "pass":
+            errors.append(f"{label} evidence does not have pass status")
+            return None
+        artifacts = evidence.get("measurement_artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            errors.append(f"{label} evidence lacks measurement artifacts")
+            return None
+        for artifact_index, artifact in enumerate(artifacts, 1):
+            if not isinstance(artifact, dict):
+                errors.append(f"{label} measurement artifact {artifact_index} is invalid")
+                return None
+            artifact_role = str(artifact.get("role", "") or "").strip()
+            artifact_raw_path = str(artifact.get("path", "") or "").strip()
+            artifact_sha = str(artifact.get("sha256", "") or "").strip()
+            if not artifact_role or not artifact_raw_path or not artifact_sha:
+                errors.append(f"{label} measurement artifact {artifact_index} is incomplete")
+                return None
+            artifact_path = resolve_stored_path(artifact_raw_path, repo_root)
+            if not artifact_path.is_file():
+                errors.append(f"{label} measurement artifact {artifact_index} is stale")
+                return None
+            if hashlib.sha256(artifact_path.read_bytes()).hexdigest() != artifact_sha:
+                errors.append(
+                    f"{label} measurement artifact {artifact_index} sha256 is stale"
+                )
+                return None
+        for field in matching_fields:
+            if evidence.get(field) != row.get(field):
+                errors.append(f"{label} evidence does not bind {field}")
+                return None
+        return evidence
     upload_raw = str(manifest.get("upload_mp4", "") or "")
     if not upload_raw:
         errors.append("finalization manifest is missing upload_mp4")
@@ -39534,7 +40978,31 @@ def validate_finalization_manifest_contract(
         errors.append("final word alignment does not contain a token list")
         tokens = []
     identity_phrase = "我是结束乐队的键盘手"
+    farewell_phrase = "下个视频见"
+    full_signoff_phrase = identity_phrase + farewell_phrase
     identity_window = _aligned_phrase_window(tokens, identity_phrase)
+    signoff_window = _aligned_phrase_window(tokens, full_signoff_phrase)
+    if signoff_window is None:
+        errors.append(
+            "final word alignment lacks the exact spoken sign-off "
+            "我是结束乐队的键盘手，下个视频见"
+        )
+    preview_text = str(manifest.get("next_episode_preview_text", "") or "").strip()
+    preview_window: tuple[float, float] | None = None
+    if not (4 <= len(preview_text) <= 60):
+        errors.append("next_episode_preview_text must be a concise 4-60 character topic preview")
+    elif any(
+        forbidden.casefold() in preview_text.casefold()
+        for forbidden in ("pipeline", "渲染", "审核", "制作进度", "发布时间")
+    ):
+        errors.append("next episode preview externalizes production intent")
+    else:
+        preview_window = _aligned_phrase_window(tokens, preview_text)
+        if preview_window is None:
+            errors.append("next episode preview is absent from the final word alignment")
+    if preview_window is not None and signoff_window is not None:
+        if preview_window[1] > signoff_window[0] + 1 / 30:
+            errors.append("next episode preview must finish before the fixed spoken sign-off")
     publication_text = final_srt.read_text(encoding="utf-8", errors="ignore")
     for forbidden in ("我是结束乐队的键盘手", "下个视频见"):
         if forbidden in publication_text:
@@ -39546,16 +41014,6 @@ def validate_finalization_manifest_contract(
     if not isinstance(sprites, list):
         errors.append("sprite_overlays must be a list")
         sprites = []
-    density_override = manifest.get("sprite_density_override")
-    if len(sprites) > 12 and not (
-        isinstance(density_override, dict)
-        and str(density_override.get("human_approval_hash", "")).strip()
-        and str(density_override.get("reason", "")).strip()
-    ):
-        errors.append(
-            "more than twelve editorial overlays require a hash-bound human density override"
-        )
-
     required_fields = {
         "character",
         "action",
@@ -39669,7 +41127,7 @@ def validate_finalization_manifest_contract(
                 )
 
     signoffs = [row for row in sprites if isinstance(row, dict) and row.get("mandatory_signoff")]
-    if identity_window is not None:
+    if signoff_window is not None:
         if len(signoffs) != 1:
             errors.append(
                 "spoken keyboard-player identity requires exactly one mandatory sign-off sprite"
@@ -39689,16 +41147,16 @@ def validate_finalization_manifest_contract(
                     "bound asset metadata"
                 )
             else:
-                aligned_start, aligned_end = identity_window
+                aligned_start, aligned_end = signoff_window
                 tolerance = 1 / 30
                 if float(signoff["global_start"]) > aligned_start + tolerance:
                     errors.append("Sumino appears after the aligned identity begins")
                 if float(signoff["global_end"]) < aligned_end - tolerance:
-                    errors.append("Sumino disappears before 键盘手 finishes")
+                    errors.append("Sumino disappears before 下个视频见 finishes")
                 if float(signoff["word_anchor_start"]) > aligned_start + tolerance:
                     errors.append("Sumino word anchor starts after the identity begins")
                 if float(signoff["word_anchor_end"]) < aligned_end - tolerance:
-                    errors.append("Sumino word anchor ends before 键盘手 finishes")
+                    errors.append("Sumino word anchor ends before 下个视频见 finishes")
     elif signoffs:
         errors.append("mandatory sign-off sprite exists without the spoken identity phrase")
 
@@ -39716,19 +41174,40 @@ def validate_finalization_manifest_contract(
     if not isinstance(omissions, list):
         errors.append("sprite_rhythm_omissions must be a list")
         omissions = []
-    omitted_roles = {
-        str(row.get("role"))
-        for row in omissions
-        if isinstance(row, dict)
-        and str(row.get("reason", "")).strip()
-        and str(row.get("collision_evidence", "")).strip()
-    }
+    omitted_roles: set[str] = set()
+    for omission_index, row in enumerate(omissions, 1):
+        if not isinstance(row, dict):
+            continue
+        if (
+            str(row.get("reason", "")).strip()
+            and validate_qc_evidence(
+                row,
+                f"sprite rhythm omission {omission_index}",
+                evidence_kind="sprite_rhythm_omission",
+                matching_fields=("role", "reason"),
+            )
+        ):
+            omitted_roles.add(str(row.get("role")))
     for role in ("confused", "aha", "thinking"):
         if role not in present_roles and role not in omitted_roles:
             errors.append(
                 f"series sprite rhythm role {role} is neither present nor evidence-omitted"
             )
 
+    simultaneous_pairs = 0
+    simultaneous_review_pairs: list[tuple[int, int]] = []
+    simultaneous_rows = manifest.get("simultaneous_sprite_qc", [])
+    if not isinstance(simultaneous_rows, list):
+        errors.append("simultaneous_sprite_qc must be a list")
+        simultaneous_rows = []
+    simultaneous_by_indices = {
+        tuple(sorted(int(value) for value in row.get("overlay_indices", []))): row
+        for row in simultaneous_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("overlay_indices"), list)
+        and len(row.get("overlay_indices", [])) == 2
+        and all(isinstance(value, int) for value in row.get("overlay_indices", []))
+    }
     for left_index, left in enumerate(sprites):
         if not isinstance(left, dict):
             continue
@@ -39748,6 +41227,7 @@ def validate_finalization_manifest_contract(
                 continue
             if time_overlap <= 0:
                 continue
+            simultaneous_pairs += 1
             left_rect = left.get("protected_rect", [])
             right_rect = right.get("protected_rect", [])
             if len(left_rect) != 4 or len(right_rect) != 4:
@@ -39761,6 +41241,99 @@ def validate_finalization_manifest_contract(
                     f"simultaneous sprite overlays {left_index + 1} and "
                     f"{right_index + 1} overlap protected regions"
                 )
+                continue
+            same_semantic_anchor = str(left.get("semantic_anchor", "")).strip() == str(
+                right.get("semantic_anchor", "")
+            ).strip()
+            try:
+                same_word_window = (
+                    abs(float(left.get("word_anchor_start")) - float(right.get("word_anchor_start")))
+                    <= 1 / 30
+                    and abs(float(left.get("word_anchor_end")) - float(right.get("word_anchor_end")))
+                    <= 1 / 30
+                )
+            except (TypeError, ValueError):
+                same_word_window = False
+            if not same_semantic_anchor or not same_word_window:
+                pair = (left_index + 1, right_index + 1)
+                row = simultaneous_by_indices.get(pair)
+                if not (
+                    isinstance(row, dict)
+                    and row.get("status") == "pass"
+                    and str(row.get("semantic_reason", "")).strip()
+                    and str(row.get("safe_area_evidence", "")).strip()
+                    and str(row.get("visual_hierarchy_evidence", "")).strip()
+                    and validate_qc_evidence(
+                        row,
+                        f"simultaneous sprite verdict {pair[0]},{pair[1]}",
+                        evidence_kind="simultaneous_sprite_qc",
+                        matching_fields=(
+                            "overlay_indices",
+                            "semantic_reason",
+                            "safe_area_evidence",
+                            "visual_hierarchy_evidence",
+                        ),
+                    )
+                ):
+                    errors.append(
+                        f"simultaneous sprite overlays {pair[0]} and {pair[1]} "
+                        "with distinct teaching anchors lack a pass simultaneous-layout verdict"
+                    )
+                else:
+                    simultaneous_review_pairs.append(pair)
+
+    starts: list[tuple[int, float]] = []
+    for index, row in enumerate(sprites, 1):
+        if not isinstance(row, dict):
+            continue
+        try:
+            starts.append((index, float(row.get("global_start"))))
+        except (TypeError, ValueError):
+            continue
+    starts.sort(key=lambda item: item[1])
+    rapid_sets: list[tuple[int, ...]] = []
+    for left, (_, start) in enumerate(starts):
+        indices = tuple(
+            index
+            for index, candidate_start in starts[left:]
+            if candidate_start <= start + 8.0
+        )
+        if len(indices) >= 3 and indices not in rapid_sets:
+            rapid_sets.append(indices)
+    rapid_sets = [
+        indices
+        for indices in rapid_sets
+        if not any(set(indices) < set(other) for other in rapid_sets)
+    ]
+    rhythm_rows = manifest.get("sprite_rhythm_qc", [])
+    if not isinstance(rhythm_rows, list):
+        errors.append("sprite_rhythm_qc must be a list")
+        rhythm_rows = []
+    rhythm_by_indices = {
+        tuple(sorted(int(value) for value in row.get("overlay_indices", []))): row
+        for row in rhythm_rows
+        if isinstance(row, dict)
+        and isinstance(row.get("overlay_indices"), list)
+        and all(isinstance(value, int) for value in row.get("overlay_indices", []))
+    }
+    for indices in rapid_sets:
+        row = rhythm_by_indices.get(indices)
+        if not (
+            isinstance(row, dict)
+            and row.get("status") == "pass"
+            and str(row.get("semantic_reason", "")).strip()
+            and validate_qc_evidence(
+                row,
+                "rapid sprite entrance verdict "
+                + ",".join(str(index) for index in indices),
+                evidence_kind="sprite_rhythm_qc",
+                matching_fields=("overlay_indices", "semantic_reason"),
+            )
+        ):
+            errors.append(
+                "rapid sprite entrance window lacks a pass rhythm verdict for overlays "
+                + ",".join(str(index) for index in indices)
+            )
 
     pixel_rows = manifest.get("sprite_pixel_qc", [])
     if not isinstance(pixel_rows, list):
@@ -39777,15 +41350,194 @@ def validate_finalization_manifest_contract(
         if row is None:
             errors.append(f"sprite overlay {index} lacks pixel-difference QC")
             continue
+        evidence = validate_qc_evidence(
+            row,
+            f"sprite overlay {index} pixel QC",
+            evidence_kind="sprite_pixel_qc",
+            matching_fields=(
+                "overlay_index",
+                "before_difference_yavg",
+                "on_difference_yavg",
+                "formula_overlap_pixels",
+                "subtitle_overlap_pixels",
+                "active_object_overlap_pixels",
+            ),
+        )
+        if evidence is None:
+            continue
         try:
             before = float(row["before_difference_yavg"])
             on = float(row["on_difference_yavg"])
+            formula_overlap = int(row["formula_overlap_pixels"])
+            subtitle_overlap = int(row["subtitle_overlap_pixels"])
+            active_object_overlap = int(row["active_object_overlap_pixels"])
         except (KeyError, TypeError, ValueError):
             errors.append(f"sprite overlay {index} has invalid pixel-difference QC")
             continue
-        if before > 0.5 or on < 5.0 or row.get("status") != "pass":
+        overlay = sprites[index - 1]
+        frame_window = evidence.get("frame_window")
+        if (
+            not isinstance(frame_window, list)
+            or len(frame_window) != 2
+            or not all(isinstance(value, (int, float)) for value in frame_window)
+            or float(frame_window[0]) > float(overlay.get("global_start", 0)) + 1 / 30
+            or float(frame_window[1]) < float(overlay.get("global_end", 0)) - 1 / 30
+        ):
             errors.append(
-                f"sprite overlay {index} pixel QC does not prove a clean timed overlay"
+                f"sprite overlay {index} evidence does not cover the complete overlay window"
+            )
+            continue
+        if evidence.get("protected_rect") != overlay.get("protected_rect"):
+            errors.append(
+                f"sprite overlay {index} evidence does not bind its protected_rect"
+            )
+        if evidence.get("measurement_tool") != "pipeline_v2.sprite-pixel-audit-v1":
+            errors.append(
+                f"sprite overlay {index} evidence was not produced by the canonical pixel audit"
+            )
+        source_video_raw = str(evidence.get("source_video_path", "") or "").strip()
+        if not source_video_raw:
+            errors.append(f"sprite overlay {index} evidence lacks source_video_path")
+        else:
+            source_video = resolve_stored_path(source_video_raw, repo_root)
+            if source_video.resolve() != final_video.resolve():
+                errors.append(
+                    f"sprite overlay {index} evidence binds the wrong source video"
+                )
+            elif evidence.get("source_video_sha256") != hashlib.sha256(
+                final_video.read_bytes()
+            ).hexdigest():
+                errors.append(
+                    f"sprite overlay {index} evidence source video sha256 is stale"
+                )
+        frame_timestamps = evidence.get("frame_timestamps")
+        if (
+            not isinstance(frame_timestamps, dict)
+            or set(frame_timestamps) != {"before_reference", "before", "on"}
+            or not all(isinstance(value, (int, float)) for value in frame_timestamps.values())
+            or not (
+                float(frame_timestamps["before_reference"])
+                <= float(frame_timestamps["before"])
+                <= float(frame_timestamps["on"])
+            )
+            or float(frame_timestamps["on"]) < float(frame_window[0]) - 1 / 30
+            or float(frame_timestamps["on"]) > float(frame_window[1]) + 1 / 30
+        ):
+            errors.append(
+                f"sprite overlay {index} evidence has invalid source-frame timestamps"
+            )
+        artifact_roles = {
+            str(artifact.get("role", ""))
+            for artifact in evidence.get("measurement_artifacts", [])
+            if isinstance(artifact, dict)
+        }
+        required_artifact_roles = {
+            "before_reference_frame",
+            "before_frame",
+            "on_frame",
+            "formula_mask",
+            "subtitle_mask",
+            "active_object_mask",
+        }
+        if not required_artifact_roles.issubset(artifact_roles):
+            errors.append(
+                f"sprite overlay {index} evidence lacks required frame or protected masks"
+            )
+            continue
+        artifacts_by_role = {
+            str(artifact["role"]): resolve_stored_path(str(artifact["path"]), repo_root)
+            for artifact in evidence["measurement_artifacts"]
+            if isinstance(artifact, dict) and artifact.get("role") in required_artifact_roles
+        }
+        opened: dict[str, Image.Image] = {}
+        try:
+            opened = {
+                role: Image.open(path)
+                for role, path in artifacts_by_role.items()
+            }
+            if any(image.format != "PNG" for image in opened.values()):
+                raise ValueError("all pixel-QC frames and masks must be PNG")
+            frame_size = opened["on_frame"].size
+            if frame_size[0] <= 0 or frame_size[1] <= 0:
+                raise ValueError("pixel-QC images have invalid dimensions")
+            if any(image.size != frame_size for image in opened.values()):
+                raise ValueError("pixel-QC frames and masks do not share dimensions")
+            before_reference_pixels = list(
+                opened["before_reference_frame"].convert("RGB").get_flattened_data()
+            )
+            before_pixels = list(
+                opened["before_frame"].convert("RGB").get_flattened_data()
+            )
+            on_pixels = list(opened["on_frame"].convert("RGB").get_flattened_data())
+            mask_pixels = {
+                role: list(opened[role].convert("L").get_flattened_data())
+                for role in ("formula_mask", "subtitle_mask", "active_object_mask")
+            }
+        except (KeyError, OSError, UnidentifiedImageError, ValueError) as exc:
+            errors.append(f"sprite overlay {index} pixel evidence is unreadable: {exc}")
+            continue
+        finally:
+            for image in opened.values():
+                image.close()
+        try:
+            difference_threshold = int(evidence["pixel_difference_threshold"])
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"sprite overlay {index} evidence lacks a pixel threshold")
+            continue
+        if not 1 <= difference_threshold <= 255:
+            errors.append(f"sprite overlay {index} evidence pixel threshold is invalid")
+            continue
+
+        def luminance(pixel: tuple[int, int, int]) -> float:
+            return (299 * pixel[0] + 587 * pixel[1] + 114 * pixel[2]) / 1000
+
+        before_difference = sum(
+            abs(luminance(left) - luminance(right))
+            for left, right in zip(before_reference_pixels, before_pixels)
+        ) / len(before_pixels)
+        on_difference = sum(
+            abs(luminance(left) - luminance(right))
+            for left, right in zip(before_pixels, on_pixels)
+        ) / len(before_pixels)
+        changed = [
+            max(abs(a - b) for a, b in zip(left, right)) >= difference_threshold
+            for left, right in zip(before_pixels, on_pixels)
+        ]
+        computed_overlaps = {
+            "formula_overlap_pixels": sum(
+                change and mask > 0
+                for change, mask in zip(changed, mask_pixels["formula_mask"])
+            ),
+            "subtitle_overlap_pixels": sum(
+                change and mask > 0
+                for change, mask in zip(changed, mask_pixels["subtitle_mask"])
+            ),
+            "active_object_overlap_pixels": sum(
+                change and mask > 0
+                for change, mask in zip(changed, mask_pixels["active_object_mask"])
+            ),
+        }
+        if not any(changed):
+            errors.append(f"sprite overlay {index} evidence has no measured overlay pixels")
+        if abs(before - before_difference) > 1e-6 or abs(on - on_difference) > 1e-6:
+            errors.append(
+                f"sprite overlay {index} manifest pixel differences do not match image evidence"
+            )
+        for field, computed_value in computed_overlaps.items():
+            if int(row[field]) != computed_value:
+                errors.append(
+                    f"sprite overlay {index} manifest {field} does not match mask evidence"
+                )
+        if (
+            before > 0.5
+            or on < 5.0
+            or formula_overlap != 0
+            or subtitle_overlap != 0
+            or active_object_overlap != 0
+            or row.get("status") != "pass"
+        ):
+            errors.append(
+                f"sprite overlay {index} pixel QC does not prove a clean, non-occluding timed overlay"
             )
 
     appledouble_roots = {
@@ -39823,10 +41575,15 @@ def validate_finalization_manifest_contract(
             {str(row.get("character")) for row in sprites if isinstance(row, dict)}
         ),
         "identity_phrase_present": identity_window is not None,
+        "full_signoff_phrase_present": signoff_window is not None,
+        "next_episode_preview_present": preview_window is not None,
         "mandatory_signoff_count": len(signoffs),
         "mandatory_signoff_action": (
             str(signoffs[0].get("action")) if len(signoffs) == 1 else None
         ),
+        "rapid_entrance_window_count": len(rapid_sets),
+        "simultaneous_pair_count": simultaneous_pairs,
+        "simultaneous_reviewed_pair_count": len(simultaneous_review_pairs),
         "human_finalization_override": human_override,
         "pixel_qc_count": len(pixel_rows),
         "directional_gesture_count": sum(
@@ -39930,8 +41687,10 @@ def command_finalize_episode(args: argparse.Namespace) -> int:
         "final_word_srt": args.final_word_srt,
         "final_word_alignment": args.final_word_alignment,
         "final_timeline": args.final_timeline,
+        "upload_package_receipt": args.upload_package_receipt,
     }
     final_video_path = resolve_stored_path(args.final_video, repo_root)
+    final_audio_path = resolve_stored_path(args.final_audio, repo_root)
     final_srt_path = resolve_stored_path(args.final_srt, repo_root)
     final_word_alignment_path = resolve_stored_path(
         args.final_word_alignment,
@@ -39948,6 +41707,20 @@ def command_finalize_episode(args: argparse.Namespace) -> int:
         resolve_stored_path(finalization_override_raw, repo_root)
         if finalization_override_raw
         else None
+    )
+    upload_package_receipt_path = resolve_stored_path(
+        args.upload_package_receipt,
+        repo_root,
+    )
+    upload_package_receipt = validate_upload_package_receipt(
+        upload_package_receipt_path,
+        repo_root,
+        episode,
+        final_video=final_video_path,
+        final_audio=final_audio_path,
+        final_srt=final_srt_path,
+        final_word_alignment=final_word_alignment_path,
+        finalization_manifest=finalization_manifest_path,
     )
     finalization_manifest = validate_finalization_manifest_contract(
         finalization_manifest_path,
@@ -40186,6 +41959,14 @@ def command_finalize_episode(args: argparse.Namespace) -> int:
             "receipt_hash": episode_readiness.get("receipt_hash"),
         },
         "finalization_manifest": finalization_manifest,
+        "upload_package_receipt": {
+            "path": relative_or_absolute(upload_package_receipt_path, repo_root),
+            "sha256": hashlib.sha256(
+                upload_package_receipt_path.read_bytes()
+            ).hexdigest(),
+            "receipt_hash": upload_package_receipt.get("receipt_hash"),
+            "verdict": upload_package_receipt.get("verdict"),
+        },
         "override_used": bool(time_governed_overlay.get("override_used")),
         "noncompliant": bool(time_governed_overlay.get("noncompliant")),
         "time_governed_overlay": time_governed_overlay,
@@ -40701,6 +42482,49 @@ def build_parser() -> argparse.ArgumentParser:
     visual_plan_review_seal_parser.add_argument("--output")
     visual_plan_review_seal_parser.set_defaults(func=command_seal_visual_plan_review)
 
+    unit_window_compatibility_parser = subparsers.add_parser(
+        "seal-unit-window-phase-compatibility",
+        help=(
+            "seal the narrow approved-text unit-window bridge used only for "
+            "provisional authoring and review render admission"
+        ),
+    )
+    unit_window_compatibility_parser.add_argument("--repo-root", default=".")
+    unit_window_compatibility_parser.add_argument("--episode", required=True)
+    unit_window_compatibility_parser.add_argument("--scene-slug", required=True)
+    unit_window_compatibility_parser.add_argument(
+        "--unit-window-design", required=True
+    )
+    unit_window_compatibility_parser.add_argument("--static-audit", required=True)
+    unit_window_compatibility_parser.add_argument(
+        "--author-self-review", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--distinct-technical-review", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--delegated-visual-direction", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--scene-production", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--animation-release", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--narration-workflow", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--post-tts-readiness", required=True
+    )
+    unit_window_compatibility_parser.add_argument(
+        "--delegated-episode-provisional-authority", required=True
+    )
+    unit_window_compatibility_parser.add_argument("--output", required=True)
+    unit_window_compatibility_parser.set_defaults(
+        func=command_seal_unit_window_phase_compatibility
+    )
+
     authoring_parser = subparsers.add_parser(
         "validate-authoring-qc",
         help="reject runtime layout, typography, timing, transition, and stale-object failures before review",
@@ -41165,6 +42989,37 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_board_parser.add_argument("--representative-release")
     delivery_board_parser.set_defaults(func=command_update_delivery_board)
 
+    capacity_replan_parser = subparsers.add_parser(
+        "authorize-delivery-capacity-replan",
+        help="monotonically raise hash-bound provisional acceptance capacity",
+    )
+    capacity_replan_parser.add_argument("--repo-root", default=".")
+    capacity_replan_parser.add_argument("--clock", required=True)
+    capacity_replan_parser.add_argument("--expected-clock-hash", required=True)
+    capacity_replan_parser.add_argument("--authority", required=True)
+    capacity_replan_parser.add_argument("--trusted-user-authority", required=True)
+    capacity_replan_parser.add_argument(
+        "--trusted-user-authority-sha256", required=True
+    )
+    capacity_replan_parser.add_argument(
+        "--trusted-authoring-ready-inventory", required=True
+    )
+    capacity_replan_parser.add_argument(
+        "--trusted-authoring-ready-inventory-sha256", required=True
+    )
+    capacity_replan_parser.add_argument("--owner-agent-id", required=True)
+    capacity_replan_parser.add_argument(
+        "--new-max-frozen-candidates", type=int, required=True
+    )
+    capacity_replan_parser.add_argument(
+        "--new-owner-max-frozen-candidates", type=int, required=True
+    )
+    capacity_replan_parser.add_argument("--reason", required=True)
+    capacity_replan_parser.add_argument("--output-replan", required=True)
+    capacity_replan_parser.set_defaults(
+        func=command_authorize_delivery_capacity_replan
+    )
+
     human_wait_parser = subparsers.add_parser(
         "seal-human-wait-request",
         help="bind the exact artifact and decision currently awaiting the user",
@@ -41272,6 +43127,7 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_transition_parser.add_argument(
         "--action",
         choices=(
+            "refresh-preflight",
             "pause-human",
             "pause-offline",
             "resume",
@@ -41285,6 +43141,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_transition_parser.add_argument("--reason")
     delivery_transition_parser.add_argument("--artifact")
+    delivery_transition_parser.add_argument("--preflight-receipt")
     delivery_transition_parser.add_argument("--startup-receipt")
     delivery_transition_parser.add_argument("--efficiency-contract")
     delivery_transition_parser.add_argument("--supervisor-session")
@@ -42320,6 +44177,19 @@ def build_parser() -> argparse.ArgumentParser:
         func=command_seal_finalization_batch_authority
     )
 
+    upload_package_parser = subparsers.add_parser(
+        "seal-upload-package",
+        help=(
+            "inspect the exact final MP4, every scene voice fingerprint, "
+            "proofread SRT, burned subtitle pixels, BGM binding, and full decode"
+        ),
+    )
+    upload_package_parser.add_argument("--repo-root", default=".")
+    upload_package_parser.add_argument("--episode", required=True)
+    upload_package_parser.add_argument("--contract", required=True)
+    upload_package_parser.add_argument("--output", required=True)
+    upload_package_parser.set_defaults(func=command_seal_upload_package)
+
     finalize_parser = subparsers.add_parser(
         "finalize-episode",
         help="atomically close progressive scenes, production batches, issues, outcomes, and final assembly",
@@ -42347,6 +44217,14 @@ def build_parser() -> argparse.ArgumentParser:
     finalize_parser.add_argument("--final-word-alignment", required=True)
     finalize_parser.add_argument("--final-timeline", required=True)
     finalize_parser.add_argument("--finalization-manifest", required=True)
+    finalize_parser.add_argument(
+        "--upload-package-receipt",
+        required=True,
+        help=(
+            "fresh canonical seal-upload-package receipt bound to the exact "
+            "final video/audio/SRT/alignment/manifest bytes"
+        ),
+    )
     finalize_parser.add_argument(
         "--finalization-override",
         help=(
@@ -42440,6 +44318,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "sealed independent review of the complete detailed visual plan; "
             "required by workflow v2 before authoring or rendering"
+        ),
+    )
+    phase_start_parser.add_argument(
+        "--unit-window-phase-compatibility",
+        help=(
+            "sealed provisional unit-window compatibility receipt; mutually "
+            "exclusive with --visual-plan-review"
         ),
     )
     phase_start_parser.add_argument(

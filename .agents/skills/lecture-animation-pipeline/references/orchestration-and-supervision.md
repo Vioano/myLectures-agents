@@ -118,76 +118,6 @@ audio boundary, or user decision.
 
 The orchestration layer must record the stable group owner, the complete sealed task queue, and the current per-scene state separately. A batch is not “done” merely because one scene passed, and a scene is not held back merely because its sibling scenes remain in production. When all current agents become idle but queued batches remain, assign the next queued task to an existing compatible agent; do not end the supervision turn.
 
-### Production Independence, Content Continuity, And Boundary Contracts
-
-“Production-level independence” does not mean that scenes are unrelated. It
-means one scene or bounded batch has its own stable owner, worktree/branch,
-source and outputs, exact scene-local narration/audio/alignment/plan locks,
-implementation loop, self-review, and independent acceptance packet. Its
-interior choreography may change without reopening unrelated scenes.
-
-“Content continuity” means the learner crosses an adjacent boundary without a
-hidden prerequisite jump or identity break. The outgoing and incoming learner
-state, mathematical object identity carriers, narration clause ownership and
-lock, visual exit/entry state, handoff meaning, transition owner, audio cut,
-tail silence, and timing drift must agree.
-
-The unifying contract is the **boundary handoff contract**. It is represented
-by `adjacency_contracts` between scenes inside one batch and by matching
-`batch_exit_contract`/`batch_entry_contract` rows across batches.
-`freedom_inside` explicitly freezes only the shared edge and leaves interior
-production independent. The CLI validates presence and equality of these
-fields, rejects boundary drift above the allowed maximum, binds spine, batch,
-scene-plan, roster, worktree, branch, and Skill hashes, and rejects stale
-downstream artifacts after an upstream boundary change. Sol acceptance review
-still judges whether the declared handoff is semantically and visually true;
-machine structure alone cannot prove teaching quality.
-
-Scheduling follows this dependency graph, not scene numbering. A defect blocks
-the next implementation only when it invalidates that next scene's exact entry
-contract, mathematical identity, narration/audio boundary, or user decision.
-It must not freeze later scenes whose own boundaries and prerequisite gates are
-already valid, nor independent planning, audio preparation, inventory,
-evidence, or risk-anchor work. When no safe path remains for one scene, stop
-only that scene and redirect its producer to preauthorized independent work.
-
-### Producer-Pull Dispatch
-
-Do not make the main agent discover every idle transition by polling. At
-`begin`, seal each producer's current assignment plus an ordered set of
-compatible, contract-ready future tasks with
-`--preassigned-task AGENT_ID|TASK_KEY|ROLE|SCOPE|MODEL`. A pending preassigned
-row is authority to claim that bounded task, not proof that its separate
-planning/audio/production gates passed; never preassign a row that is not yet
-safe to enter.
-
-Each producer runs `agent-plan` on receipt of its task capsule. Before it may
-report completion or become idle, it runs `complete-and-claim-next`, binding
-the exact completion-evidence file. Under one file lock the CLI completes the
-current assignment and either:
-
-- activates the next ordered pending row belonging to that same immutable
-  agent, role, and model; or
-- creates a durable pending `work_request` and returns
-  `dispatch_result.action: notify_supervisor`.
-
-For `notify_supervisor`, the producer immediately sends the main agent one
-concise `send_message` containing the request id, completed task, blockers if
-any, and requested next-work type. This notification is a required tool action,
-not routine user-facing commentary. The main agent either uses `assign-task`
-or `preassign-task` to supply bounded safe work, or closes the request with
-`resolve-work-request --resolution no_safe_work` and a concrete reason.
-`assign-task` resolves that producer's pending request and cannot steal another
-producer's preassignment. Pending requests keep
-`should_continue_monitoring: true` and make `finish` fail.
-
-This is deliberately constrained self-dispatch. Producers cannot invent work,
-change scope/role/model, consume another owner's queue, ignore an undelivered
-review todo, or treat task claim as permission to skip any content gate. The
-durable transition and finish refusal are executable; the collaboration API
-still requires the producer to perform the returned `send_message`, because
-the CLI cannot itself address an in-memory agent session.
-
 Later bounded cycles for the same production batch—such as a historical
 workflow-v1 animatic pass, a user-requested visual repair, or a current-policy rebind—must
 reuse the original batch `task_key`, because `begin-production-batch` binds the
@@ -344,21 +274,15 @@ chat summary. See `references/preflight-portability-and-handoffs.md`.
 python3 "$SKILL/scripts/supervisor_watch.py" begin \
   --supervisor-agent-id MAIN_AGENT_SESSION_ID \
   --assignment 'AGENT_ID|ROLE|TASK_KEY|BOUNDED_SCOPE|MODEL' \
-  --preassigned-task 'AGENT_ID|NEXT_TASK_KEY|ROLE|NEXT_BOUNDED_SCOPE|MODEL' \
+  --planned-task 'NEXT_TASK_KEY|ROLE|NEXT_BOUNDED_SCOPE' \
   --output "$EPISODE/review/v2/supervisor_session.json"
-python3 "$SKILL/scripts/supervisor_watch.py" agent-plan \
+python3 "$SKILL/scripts/supervisor_watch.py" set-assignment \
   --session "$EPISODE/review/v2/supervisor_session.json" \
-  --agent-id AGENT_ID
-python3 "$SKILL/scripts/supervisor_watch.py" complete-and-claim-next \
+  --agent-id AGENT_ID --state completed
+python3 "$SKILL/scripts/supervisor_watch.py" assign-task \
   --session "$EPISODE/review/v2/supervisor_session.json" \
-  --agent-id AGENT_ID --current-task-key TASK_KEY \
-  --completion-evidence path/to/task_completion.json
-# If dispatch_result.action is notify_supervisor, send_message the request id.
-# The main agent then assigns/preassigns safe work or resolves the request:
-python3 "$SKILL/scripts/supervisor_watch.py" resolve-work-request \
-  --session "$EPISODE/review/v2/supervisor_session.json" \
-  --request-id WORK_REQUEST_ID --resolution no_safe_work \
-  --reason 'No independent contract-ready work remains before user approval.'
+  --agent-id AGENT_ID --role animation_author \
+  --task-key NEXT_BATCH --scope 'NEXT_BOUNDED_SCOPE'
 python3 "$SKILL/scripts/supervisor_watch.py" queue-review-todo \
   --session "$EPISODE/review/v2/supervisor_session.json" \
   --agent-id AGENT_ID --reviewed-scene-slug PREVIOUS_SCENE \
@@ -410,4 +334,4 @@ python3 "$SKILL/scripts/supervisor_watch.py" status \
   --session "$EPISODE/review/v2/supervisor_session.json" --require-clean
 ```
 
-Obey the returned disposition: `persist_only` stays out of commentary; `notify_user` is a milestone update. Before yielding a final response for a supervision task, run `status`. If `should_continue_monitoring` is true, keep waiting, process a producer's pending work request, or assign pending work to a compatible reusable roster member; if `user_update_required` is true, report only those pending milestone events and acknowledge them after reporting. `--require-clean` rejects abnormal identity churn, pending replacement authorization, or reuse bypass. `finish` rejects active or blocked assignments, pending or blocked planned tasks, pending producer work requests, and unacknowledged milestone events. See `references/contracts.md` for the replacement evidence schema, event taxonomy, and state contract.
+Obey the returned disposition: `persist_only` stays out of commentary; `notify_user` is a milestone update. Before yielding a final response for a supervision task, run `status`. If `should_continue_monitoring` is true, keep waiting or assign pending work to a compatible reusable roster member; if `user_update_required` is true, report only those pending milestone events and acknowledge them after reporting. `--require-clean` rejects abnormal identity churn, pending replacement authorization, or reuse bypass. `finish` rejects active or blocked assignments, pending or blocked planned tasks, and unacknowledged milestone events. See `references/contracts.md` for the replacement evidence schema, event taxonomy, and state contract.

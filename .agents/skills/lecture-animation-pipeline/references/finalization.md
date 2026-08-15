@@ -123,15 +123,20 @@ from the final word alignment:
 - `thinking` at the main transfer, generalization, or consequence.
 
 The character need not always be Sumino. Approved Bocchi, Nijika, Ryo, Kita,
-and Sumino actions may be selected by semantic fit. One carefully staged
-two-character reaction is allowed when both reactions share the same exact
-mathematical word window, occupy disjoint protected regions, and clarify a
-collective recognition or comparison. Multiple characters are a series visual
-signature, but they remain supporting actors: never place more than twelve
-overlay records in a standard episode without a hash-bound human-approved
-density override, never stack reactions merely to fill empty space, and never
-let a character become the primary focal object while new mathematics is
-landing.
+and Sumino actions may be selected by semantic fit. Multiple characters may
+share the screen whenever each has a clear teaching role, their protected
+regions are disjoint, and the mathematical stage has enough safe area. They do
+not have to share one exact word anchor: distinct overlapping cues require an
+independent simultaneous-layout verdict that binds their semantic reason, safe
+area, and visual hierarchy. Multiple characters are a series visual signature,
+but they remain supporting actors. Do not impose a whole-episode
+overlay-count limit: ten well-spaced, semantically exact appearances may be
+cleaner than three badly placed ones. Instead, reject any formula, subtitle,
+axis, active-diagram, or active-object collision; audit short-window entrance
+density; and allow simultaneous characters only when their protected regions
+are disjoint, the layout has enough safe area, and each reaction serves a
+specific teaching purpose. Never stack reactions merely to fill empty space, and never let
+a character become the primary focal object while new mathematics is landing.
 
 Resolve every cue from the current episode's narration and mathematical stage
 rather than copying old timestamps. Each manifest row records character,
@@ -147,21 +152,47 @@ does not lie inward along that direction. Independent QC must inspect exact
 on/late frames and reject a gesture that points toward the frame edge or away
 from its declared mathematical target.
 For each of the three standard semantic roles, either provide a real cue or a
-role-specific omission with collision evidence and a reason. A generic
-“optional” flag is not an omission contract.
+role-specific omission with hash-bound collision evidence and a reason. A generic
+“optional” flag is not an omission contract. Density review is local in time:
+three or more entrances whose starts fall inside one eight-second window form a
+`rapid_entrance_window` and require an evidence-bound rhythm verdict. Every
+omission, rapid-window verdict, distinct-anchor simultaneous-layout verdict,
+and per-overlay pixel-QC row must bind a real evidence file by path and SHA-256;
+nonempty prose, `fixture://` placeholders, and self-reported zero-overlap
+numbers are not evidence. The bound JSON must use the finalization-QC schema,
+name the exact evidence kind, repeat the overlay indices and decision fields it
+authorizes, and hash-bind its measurement artifacts. Pixel QC additionally
+binds the complete overlay time window and protected rectangle, plus before/on
+frames and separate formula, subtitle, and active-object masks; measured pixel
+values in the manifest must exactly match those in the evidence JSON. The gate
+opens the hash-bound PNG files, requires common dimensions, derives the overlay
+difference mask, and recomputes all three intersections; merely listing frame
+roles or duplicating a zero in two JSON files is not sufficient. Pixel evidence
+also binds the exact final-video path and SHA-256 plus ordered extraction
+timestamps, and names the canonical pixel-audit producer. This is a
+review trigger, not an automatic count-based rejection.
 
 The fixed screen ending remains a learner-facing mathematical conclusion or
-question. Separately, when the approved spoken series sign-off contains
-`我是结束乐队的键盘手`, exactly one `sumino` overlay is mandatory. Its action is
-not fixed to `talking`: choose any nonempty action registered in the bound
-Sumino asset metadata that is semantically appropriate for the narration and
-passes the same clip/asset, timing, protected-region, and pixel-QC checks.
-It must already be visible before the aligned word `我`, remain visible through
-`键盘手`, and may continue through `下个视频见`. The spoken sign-off stays in
+question. Every normal episode then includes one short spoken preview of the
+next episode's mathematical topic, followed by the exact spoken series
+sign-off `我是结束乐队的键盘手，下个视频见`. The preview must describe the
+next mathematical move, not production scheduling or an engineering recap.
+
+During the exact sign-off, exactly one `sumino` overlay is mandatory. Its
+action is not fixed to `talking`: choose any nonempty action registered in the
+bound Sumino asset metadata that is semantically appropriate for the narration
+and passes the same clip/asset, timing, protected-region, and pixel-QC checks.
+It must already be visible before the aligned word `我` and remain visible
+through the complete phrase `下个视频见`. The spoken sign-off stays in
 audio, but the identity and farewell text must not appear in burned subtitles
 or any other on-screen text. This mandatory identity carrier cannot be omitted
-for layout convenience: move or resize it within a proven safe region while
-preserving the final mathematical hold.
+for layout convenience: move or resize it within a proven safe region.
+
+The visual treatment of the preview and sign-off is intentionally flexible.
+The default may preserve the last learner-facing mathematical frame, while an
+episode may instead use a separately designed and approved ending visual. Do
+not infer a ban on new ending visuals from an episode-specific decision to
+hold the final frame.
 
 ## Final Media And Independent QC
 
@@ -193,9 +224,11 @@ Require all of the following:
 - every editorial character cue bound to an exact word anchor and semantic
   role, with clip/asset hashes, a protected rectangle, before/on/late frames,
   and no subtitle or mathematical-object collision;
-- when the spoken identity line is present, exactly one hash-bound Sumino cue
+- the final word alignment contains one short next-episode mathematical preview
+  followed by the exact sign-off `我是结束乐队的键盘手，下个视频见`;
+- exactly one hash-bound Sumino cue
   using a nonempty, registered, semantically appropriate action and covering
-  the complete `我是结束乐队的键盘手` word window,
+  the complete `我是结束乐队的键盘手，下个视频见` word window,
   plus a positive final-vs-baseline pixel-difference check inside its protected
   rectangle and a zero-difference check immediately before it;
 - spoken identity/farewell absent from burned subtitles and screen text while
@@ -211,6 +244,52 @@ Require all of the following:
 Write the final output under `exports/final/`, with a versioned 2160p30/upload
 name, corrected reader SRT, finalization manifest, subtitle audit, QC frames,
 and contact sheet. Generated media remains ignored by Git.
+
+### Mandatory upload-package CLI gate
+
+Do not assemble a publication candidate with an episode-specific shell recipe
+and then call it upload-ready from a handwritten manifest. After composition,
+create one `lecture-animation-upload-package-v1` contract binding the exact
+final MP4, final mixed-audio master, subtitle-free visual base, proofread reader
+SRT and audit, word alignment, finalization manifest, BGM source/audit/recipe,
+scene order, scene slot timing, and every approved scene voice reference. Seal
+it with:
+
+```bash
+python3 "$SKILL/scripts/pipeline_v2.py" seal-upload-package \
+  --repo-root . \
+  --episode "$EPISODE" \
+  --contract "$EPISODE/exports/final/<version>/upload_package_contract.json" \
+  --output "$EPISODE/exports/final/<version>/upload_package_receipt.json"
+```
+
+The command fails closed unless the exact upload has native 4K30 H.264 video,
+AAC stereo 48 kHz audio, no subtitle stream, full video/audio decode, a
+contiguous scene timeline, and matching duration. It derives multiple
+high-energy fingerprints from each approved scene voice and searches for them
+inside the exact final mixed audio at the assembled offsets. Padding the
+episode with silence after one scene therefore fails even if duration,
+loudness, and BGM all look valid.
+
+Publication subtitles are a separate editorial artifact, not the narration
+script and not raw ASR. The contract must bind a
+`lecture-animation-publication-subtitle-audit-v1` with
+`status=proofread_pass`, a named proofreader, the exact corrected SRT hash and
+cue count, and positive checks for final-audio timing, mathematical terms,
+names/symbols, reader grouping, two-line layout, and sign-off omission. The CLI
+also compares distributed cue frames against the subtitle-free base in the
+bottom subtitle lane; an SRT sidecar without burned pixels fails.
+
+The established BGM recipe and exact source hash are mandatory. The BGM audit
+must bind the final MP4, source, single-loop duration and actual loop count; if
+the episode is longer than one play, a loop count below two fails. The command
+also scans both the complete delivery and episode review trees for AppleDouble
+files.
+
+Pass the resulting receipt to `finalize-episode` through required argument
+`--upload-package-receipt`. That command rechecks receipt hash and exact
+video/audio/SRT/alignment/manifest bytes before it can mark the episode
+assembled. No receipt means no `upload-ready` claim.
 
 Before declaring the package durable, run `audit-portability --require-clean`
 over current source, scripts, rebuild manifests, and required final assets.

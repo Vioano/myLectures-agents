@@ -530,7 +530,9 @@ python3 "$SKILL/scripts/pipeline_v2.py" transition-delivery-clock \
   --repo-root . --clock "$DELIVERY_CLOCK" --action resume
 ```
 
-At finalization, `finalize-episode` first marks the progressive production
+At finalization, `seal-upload-package` first proves the exact mixed narration,
+proofread burned subtitles, BGM binding, native media streams, and full decode.
+`finalize-episode` requires that fresh receipt, then marks the progressive production
 tracker assembled and writes the canonical completion receipt. Then advance
 each already approved delivery-board scene exactly once to `assembled`, using
 that completion receipt as `--evidence`. Do not hand-edit the board or skip a

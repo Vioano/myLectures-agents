@@ -82,12 +82,6 @@ REVIEW_TODO_PRIORITIES = {
     "user_decision_blocking",
 }
 OPEN_REVIEW_TODO_STATES = REVIEW_TODO_STATES - {"delivered", "cancelled"}
-WORK_REQUEST_STATES = {
-    "pending",
-    "resolved_task_assigned",
-    "resolved_no_safe_work",
-    "cancelled",
-}
 
 
 def session_hash(session: dict[str, Any]) -> str:
@@ -664,33 +658,6 @@ def validate_session(session: dict[str, Any]) -> None:
                 raise PipelineError(f"supervisor task {task_key} has invalid state")
             if not str(task.get("role", "")).strip() or not str(task.get("scope", "")).strip():
                 raise PipelineError(f"supervisor task {task_key} requires role and scope")
-            preassigned_agent_id = str(task.get("preassigned_agent_id", "")).strip()
-            if preassigned_agent_id:
-                if preassigned_agent_id not in assignments:
-                    raise PipelineError(
-                        f"supervisor task {task_key} is preassigned outside the sealed roster"
-                    )
-                owner = assignments[preassigned_agent_id]
-                if task.get("role") != owner.get("role"):
-                    raise PipelineError(
-                        f"supervisor task {task_key} preassignment changes the roster role"
-                    )
-                preassigned_model = str(task.get("preassigned_model", "")).strip()
-                if preassigned_model and preassigned_model != str(owner.get("model", "")):
-                    raise PipelineError(
-                        f"supervisor task {task_key} preassignment changes the roster model"
-                    )
-            if "queue_position" in task:
-                try:
-                    queue_position = int(task.get("queue_position"))
-                except (TypeError, ValueError) as exc:
-                    raise PipelineError(
-                        f"supervisor task {task_key} has invalid queue_position"
-                    ) from exc
-                if queue_position < 0:
-                    raise PipelineError(
-                        f"supervisor task {task_key} has negative queue_position"
-                    )
         for agent_id, assignment in assignments.items():
             if not str(assignment.get("task_key", "")).strip():
                 raise PipelineError(f"assignment {agent_id} requires task_key")
@@ -742,19 +709,6 @@ def validate_session(session: dict[str, Any]) -> None:
                 raise PipelineError(
                     f"blocking review todo {todo_id} cannot be deferred"
                 )
-        work_requests = session.get("work_requests", {})
-        if not isinstance(work_requests, dict):
-            raise PipelineError("supervisor work_requests must be an object")
-        for request_id, request in work_requests.items():
-            if not str(request_id).strip() or not isinstance(request, dict):
-                raise PipelineError("supervisor work_requests entries must be structured")
-            if request.get("state") not in WORK_REQUEST_STATES:
-                raise PipelineError(f"work request {request_id} has invalid state")
-            agent_id = str(request.get("agent_id", ""))
-            if agent_id not in assignments:
-                raise PipelineError(f"work request {request_id} targets an unknown agent")
-            if not str(request.get("role", "")).strip():
-                raise PipelineError(f"work request {request_id} requires role")
 
 
 def parse_assignment(raw: str) -> tuple[str, dict[str, Any]]:
@@ -789,25 +743,6 @@ def parse_planned_task(raw: str) -> tuple[str, dict[str, Any]]:
         "scope": scope,
         "state": "pending",
         "current_agent_id": None,
-        "updated_at": utc_now(),
-    }
-
-
-def parse_preassigned_task(raw: str) -> tuple[str, str, dict[str, Any]]:
-    parts = raw.split("|", 4)
-    if len(parts) != 5 or any(not part.strip() for part in parts):
-        raise PipelineError(
-            "--preassigned-task must be AGENT_ID|TASK_KEY|ROLE|SCOPE|MODEL"
-        )
-    agent_id, task_key, role, scope, model = (part.strip() for part in parts)
-    return agent_id, task_key, {
-        "role": role,
-        "scope": scope,
-        "state": "pending",
-        "current_agent_id": None,
-        "preassigned_agent_id": agent_id,
-        "preassigned_model": model,
-        "claim_policy": "agent_auto_after_completion",
         "updated_at": utc_now(),
     }
 
@@ -943,22 +878,6 @@ def begin(args: argparse.Namespace) -> int:
         task_key, task = parse_planned_task(raw)
         if task_key in task_queue:
             raise PipelineError(f"duplicate planned task: {task_key}")
-        task["queue_position"] = len(task_queue)
-        task_queue[task_key] = task
-    for raw in args.preassigned_task:
-        agent_id, task_key, task = parse_preassigned_task(raw)
-        if agent_id not in assignments:
-            raise PipelineError(
-                f"preassigned task {task_key} targets an agent outside the initial roster"
-            )
-        owner = assignments[agent_id]
-        if task["role"] != owner["role"] or task["preassigned_model"] != owner["model"]:
-            raise PipelineError(
-                f"preassigned task {task_key} must preserve {agent_id}'s sealed role and model"
-            )
-        if task_key in task_queue:
-            raise PipelineError(f"duplicate planned task: {task_key}")
-        task["queue_position"] = len(task_queue)
         task_queue[task_key] = task
     for agent_id, assignment in assignments.items():
         task_key = str(assignment["task_key"])
@@ -970,14 +889,6 @@ def begin(args: argparse.Namespace) -> int:
             "scope": assignment["scope"],
             "state": "active",
             "current_agent_id": agent_id,
-            "preassigned_agent_id": agent_id,
-            "preassigned_model": assignment["model"],
-            "claim_policy": "active_initial",
-            "queue_position": (
-                int(existing.get("queue_position", len(task_queue)))
-                if isinstance(existing, dict)
-                else len(task_queue)
-            ),
             "updated_at": utc_now(),
         }
     mode = "explicit_verbose_override" if args.verbose_override else "continuous_low_noise"
@@ -1022,7 +933,6 @@ def begin(args: argparse.Namespace) -> int:
             "capacity_expansion_count": 0,
             "capacity_authorizations": {},
             "review_todos": {},
-            "work_requests": {},
             "retired_identities": [],
             "acknowledged_event_ids": [],
         }
@@ -1273,335 +1183,6 @@ def open_review_todos_for_agent(
     ]
 
 
-def pending_work_requests_for_agent(
-    session: dict[str, Any], agent_id: str
-) -> list[tuple[str, dict[str, Any]]]:
-    return [
-        (request_id, request)
-        for request_id, request in session.get("work_requests", {}).items()
-        if isinstance(request, dict)
-        and request.get("agent_id") == agent_id
-        and request.get("state") == "pending"
-    ]
-
-
-def resolve_pending_work_requests_for_assignment(
-    session: dict[str, Any], agent_id: str, task_key: str
-) -> None:
-    now = utc_now()
-    for _, request in pending_work_requests_for_agent(session, agent_id):
-        request.update(
-            {
-                "state": "resolved_task_assigned",
-                "resolved_at": now,
-                "resolution_task_key": task_key,
-            }
-        )
-
-
-def next_preassigned_task(
-    session: dict[str, Any], agent_id: str, assignment: dict[str, Any]
-) -> tuple[str, dict[str, Any]] | None:
-    candidates = [
-        (task_key, task)
-        for task_key, task in session.get("task_queue", {}).items()
-        if isinstance(task, dict)
-        and task.get("state") == "pending"
-        and task.get("preassigned_agent_id") == agent_id
-        and task.get("role") == assignment.get("role")
-        and str(task.get("preassigned_model", assignment.get("model")))
-        == str(assignment.get("model"))
-    ]
-    if not candidates:
-        return None
-    return min(
-        candidates,
-        key=lambda row: (int(row[1].get("queue_position", 10**9)), row[0]),
-    )
-
-
-def create_work_request(
-    session: dict[str, Any], agent_id: str, *, reason: str,
-    completion_evidence: dict[str, Any] | None = None,
-) -> tuple[str, dict[str, Any]]:
-    existing = pending_work_requests_for_agent(session, agent_id)
-    if existing:
-        return existing[0]
-    assignment = session["assignments"][agent_id]
-    created_at = utc_now()
-    request_id = "work-request:" + hashlib.sha1(
-        f"{session['session_id']}|{agent_id}|{assignment.get('task_key')}|{created_at}".encode()
-    ).hexdigest()[:16]
-    request = {
-        "request_id": request_id,
-        "agent_id": agent_id,
-        "role": assignment.get("role"),
-        "model": assignment.get("model"),
-        "last_task_key": assignment.get("task_key"),
-        "reason": reason,
-        "completion_evidence": completion_evidence,
-        "state": "pending",
-        "created_at": created_at,
-        "main_notification_required": True,
-    }
-    session.setdefault("work_requests", {})[request_id] = request
-    return request_id, request
-
-
-def agent_plan(args: argparse.Namespace) -> int:
-    session_path = Path(args.session).resolve()
-    session = load_json(session_path)
-    validate_session(session)
-    require_v2(session)
-    assignment = session["assignments"].get(args.agent_id)
-    if assignment is None:
-        raise PipelineError("agent id is outside the sealed roster")
-    preassigned = [
-        {
-            "task_key": task_key,
-            "role": task.get("role"),
-            "scope": task.get("scope"),
-            "state": task.get("state"),
-            "queue_position": task.get("queue_position"),
-            "claim_policy": task.get("claim_policy"),
-        }
-        for task_key, task in session.get("task_queue", {}).items()
-        if isinstance(task, dict)
-        and task.get("preassigned_agent_id") == args.agent_id
-    ]
-    preassigned.sort(
-        key=lambda row: (
-            0 if row["task_key"] == assignment.get("task_key") else 1,
-            int(row.get("queue_position", 10**9)),
-            str(row["task_key"]),
-        )
-    )
-    payload = {
-        "schema": "lecture-animation-agent-work-plan-v1",
-        "session_id": session.get("session_id"),
-        "session_hash": session.get("session_hash"),
-        "agent_id": args.agent_id,
-        "current_assignment": assignment,
-        "preassigned_tasks": preassigned,
-        "open_review_todo_count": len(
-            open_review_todos_for_agent(session, args.agent_id)
-        ),
-        "pending_work_requests": [
-            request for _, request in pending_work_requests_for_agent(session, args.agent_id)
-        ],
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0
-
-
-def complete_and_claim_next(args: argparse.Namespace) -> int:
-    """Atomically finish one task and claim the next preauthorized task."""
-    session_path = Path(args.session).resolve()
-    completion = bound_file(Path(args.completion_evidence))
-    with locked_paths([session_path]):
-        session = load_json_unlocked(session_path)
-        validate_session(session)
-        require_v2(session)
-        if session.get("closed_at"):
-            raise PipelineError("cannot complete work in a closed supervisor session")
-        assignment = session["assignments"].get(args.agent_id)
-        if assignment is None:
-            raise PipelineError("agent id is outside the sealed roster")
-        if assignment.get("state") != "active":
-            raise PipelineError("complete-and-claim-next requires an active assignment")
-        if str(assignment.get("task_key")) != str(args.current_task_key):
-            raise PipelineError("current task key does not match the active assignment")
-        task = session.get("task_queue", {}).get(args.current_task_key)
-        if (
-            not isinstance(task, dict)
-            or task.get("state") != "active"
-            or task.get("current_agent_id") != args.agent_id
-        ):
-            raise PipelineError("current task row is not actively held by this agent")
-        open_todos = open_review_todos_for_agent(session, args.agent_id)
-        if open_todos:
-            raise PipelineError(
-                "agent has an undelivered review todo; seal the safe checkpoint, "
-                "deliver the review, and acknowledge it before claiming more work"
-            )
-        now = utc_now()
-        task.update(
-            {
-                "state": "completed",
-                "current_agent_id": args.agent_id,
-                "completion_evidence": completion,
-                "completed_at": now,
-                "updated_at": now,
-            }
-        )
-        assignment.update(
-            {
-                "state": "completed",
-                "completion_evidence": completion,
-                "updated_at": now,
-                "note": args.note,
-            }
-        )
-        next_task = next_preassigned_task(session, args.agent_id, assignment)
-        if next_task is not None:
-            next_task_key, next_row = next_task
-            assignment.update(
-                {
-                    "task_key": next_task_key,
-                    "scope": next_row["scope"],
-                    "state": "active",
-                    "task_count": int(assignment.get("task_count", 1)) + 1,
-                    "reuse_count": int(assignment.get("reuse_count", 0)) + 1,
-                    "updated_at": now,
-                    "note": "Agent atomically claimed the next preauthorized task.",
-                }
-            )
-            assignment.setdefault("assignment_history", []).append(
-                {
-                    "task_key": next_task_key,
-                    "scope": next_row["scope"],
-                    "assigned_at": now,
-                    "kind": "preauthorized_auto_claim",
-                    "previous_task_completion": completion,
-                }
-            )
-            next_row.update(
-                {
-                    "state": "active",
-                    "current_agent_id": args.agent_id,
-                    "claimed_at": now,
-                    "updated_at": now,
-                }
-            )
-            resolve_pending_work_requests_for_assignment(
-                session, args.agent_id, next_task_key
-            )
-            dispatch = {
-                "action": "auto_claimed",
-                "task_key": next_task_key,
-                "scope": next_row["scope"],
-                "main_notification_required": False,
-            }
-        else:
-            request_id, _ = create_work_request(
-                session,
-                args.agent_id,
-                reason="The current task completed and no compatible preauthorized task is ready.",
-                completion_evidence=completion,
-            )
-            dispatch = {
-                "action": "notify_supervisor",
-                "work_request_id": request_id,
-                "main_notification_required": True,
-            }
-        session["updated_at"] = now
-        atomic_write_json_unlocked(session_path, seal(session))
-    payload = status_payload(session_path, load_json(session_path))
-    payload["dispatch_result"] = dispatch
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0
-
-
-def request_work(args: argparse.Namespace) -> int:
-    session_path = Path(args.session).resolve()
-    reason = str(args.reason or "").strip()
-    if len(reason) < 24:
-        raise PipelineError("request-work requires a concrete reason")
-    with locked_paths([session_path]):
-        session = load_json_unlocked(session_path)
-        validate_session(session)
-        require_v2(session)
-        assignment = session["assignments"].get(args.agent_id)
-        if assignment is None:
-            raise PipelineError("agent id is outside the sealed roster")
-        if assignment.get("state") not in REUSABLE_STATES:
-            raise PipelineError("request-work requires an idle, completed, or cancelled assignment")
-        request_id, _ = create_work_request(
-            session, args.agent_id, reason=reason
-        )
-        session["updated_at"] = utc_now()
-        atomic_write_json_unlocked(session_path, seal(session))
-    payload = status_payload(session_path, load_json(session_path))
-    payload["dispatch_result"] = {
-        "action": "notify_supervisor",
-        "work_request_id": request_id,
-        "main_notification_required": True,
-    }
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0
-
-
-def resolve_work_request(args: argparse.Namespace) -> int:
-    session_path = Path(args.session).resolve()
-    reason = str(args.reason or "").strip()
-    if len(reason) < 24:
-        raise PipelineError("resolving a work request requires a concrete reason")
-    with locked_paths([session_path]):
-        session = load_json_unlocked(session_path)
-        validate_session(session)
-        require_v2(session)
-        request = session.get("work_requests", {}).get(args.request_id)
-        if not isinstance(request, dict) or request.get("state") != "pending":
-            raise PipelineError("work request is missing or is no longer pending")
-        request.update(
-            {
-                "state": (
-                    "resolved_no_safe_work"
-                    if args.resolution == "no_safe_work"
-                    else "cancelled"
-                ),
-                "resolution_reason": reason,
-                "resolved_at": utc_now(),
-            }
-        )
-        session["updated_at"] = utc_now()
-        atomic_write_json_unlocked(session_path, seal(session))
-    print(json.dumps(status_payload(session_path, load_json(session_path)), ensure_ascii=False, indent=2))
-    return 0
-
-
-def preassign_task(args: argparse.Namespace) -> int:
-    """Add one future task to a stable producer's preauthorized queue."""
-    session_path = Path(args.session).resolve()
-    reason = str(args.reason or "").strip()
-    if len(reason) < 24:
-        raise PipelineError("preassign-task requires a concrete reason")
-    with locked_paths([session_path]):
-        session = load_json_unlocked(session_path)
-        validate_session(session)
-        require_v2(session)
-        if session.get("closed_at"):
-            raise PipelineError("cannot preassign work in a closed supervisor session")
-        assignment = session["assignments"].get(args.agent_id)
-        if assignment is None:
-            raise PipelineError("agent id is outside the sealed roster")
-        if assignment.get("role") != args.role or assignment.get("model") != args.model:
-            raise PipelineError("preassignment must preserve the roster role and model")
-        if args.task_key in session.get("task_queue", {}):
-            raise PipelineError("preassigned task key already exists in the sealed queue")
-        positions = [
-            int(row.get("queue_position", -1))
-            for row in session.get("task_queue", {}).values()
-            if isinstance(row, dict)
-        ]
-        session["task_queue"][args.task_key] = {
-            "role": args.role,
-            "scope": args.scope,
-            "state": "pending",
-            "current_agent_id": None,
-            "preassigned_agent_id": args.agent_id,
-            "preassigned_model": args.model,
-            "claim_policy": "agent_auto_after_completion",
-            "queue_position": max(positions, default=-1) + 1,
-            "added_after_begin_reason": reason,
-            "updated_at": utc_now(),
-        }
-        session["updated_at"] = utc_now()
-        atomic_write_json_unlocked(session_path, seal(session))
-    print(json.dumps(status_payload(session_path, load_json(session_path)), ensure_ascii=False, indent=2))
-    return 0
-
-
 def assign_task(args: argparse.Namespace) -> int:
     """Reuse one existing identity for its next bounded task."""
     session_path = Path(args.session).resolve()
@@ -1711,12 +1292,6 @@ def assign_task(args: argparse.Namespace) -> int:
             raise PipelineError("planned task must be pending before assignment")
         if task.get("role") != args.role or task.get("scope") != args.scope:
             raise PipelineError("assign-task role and scope must match the sealed task queue")
-        preassigned_agent_id = str(task.get("preassigned_agent_id", "")).strip()
-        if preassigned_agent_id and preassigned_agent_id != args.agent_id:
-            raise PipelineError(
-                "planned task is preassigned to another roster identity; "
-                "retarget it explicitly instead of stealing its queue slot"
-            )
         now = utc_now()
         assignment.update(
             {
@@ -1744,9 +1319,6 @@ def assign_task(args: argparse.Namespace) -> int:
             }
         )
         task.update({"state": "active", "current_agent_id": args.agent_id, "updated_at": now})
-        resolve_pending_work_requests_for_assignment(
-            session, args.agent_id, args.task_key
-        )
         session["updated_at"] = now
         atomic_write_json_unlocked(session_path, seal(session))
     print(json.dumps(status_payload(session_path, load_json(session_path)), ensure_ascii=False, indent=2))
@@ -2690,14 +2262,6 @@ def register_replacement(args: argparse.Namespace) -> int:
         if isinstance(task, dict):
             task["current_agent_id"] = args.new_agent_id
             task["updated_at"] = now
-        for queued_task in session.get("task_queue", {}).values():
-            if (
-                isinstance(queued_task, dict)
-                and queued_task.get("preassigned_agent_id") == old_agent_id
-            ):
-                queued_task["preassigned_agent_id"] = args.new_agent_id
-                queued_task["preassigned_model"] = authorization.get("new_model")
-                queued_task["updated_at"] = now
         for todo in session.get("review_todos", {}).values():
             if (
                 isinstance(todo, dict)
@@ -2707,16 +2271,6 @@ def register_replacement(args: argparse.Namespace) -> int:
                 todo["agent_id"] = args.new_agent_id
                 todo["updated_at"] = now
                 todo["replacement_authorization_id"] = args.authorization_id
-        for request in session.get("work_requests", {}).values():
-            if (
-                isinstance(request, dict)
-                and request.get("agent_id") == old_agent_id
-                and request.get("state") == "pending"
-            ):
-                request["agent_id"] = args.new_agent_id
-                request["model"] = authorization.get("new_model")
-                request["updated_at"] = now
-                request["replacement_authorization_id"] = args.authorization_id
         session["replacement_count"] = int(session.get("replacement_count", 0)) + 1
         authorization["status"] = "consumed"
         authorization["consumed_at"] = now
@@ -2812,14 +2366,6 @@ def restore_original_identity(args: argparse.Namespace) -> int:
         if isinstance(task, dict) and task.get("current_agent_id") == args.replacement_agent_id:
             task["current_agent_id"] = args.original_agent_id
             task["updated_at"] = now
-        for queued_task in session.get("task_queue", {}).values():
-            if (
-                isinstance(queued_task, dict)
-                and queued_task.get("preassigned_agent_id") == args.replacement_agent_id
-            ):
-                queued_task["preassigned_agent_id"] = args.original_agent_id
-                queued_task["preassigned_model"] = original.get("model")
-                queued_task["updated_at"] = now
         for todo in session.get("review_todos", {}).values():
             if (
                 isinstance(todo, dict)
@@ -2829,16 +2375,6 @@ def restore_original_identity(args: argparse.Namespace) -> int:
                 todo["agent_id"] = args.original_agent_id
                 todo["updated_at"] = now
                 todo["restored_original_agent_id"] = args.original_agent_id
-        for request in session.get("work_requests", {}).values():
-            if (
-                isinstance(request, dict)
-                and request.get("agent_id") == args.replacement_agent_id
-                and request.get("state") == "pending"
-            ):
-                request["agent_id"] = args.original_agent_id
-                request["model"] = original.get("model")
-                request["updated_at"] = now
-                request["restored_original_agent_id"] = args.original_agent_id
 
         authorization = session["replacement_authorizations"][authorization_id]
         authorization["status"] = "reverted"
@@ -2993,17 +2529,6 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
         for key, row in review_todos.items()
         if isinstance(row, dict) and row.get("state") == "interrupt_required"
     )
-    pending_work_requests = sorted(
-        key
-        for key, row in session.get("work_requests", {}).items()
-        if isinstance(row, dict) and row.get("state") == "pending"
-    )
-    agents_requesting_work = sorted(
-        {
-            str(session["work_requests"][key].get("agent_id"))
-            for key in pending_work_requests
-        }
-    )
     churn_ratio = replacement_count / max(1, task_count)
     warnings: list[str] = []
     replacement_budget = int(session.get("max_replacements", DEFAULT_MAX_REPLACEMENTS))
@@ -3049,8 +2574,6 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
         "deferred_review_todos": deferred_review_todos,
         "ready_review_todos": ready_review_todos,
         "interrupt_required_review_todos": interrupt_required_review_todos,
-        "pending_work_requests": pending_work_requests,
-        "agents_requesting_work": agents_requesting_work,
         "review_delivery_required": bool(
             ready_review_todos or interrupt_required_review_todos
         ),
@@ -3062,7 +2585,6 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
             or deferred_review_todos
             or ready_review_todos
             or interrupt_required_review_todos
-            or pending_work_requests
         ),
         "user_update_required": bool(pending),
         "pending_user_events": pending,
@@ -3096,8 +2618,7 @@ def status_payload(session_path: Path, session: dict[str, Any]) -> dict[str, Any
         and not pending_capacity_authorizations
         and not deferred_review_todos
         and not ready_review_todos
-        and not interrupt_required_review_todos
-        and not pending_work_requests,
+        and not interrupt_required_review_todos,
     }
 
 
@@ -3135,11 +2656,6 @@ def finish(args: argparse.Namespace) -> int:
             raise PipelineError(
                 "cannot finish supervision with undelivered review todos"
             )
-        if payload["pending_work_requests"]:
-            raise PipelineError(
-                "cannot finish supervision before every producer work request is "
-                "resolved with a task or a concrete no-safe-work decision"
-            )
         if payload["roster_metrics"]["pending_replacement_authorizations"]:
             raise PipelineError("cannot finish supervision with an unused replacement authorization")
         if payload["roster_metrics"]["pending_capacity_authorizations"]:
@@ -3162,12 +2678,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     begin_parser.add_argument(
         "--planned-task", action="append", default=[], help="TASK_KEY|ROLE|SCOPE; include the remaining sealed queue"
-    )
-    begin_parser.add_argument(
-        "--preassigned-task",
-        action="append",
-        default=[],
-        help="AGENT_ID|TASK_KEY|ROLE|SCOPE|MODEL; future work the agent may auto-claim",
     )
     begin_parser.add_argument("--session-id")
     begin_parser.add_argument("--event-log")
@@ -3224,62 +2734,6 @@ def build_parser() -> argparse.ArgumentParser:
     reuse_parser.add_argument("--note")
     reuse_parser.add_argument("--new-task-reason")
     reuse_parser.set_defaults(func=assign_task)
-
-    agent_plan_parser = commands.add_parser(
-        "agent-plan",
-        help="show one roster identity its current and preauthorized future work",
-    )
-    agent_plan_parser.add_argument("--session", required=True)
-    agent_plan_parser.add_argument("--agent-id", required=True)
-    agent_plan_parser.set_defaults(func=agent_plan)
-
-    complete_claim_parser = commands.add_parser(
-        "complete-and-claim-next",
-        help=(
-            "atomically bind completion evidence and claim the next compatible "
-            "preauthorized task, otherwise open a supervisor work request"
-        ),
-    )
-    complete_claim_parser.add_argument("--session", required=True)
-    complete_claim_parser.add_argument("--agent-id", required=True)
-    complete_claim_parser.add_argument("--current-task-key", required=True)
-    complete_claim_parser.add_argument("--completion-evidence", required=True)
-    complete_claim_parser.add_argument("--note")
-    complete_claim_parser.set_defaults(func=complete_and_claim_next)
-
-    request_work_parser = commands.add_parser(
-        "request-work",
-        help="open a durable work request when a reusable agent has no ready queue item",
-    )
-    request_work_parser.add_argument("--session", required=True)
-    request_work_parser.add_argument("--agent-id", required=True)
-    request_work_parser.add_argument("--reason", required=True)
-    request_work_parser.set_defaults(func=request_work)
-
-    preassign_parser = commands.add_parser(
-        "preassign-task",
-        help="append one future task to a stable roster identity's auto-claim queue",
-    )
-    preassign_parser.add_argument("--session", required=True)
-    preassign_parser.add_argument("--agent-id", required=True)
-    preassign_parser.add_argument("--task-key", required=True)
-    preassign_parser.add_argument("--role", required=True)
-    preassign_parser.add_argument("--scope", required=True)
-    preassign_parser.add_argument("--model", required=True)
-    preassign_parser.add_argument("--reason", required=True)
-    preassign_parser.set_defaults(func=preassign_task)
-
-    resolve_work_parser = commands.add_parser(
-        "resolve-work-request",
-        help="close a producer request only after task assignment or a reasoned no-work decision",
-    )
-    resolve_work_parser.add_argument("--session", required=True)
-    resolve_work_parser.add_argument("--request-id", required=True)
-    resolve_work_parser.add_argument(
-        "--resolution", choices=["no_safe_work", "cancelled"], required=True
-    )
-    resolve_work_parser.add_argument("--reason", required=True)
-    resolve_work_parser.set_defaults(func=resolve_work_request)
 
     review_todo_parser = commands.add_parser(
         "queue-review-todo",

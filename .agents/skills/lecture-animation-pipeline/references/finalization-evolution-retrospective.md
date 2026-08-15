@@ -35,18 +35,30 @@ The standard route is one atomic evidence chain:
    video pixels, and keep the corrected reader SRT as an upload sidecar;
 4. apply the approved BGM recipe and a restrained, word-locked series-character
    rhythm: resolve `confused`, `aha`, and `thinking` roles from the current
-   mathematics; approved multiple characters and one disjoint two-character
-   reaction are allowed when they support rather than compete with teaching;
+   mathematics; any number of simultaneous characters may be allowed when each
+   has a specific teaching role and they support rather than compete with teaching;
+   do not use a whole-episode count cap, but hard-fail formula/subtitle/active-
+   object collisions, evidence-check rapid entrance windows, and require
+   simultaneous characters to occupy disjoint safe regions; distinct
+   overlapping cues additionally need an evidence-bound safe-area and visual-
+   hierarchy verdict rather than a count-based rejection;
+   every such verdict must use finalization-QC JSON that binds its exact
+   overlay indices and hashes the reviewed frames or masks; pixel-overlap
+   values must match the bound evidence rather than exist only as manifest
+   assertions; the gate must decode common-dimension PNG frames/masks and
+   recompute the intersections from pixels;
    every pointing gesture must machine-bind intrinsic asset direction, mirror
    state, resulting screen direction, and a mathematical target rectangle,
    then pass exact on/late-frame inspection instead of trusting the action name;
-5. when the final audio contains `我是结束乐队的键盘手`, require exactly one
-   hash-bound Sumino overlay that starts before the aligned `我` and covers
-   through `键盘手`; its action is not fixed to `talking`, but must be nonempty,
-   registered in the bound Sumino asset metadata, semantically appropriate for
-   the current narration, and backed by the validated clip/asset hashes; keep
-   the spoken line, never render its identity or farewell text on screen, and
-   move/resize the sprite rather than omitting it;
+5. end every normal episode with one short spoken preview of the next
+   mathematical topic and then the exact spoken line
+   `我是结束乐队的键盘手，下个视频见`; require exactly one hash-bound Sumino
+   overlay that starts before the aligned `我` and covers through `下个视频见`;
+   its action is not fixed to `talking`, but must be nonempty, registered in the
+   bound Sumino asset metadata, semantically appropriate for the current
+   narration, and backed by the validated clip/asset hashes; never render the
+   identity or farewell text on screen; the episode may preserve its final
+   mathematical frame or use a separately approved ending visual;
 6. require the finalization manifest to bind every character/action/semantic
    anchor/word window/protected rectangle/asset and clip hash, with a documented
    collision-evidence omission for any unused standard rhythm role;
@@ -103,8 +115,9 @@ python3 "$SKILL/scripts/pipeline_v2.py" evolution-report \
 
 Follow `references/evolution.md`. New feedback enters as an event and candidate pattern first. Promote a rule only when severity or recurrence justifies it, its applicability is narrow enough to compile, and it has a concrete evidence contract or machine check. Merge or retire rules that add reading cost without reducing recurrence.
 
-At final media delivery, run `finalize-episode` with the fresh
-`--episode-readiness` receipt. It refuses to close the episode unless every
+At final media delivery, first run `seal-upload-package` against the exact
+viewer-facing bytes, then run `finalize-episode` with both the fresh
+`--upload-package-receipt` and `--episode-readiness` receipt. It refuses to close the episode unless every
 scene has one durable human-pass outcome, every issue JSON has a terminal
 status, every scene has reached at least `audio_aligned`, every required final
 artifact exists, and every parallel scene is covered by a supplied batch

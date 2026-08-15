@@ -15,13 +15,17 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 import wave
+
+from PIL import Image, ImageDraw
 
 from pipeline_v2_lib.episode_ops import (
     _canonical_formal_occurrence_count,
     _formal_occurrence_count,
     run_episode_preflight,
 )
+from pipeline_v2_lib import engine as pipeline_engine
 
 
 MODULE_PATH = Path(__file__).with_name("pipeline_v2.py")
@@ -890,6 +894,16 @@ class PipelineV2Tests(unittest.TestCase):
                 path.write_text(f"{key}\n", encoding="utf-8")
             final_paths[key] = path
         finalization_manifest = episode / "final" / "finalization_manifest.json"
+        omission_evidence = {
+            role: self.write_qc_evidence(
+                episode / "final" / f"sprite_{role}_omission_evidence.json",
+                "finalization fixture",
+                evidence_kind="sprite_rhythm_omission",
+                role=role,
+                reason="The twelve-second fixture has no safe editorial beat.",
+            )
+            for role in ("confused", "aha", "thinking")
+        }
         self.write_json(
             finalization_manifest,
             {
@@ -906,13 +920,49 @@ class PipelineV2Tests(unittest.TestCase):
                     {
                         "role": role,
                         "reason": "The twelve-second fixture has no safe editorial beat.",
-                        "collision_evidence": f"fixture://{role}",
+                        **omission_evidence[role],
                     }
                     for role in ("confused", "aha", "thinking")
                 ],
                 "sprite_pixel_qc": [],
             },
         )
+        upload_package_receipt = episode / "final" / "upload_package_receipt.json"
+        upload_receipt_payload = {
+            "schema": "lecture-animation-upload-package-receipt-v1",
+            "compiler": "pipeline_v2.seal-upload-package",
+            "created_at": pipeline.utc_now(),
+            "episode": pipeline.relative_or_absolute(episode, self.root),
+            "final_video": {
+                "path": pipeline.relative_or_absolute(final_paths["final_video"], self.root),
+                "sha256": hashlib.sha256(final_paths["final_video"].read_bytes()).hexdigest(),
+            },
+            "final_audio": {
+                "path": pipeline.relative_or_absolute(final_paths["final_audio"], self.root),
+                "sha256": hashlib.sha256(final_paths["final_audio"].read_bytes()).hexdigest(),
+            },
+            "publication_srt": {
+                "path": pipeline.relative_or_absolute(final_paths["final_srt"], self.root),
+                "sha256": hashlib.sha256(final_paths["final_srt"].read_bytes()).hexdigest(),
+            },
+            "word_alignment": {
+                "path": pipeline.relative_or_absolute(
+                    final_paths["final_word_alignment"], self.root
+                ),
+                "sha256": hashlib.sha256(
+                    final_paths["final_word_alignment"].read_bytes()
+                ).hexdigest(),
+            },
+            "finalization_manifest": {
+                "path": pipeline.relative_or_absolute(finalization_manifest, self.root),
+                "sha256": hashlib.sha256(finalization_manifest.read_bytes()).hexdigest(),
+            },
+            "verdict": "pass",
+        }
+        upload_receipt_payload["receipt_hash"] = pipeline.object_hash(
+            upload_receipt_payload
+        )
+        self.write_json(upload_package_receipt, upload_receipt_payload)
         narration = episode / "final" / "g001_narration.txt"
         narration.write_text(
             "先完成当前场景。小圈积分究竟读取奇点附近的什么信息？",
@@ -976,9 +1026,25 @@ class PipelineV2Tests(unittest.TestCase):
                     )
                 ),
                 0,
-            )
+        )
         receipt_path = episode / "episode_completion.json"
-        with contextlib.redirect_stdout(io.StringIO()):
+        with (
+            mock.patch.object(
+                pipeline_engine,
+                "validate_upload_package_receipt",
+                return_value={"receipt_hash": "canonical-fixture", "verdict": "pass"},
+            ),
+            mock.patch.object(
+                pipeline_engine,
+                "validate_finalization_manifest_contract",
+                return_value={
+                    "path": pipeline.relative_or_absolute(finalization_manifest, self.root),
+                    "sha256": hashlib.sha256(finalization_manifest.read_bytes()).hexdigest(),
+                    "sprite_overlay_count": 0,
+                },
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             self.assertEqual(
                 pipeline.command_finalize_episode(
                     SimpleNamespace(
@@ -990,6 +1056,7 @@ class PipelineV2Tests(unittest.TestCase):
                         batch=[],
                         event_log=str(event_log),
                         finalization_manifest=str(finalization_manifest),
+                        upload_package_receipt=str(upload_package_receipt),
                         output=str(receipt_path),
                         **{key: str(path) for key, path in final_paths.items()},
                     )
@@ -1016,7 +1083,9 @@ class PipelineV2Tests(unittest.TestCase):
             "1\n00:00:00,000 --> 00:00:01,000\n数学问题\n",
             encoding="utf-8",
         )
-        phrase = "我是结束乐队的键盘手"
+        preview = "下一期讨论留数"
+        phrase = "我是结束乐队的键盘手下个视频见"
+        aligned_text = preview + phrase
         alignment = final_dir / "alignment.json"
         self.write_json(
             alignment,
@@ -1028,23 +1097,34 @@ class PipelineV2Tests(unittest.TestCase):
                         "start": index * 0.1,
                         "end": (index + 1) * 0.1,
                     }
-                    for index, character in enumerate(phrase)
+                    for index, character in enumerate(aligned_text)
                 ],
             },
         )
         manifest = final_dir / "manifest.json"
+        omission_evidence = {
+            role: self.write_qc_evidence(
+                final_dir / f"sprite_{role}_omission_evidence.json",
+                "missing signoff fixture",
+                evidence_kind="sprite_rhythm_omission",
+                role=role,
+                reason="Fixture omission.",
+            )
+            for role in ("confused", "aha", "thinking")
+        }
         self.write_json(
             manifest,
             {
                 "schema": "lecture-animation-approved-upload-master-v2",
                 "upload_mp4": pipeline.relative_or_absolute(video, self.root),
                 "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
+                "next_episode_preview_text": preview,
                 "sprite_overlays": [],
                 "sprite_rhythm_omissions": [
                     {
                         "role": role,
                         "reason": "Fixture omission.",
-                        "collision_evidence": f"fixture://{role}",
+                        **omission_evidence[role],
                     }
                     for role in ("confused", "aha", "thinking")
                 ],
@@ -1073,7 +1153,9 @@ class PipelineV2Tests(unittest.TestCase):
             "1\n00:00:00,000 --> 00:00:01,000\n数学问题\n",
             encoding="utf-8",
         )
-        phrase = "我是结束乐队的键盘手"
+        preview = "下一期讨论留数"
+        phrase = "我是结束乐队的键盘手下个视频见"
+        aligned_text = preview + phrase
         alignment = final_dir / "alignment.json"
         self.write_json(
             alignment,
@@ -1085,7 +1167,7 @@ class PipelineV2Tests(unittest.TestCase):
                         "start": index * 0.1,
                         "end": (index + 1) * 0.1,
                     }
-                    for index, character in enumerate(phrase)
+                    for index, character in enumerate(aligned_text)
                 ],
             },
         )
@@ -1098,41 +1180,69 @@ class PipelineV2Tests(unittest.TestCase):
             asset_root / "metadata.json",
             {"actions": {"peek_rise": {"frames": ["peek_rise.png"]}}},
         )
-        phrase_end = len(phrase) * 0.1
+        signoff_start = len(preview) * 0.1
+        phrase_end = len(aligned_text) * 0.1
         manifest = final_dir / "manifest.json"
+        base_overlay = {
+            "character": "sumino",
+            "action": "peek_rise",
+            "semantic_anchor": "spoken keyboard-player identity",
+            "mandatory_signoff": True,
+            "word_anchor_start": signoff_start,
+            "word_anchor_end": phrase_end,
+            "global_start": signoff_start - 0.1,
+            "global_end": phrase_end + 0.2,
+            "clip": pipeline.relative_or_absolute(clip, self.root),
+            "clip_sha256": hashlib.sha256(clip.read_bytes()).hexdigest(),
+            "asset_root": pipeline.relative_or_absolute(asset_root, self.root),
+            "asset_root_sha256": pipeline.artifact_snapshot(asset_root, self.root)[
+                "sha256"
+            ],
+            "protected_rect": [48, 1400, 450, 1830],
+            "subtitle_occlusion_policy": "above subtitle lane",
+        }
+        omission_evidence = {
+            role: self.write_qc_evidence(
+                final_dir / f"sprite_{role}_omission_evidence.json",
+                "registered signoff fixture",
+                evidence_kind="sprite_rhythm_omission",
+                role=role,
+                reason="Fixture omission.",
+            )
+            for role in ("confused", "aha", "thinking")
+        }
+
+        def pixel_evidence(index: int, overlay: dict[str, object]) -> dict[str, object]:
+            return self.write_qc_evidence(
+                final_dir / f"sprite_overlay_{index}_pixel_evidence.json",
+                f"registered signoff overlay {index}",
+                evidence_kind="sprite_pixel_qc",
+                overlay_index=index,
+                before_difference_yavg=0.0,
+                on_difference_yavg=20.0,
+                formula_overlap_pixels=0,
+                subtitle_overlap_pixels=0,
+                active_object_overlap_pixels=0,
+                frame_window=[overlay["global_start"], overlay["global_end"]],
+                protected_rect=overlay["protected_rect"],
+                source_video_path=pipeline.relative_or_absolute(video, self.root),
+                source_video_sha256=hashlib.sha256(video.read_bytes()).hexdigest(),
+            )
+
+        base_pixel_evidence = pixel_evidence(1, base_overlay)
         self.write_json(
             manifest,
             {
                 "schema": "lecture-animation-approved-upload-master-v2",
                 "upload_mp4": pipeline.relative_or_absolute(video, self.root),
                 "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
-                "sprite_overlays": [
-                    {
-                        "character": "sumino",
-                        "action": "peek_rise",
-                        "semantic_anchor": "spoken keyboard-player identity",
-                        "mandatory_signoff": True,
-                        "word_anchor_start": 0.0,
-                        "word_anchor_end": phrase_end,
-                        "global_start": 0.0,
-                        "global_end": phrase_end + 0.2,
-                        "clip": pipeline.relative_or_absolute(clip, self.root),
-                        "clip_sha256": hashlib.sha256(clip.read_bytes()).hexdigest(),
-                        "asset_root": pipeline.relative_or_absolute(
-                            asset_root, self.root
-                        ),
-                        "asset_root_sha256": pipeline.artifact_snapshot(
-                            asset_root, self.root
-                        )["sha256"],
-                        "protected_rect": [48, 1400, 450, 1830],
-                        "subtitle_occlusion_policy": "above subtitle lane",
-                    }
-                ],
+                "next_episode_preview_text": preview,
+                "sprite_overlays": [base_overlay],
                 "sprite_rhythm_omissions": [
                     {
                         "role": role,
                         "reason": "Fixture omission.",
-                        "collision_evidence": f"fixture://{role}",
+                        **omission_evidence[role],
                     }
                     for role in ("confused", "aha", "thinking")
                 ],
@@ -1141,7 +1251,11 @@ class PipelineV2Tests(unittest.TestCase):
                         "overlay_index": 1,
                         "before_difference_yavg": 0.0,
                         "on_difference_yavg": 20.0,
+                        "formula_overlap_pixels": 0,
+                        "subtitle_overlap_pixels": 0,
+                        "active_object_overlap_pixels": 0,
                         "status": "pass",
+                        **base_pixel_evidence,
                     }
                 ],
             },
@@ -1160,14 +1274,16 @@ class PipelineV2Tests(unittest.TestCase):
                     "instructions": ["Sumino action follows scene semantics."],
                 },
                 "constraints": {
-                    "maximum_sprite_overlay_records": 12,
+                    "sprite_count_policy": "no_whole_episode_cap",
+                    "sprite_density_unit": "rolling_eight_second_entrance_window",
+                    "simultaneous_sprite_policy": "disjoint_safe_regions_evidence_reviewed_semantics",
                     "mathematical_attention_priority": "hard_gate",
-                    "identity_phrase": phrase,
+                    "identity_phrase": "我是结束乐队的键盘手，下个视频见",
                     "identity_character": "sumino",
                     "identity_character_count": 1,
                     "identity_action": "any_existing_semantically_appropriate_action",
                     "identity_action_talking_required": False,
-                    "identity_window_coverage": "complete_word_aligned_phrase",
+                    "identity_window_coverage": "complete_word_aligned_signoff",
                     "identity_and_farewell_in_subtitles": False,
                     "identity_and_farewell_in_screen_text": False,
                 },
@@ -1223,6 +1339,267 @@ class PipelineV2Tests(unittest.TestCase):
                 episode=self.episode,
             )
 
+        occluding = json.loads(manifest.read_text(encoding="utf-8"))
+        occluding["sprite_pixel_qc"][0]["formula_overlap_pixels"] = 1
+        occluding_path = final_dir / "manifest-occluding.json"
+        self.write_json(occluding_path, occluding)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "evidence does not bind formula_overlap_pixels",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                occluding_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+
+        generic = json.loads(manifest.read_text(encoding="utf-8"))
+        generic_evidence_path = final_dir / "generic-self-report.json"
+        self.write_json(
+            generic_evidence_path,
+            {"schema": "test", "status": "pass", "overlap_pixels": 0},
+        )
+        generic["sprite_pixel_qc"][0]["evidence_path"] = (
+            pipeline.relative_or_absolute(generic_evidence_path, self.root)
+        )
+        generic["sprite_pixel_qc"][0]["evidence_sha256"] = hashlib.sha256(
+            generic_evidence_path.read_bytes()
+        ).hexdigest()
+        generic_path = final_dir / "manifest-generic-self-report.json"
+        self.write_json(generic_path, generic)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "evidence has the wrong schema",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                generic_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+
+        valid_pixel_evidence_path = pipeline.resolve_stored_path(
+            str(base_pixel_evidence["evidence_path"]), self.root
+        )
+        binary_evidence = json.loads(
+            valid_pixel_evidence_path.read_text(encoding="utf-8")
+        )
+        fake_frame = final_dir / "fake-on-frame.bin"
+        fake_frame.write_bytes(b"not an image")
+        for artifact in binary_evidence["measurement_artifacts"]:
+            if artifact["role"] == "on_frame":
+                artifact["path"] = pipeline.relative_or_absolute(fake_frame, self.root)
+                artifact["sha256"] = hashlib.sha256(fake_frame.read_bytes()).hexdigest()
+        binary_evidence_path = final_dir / "binary-pixel-evidence.json"
+        self.write_json(binary_evidence_path, binary_evidence)
+        binary_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+        binary_manifest["sprite_pixel_qc"][0]["evidence_path"] = (
+            pipeline.relative_or_absolute(binary_evidence_path, self.root)
+        )
+        binary_manifest["sprite_pixel_qc"][0]["evidence_sha256"] = hashlib.sha256(
+            binary_evidence_path.read_bytes()
+        ).hexdigest()
+        binary_manifest_path = final_dir / "manifest-binary-pixel-evidence.json"
+        self.write_json(binary_manifest_path, binary_manifest)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "pixel evidence is unreadable",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                binary_manifest_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+
+        mask_evidence = json.loads(valid_pixel_evidence_path.read_text(encoding="utf-8"))
+        white_formula_mask = final_dir / "white-formula-mask.png"
+        Image.new("L", (64, 36), 255).save(white_formula_mask, format="PNG")
+        for artifact in mask_evidence["measurement_artifacts"]:
+            if artifact["role"] == "formula_mask":
+                artifact["path"] = pipeline.relative_or_absolute(
+                    white_formula_mask, self.root
+                )
+                artifact["sha256"] = hashlib.sha256(
+                    white_formula_mask.read_bytes()
+                ).hexdigest()
+        mask_evidence_path = final_dir / "measured-formula-overlap-evidence.json"
+        self.write_json(mask_evidence_path, mask_evidence)
+        mask_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+        mask_manifest["sprite_pixel_qc"][0]["evidence_path"] = (
+            pipeline.relative_or_absolute(mask_evidence_path, self.root)
+        )
+        mask_manifest["sprite_pixel_qc"][0]["evidence_sha256"] = hashlib.sha256(
+            mask_evidence_path.read_bytes()
+        ).hexdigest()
+        mask_manifest_path = final_dir / "manifest-measured-formula-overlap.json"
+        self.write_json(mask_manifest_path, mask_manifest)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "manifest formula_overlap_pixels does not match mask evidence",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                mask_manifest_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+
+        uncapped = json.loads(manifest.read_text(encoding="utf-8"))
+        base_overlay = uncapped["sprite_overlays"][0]
+        base_pixel_qc = uncapped["sprite_pixel_qc"][0]
+        for index in range(2, 14):
+            overlay = dict(base_overlay)
+            overlay.pop("mandatory_signoff", None)
+            overlay["semantic_anchor"] = f"spaced teaching beat {index}"
+            overlay["global_start"] = index * 10.0
+            overlay["global_end"] = index * 10.0 + 1.0
+            overlay["word_anchor_start"] = index * 10.0 + 0.1
+            overlay["word_anchor_end"] = index * 10.0 + 0.5
+            uncapped["sprite_overlays"].append(overlay)
+            pixel_qc = dict(base_pixel_qc)
+            pixel_qc["overlay_index"] = index
+            pixel_qc.update(pixel_evidence(index, overlay))
+            uncapped["sprite_pixel_qc"].append(pixel_qc)
+        uncapped_path = final_dir / "manifest-uncapped-spaced.json"
+        self.write_json(uncapped_path, uncapped)
+        validated_uncapped = pipeline.validate_finalization_manifest_contract(
+            uncapped_path,
+            self.root,
+            final_video=video,
+            final_srt=srt,
+            final_word_alignment=alignment,
+            episode=self.episode,
+        )
+        self.assertEqual(validated_uncapped["sprite_overlay_count"], 13)
+        self.assertEqual(validated_uncapped["rapid_entrance_window_count"], 0)
+
+        simultaneous = json.loads(manifest.read_text(encoding="utf-8"))
+        second_overlay = dict(base_overlay)
+        second_overlay.pop("mandatory_signoff", None)
+        second_overlay["semantic_anchor"] = "a distinct but compatible teaching cue"
+        second_overlay["word_anchor_start"] = signoff_start + 0.1
+        second_overlay["word_anchor_end"] = signoff_start + 0.5
+        second_overlay["protected_rect"] = [3000, 1320, 3500, 1850]
+        simultaneous["sprite_overlays"].append(second_overlay)
+        second_pixel_qc = dict(base_pixel_qc)
+        second_pixel_qc["overlay_index"] = 2
+        second_pixel_qc.update(pixel_evidence(2, second_overlay))
+        simultaneous["sprite_pixel_qc"].append(second_pixel_qc)
+        simultaneous_path = final_dir / "manifest-simultaneous-unreviewed.json"
+        self.write_json(simultaneous_path, simultaneous)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "lack a pass simultaneous-layout verdict",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                simultaneous_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+        simultaneous_row = {
+            "overlay_indices": [1, 2],
+            "status": "pass",
+            "semantic_reason": "Both reactions clarify different parts of one comparison.",
+            "safe_area_evidence": "Disjoint left and right safe regions.",
+            "visual_hierarchy_evidence": "Both remain smaller than the active formula.",
+        }
+        simultaneous_row.update(
+            self.write_qc_evidence(
+                final_dir / "sprite_simultaneous_1_2_evidence.json",
+                "simultaneous sprite layout",
+                evidence_kind="simultaneous_sprite_qc",
+                overlay_indices=simultaneous_row["overlay_indices"],
+                semantic_reason=simultaneous_row["semantic_reason"],
+                safe_area_evidence=simultaneous_row["safe_area_evidence"],
+                visual_hierarchy_evidence=simultaneous_row[
+                    "visual_hierarchy_evidence"
+                ],
+            )
+        )
+        simultaneous["simultaneous_sprite_qc"] = [simultaneous_row]
+        simultaneous_reviewed_path = final_dir / "manifest-simultaneous-reviewed.json"
+        self.write_json(simultaneous_reviewed_path, simultaneous)
+        validated_simultaneous = pipeline.validate_finalization_manifest_contract(
+            simultaneous_reviewed_path,
+            self.root,
+            final_video=video,
+            final_srt=srt,
+            final_word_alignment=alignment,
+            episode=self.episode,
+        )
+        self.assertEqual(validated_simultaneous["simultaneous_pair_count"], 1)
+        self.assertEqual(
+            validated_simultaneous["simultaneous_reviewed_pair_count"], 1
+        )
+
+        rapid = json.loads(manifest.read_text(encoding="utf-8"))
+        for index, start in ((2, 10.0), (3, 12.0), (4, 14.0)):
+            overlay = dict(base_overlay)
+            overlay.pop("mandatory_signoff", None)
+            overlay["semantic_anchor"] = f"rapid teaching beat {index}"
+            overlay["global_start"] = start
+            overlay["global_end"] = start + 1.0
+            overlay["word_anchor_start"] = start + 0.1
+            overlay["word_anchor_end"] = start + 0.5
+            rapid["sprite_overlays"].append(overlay)
+            pixel_qc = dict(base_pixel_qc)
+            pixel_qc["overlay_index"] = index
+            pixel_qc.update(pixel_evidence(index, overlay))
+            rapid["sprite_pixel_qc"].append(pixel_qc)
+        rapid_path = final_dir / "manifest-rapid-unreviewed.json"
+        self.write_json(rapid_path, rapid)
+        with self.assertRaisesRegex(
+            pipeline.PipelineError,
+            "rapid sprite entrance window lacks a pass rhythm verdict",
+        ):
+            pipeline.validate_finalization_manifest_contract(
+                rapid_path,
+                self.root,
+                final_video=video,
+                final_srt=srt,
+                final_word_alignment=alignment,
+                episode=self.episode,
+            )
+        rapid_row = {
+            "overlay_indices": [2, 3, 4],
+            "status": "pass",
+            "semantic_reason": "Three distinct reactions follow one compact comparison.",
+        }
+        rapid_row.update(
+            self.write_qc_evidence(
+                final_dir / "sprite_rapid_2_3_4_evidence.json",
+                "rapid sprite rhythm",
+                evidence_kind="sprite_rhythm_qc",
+                overlay_indices=rapid_row["overlay_indices"],
+                semantic_reason=rapid_row["semantic_reason"],
+            )
+        )
+        rapid["sprite_rhythm_qc"] = [rapid_row]
+        rapid_reviewed_path = final_dir / "manifest-rapid-reviewed.json"
+        self.write_json(rapid_reviewed_path, rapid)
+        validated_rapid = pipeline.validate_finalization_manifest_contract(
+            rapid_reviewed_path,
+            self.root,
+            final_video=video,
+            final_srt=srt,
+            final_word_alignment=alignment,
+            episode=self.episode,
+        )
+        self.assertEqual(validated_rapid["rapid_entrance_window_count"], 1)
+
     def test_finalization_manifest_rejects_pointing_away_from_target(self) -> None:
         final_dir = self.episode / "final-pointing"
         final_dir.mkdir(parents=True)
@@ -1250,42 +1627,64 @@ class PipelineV2Tests(unittest.TestCase):
         asset_root.mkdir()
         (asset_root / "frame.png").write_bytes(b"fixture-frame")
         manifest = final_dir / "manifest.json"
+        overlay = {
+            "character": "sumino",
+            "action": "point_right",
+            "semantic_anchor": "point to the mathematical target",
+            "word_anchor_start": 0.0,
+            "word_anchor_end": 0.4,
+            "global_start": 0.0,
+            "global_end": 0.8,
+            "clip": pipeline.relative_or_absolute(clip, self.root),
+            "clip_sha256": hashlib.sha256(clip.read_bytes()).hexdigest(),
+            "asset_root": pipeline.relative_or_absolute(asset_root, self.root),
+            "asset_root_sha256": pipeline.artifact_snapshot(asset_root, self.root)[
+                "sha256"
+            ],
+            "protected_rect": [48, 1400, 450, 1830],
+            "subtitle_occlusion_policy": "above subtitle lane",
+            "asset_facing_direction": "left",
+            "mirrored_horizontally": False,
+            "rendered_gesture_direction": "left",
+            "gesture_target_rect": [520, 450, 2600, 1500],
+        }
+        omission_evidence = {
+            role: self.write_qc_evidence(
+                final_dir / f"sprite_{role}_omission_evidence.json",
+                "directional gesture fixture",
+                evidence_kind="sprite_rhythm_omission",
+                role=role,
+                reason="Fixture omission.",
+            )
+            for role in ("confused", "aha", "thinking")
+        }
+        pixel_evidence = self.write_qc_evidence(
+            final_dir / "sprite_overlay_1_pixel_evidence.json",
+            "directional gesture fixture",
+            evidence_kind="sprite_pixel_qc",
+            overlay_index=1,
+            before_difference_yavg=0.0,
+            on_difference_yavg=20.0,
+            formula_overlap_pixels=0,
+            subtitle_overlap_pixels=0,
+            active_object_overlap_pixels=0,
+            frame_window=[0.0, 0.8],
+            protected_rect=overlay["protected_rect"],
+            source_video_path=pipeline.relative_or_absolute(video, self.root),
+            source_video_sha256=hashlib.sha256(video.read_bytes()).hexdigest(),
+        )
         self.write_json(
             manifest,
             {
                 "schema": "lecture-animation-approved-upload-master-v2",
                 "upload_mp4": pipeline.relative_or_absolute(video, self.root),
                 "upload_mp4_sha256": hashlib.sha256(video.read_bytes()).hexdigest(),
-                "sprite_overlays": [
-                    {
-                        "character": "sumino",
-                        "action": "point_right",
-                        "semantic_anchor": "point to the mathematical target",
-                        "word_anchor_start": 0.0,
-                        "word_anchor_end": 0.4,
-                        "global_start": 0.0,
-                        "global_end": 0.8,
-                        "clip": pipeline.relative_or_absolute(clip, self.root),
-                        "clip_sha256": hashlib.sha256(clip.read_bytes()).hexdigest(),
-                        "asset_root": pipeline.relative_or_absolute(
-                            asset_root, self.root
-                        ),
-                        "asset_root_sha256": pipeline.artifact_snapshot(
-                            asset_root, self.root
-                        )["sha256"],
-                        "protected_rect": [48, 1400, 450, 1830],
-                        "subtitle_occlusion_policy": "above subtitle lane",
-                        "asset_facing_direction": "left",
-                        "mirrored_horizontally": False,
-                        "rendered_gesture_direction": "left",
-                        "gesture_target_rect": [520, 450, 2600, 1500],
-                    }
-                ],
+                "sprite_overlays": [overlay],
                 "sprite_rhythm_omissions": [
                     {
                         "role": role,
                         "reason": "Fixture omission.",
-                        "collision_evidence": f"fixture://{role}",
+                        **omission_evidence[role],
                     }
                     for role in ("confused", "aha", "thinking")
                 ],
@@ -1294,7 +1693,11 @@ class PipelineV2Tests(unittest.TestCase):
                         "overlay_index": 1,
                         "before_difference_yavg": 0.0,
                         "on_difference_yavg": 20.0,
+                        "formula_overlap_pixels": 0,
+                        "subtitle_overlap_pixels": 0,
+                        "active_object_overlap_pixels": 0,
                         "status": "pass",
+                        **pixel_evidence,
                     }
                 ],
             },
@@ -1333,6 +1736,16 @@ class PipelineV2Tests(unittest.TestCase):
             },
         )
         manifest = final_dir / "manifest.json"
+        omission_evidence = {
+            role: self.write_qc_evidence(
+                final_dir / f"sprite_{role}_omission_evidence.json",
+                "AppleDouble fixture",
+                evidence_kind="sprite_rhythm_omission",
+                role=role,
+                reason="Fixture omission.",
+            )
+            for role in ("confused", "aha", "thinking")
+        }
         self.write_json(
             manifest,
             {
@@ -1344,7 +1757,7 @@ class PipelineV2Tests(unittest.TestCase):
                     {
                         "role": role,
                         "reason": "Fixture omission.",
-                        "collision_evidence": f"fixture://{role}",
+                        **omission_evidence[role],
                     }
                     for role in ("confused", "aha", "thinking")
                 ],
@@ -1382,10 +1795,149 @@ class PipelineV2Tests(unittest.TestCase):
                 episode=self.episode,
             )
 
+    def test_finalization_rule_registry_has_no_whole_episode_sprite_cap(self) -> None:
+        rules = json.loads(
+            (MODULE_PATH.parent.parent / "references/rules.json")
+            .read_text(encoding="utf-8")
+        )["rules"]
+        final_rule = next(row for row in rules if row.get("rule_id") == "FINAL-002")
+        requirement = str(final_rule.get("requirement", ""))
+        self.assertIn("no whole-episode or same-screen overlay-count cap", requirement)
+        self.assertIn("short-window entrance density", requirement)
+        self.assertIn("disjoint safe regions", requirement)
+        self.assertNotIn("more than twelve", requirement.lower())
+
     @staticmethod
     def write_json(path: Path, value: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def write_qc_evidence(
+        self,
+        path: Path,
+        label: str,
+        *,
+        evidence_kind: str,
+        **bound_fields: object,
+    ) -> dict[str, object]:
+        artifact_roles = (
+            (
+                "before_reference_frame",
+                "before_frame",
+                "on_frame",
+                "formula_mask",
+                "subtitle_mask",
+                "active_object_mask",
+            )
+            if evidence_kind == "sprite_pixel_qc"
+            else ("review_frame",)
+        )
+        measurement_artifacts = []
+        image_size = (64, 36)
+        generated_images: dict[str, Image.Image] = {}
+        if evidence_kind == "sprite_pixel_qc":
+            generated_images = {
+                role: Image.new(
+                    "RGB" if role.endswith("frame") else "L",
+                    image_size,
+                    0,
+                )
+                for role in artifact_roles
+            }
+            rect = bound_fields["protected_rect"]
+            scaled_rect = [
+                max(0, min(image_size[0] - 1, round(float(rect[0]) / 3840 * image_size[0]))),
+                max(0, min(image_size[1] - 1, round(float(rect[1]) / 2160 * image_size[1]))),
+                max(0, min(image_size[0] - 1, round(float(rect[2]) / 3840 * image_size[0]))),
+                max(0, min(image_size[1] - 1, round(float(rect[3]) / 2160 * image_size[1]))),
+            ]
+            if scaled_rect[2] <= scaled_rect[0]:
+                scaled_rect[2] = min(image_size[0] - 1, scaled_rect[0] + 1)
+            if scaled_rect[3] <= scaled_rect[1]:
+                scaled_rect[3] = min(image_size[1] - 1, scaled_rect[1] + 1)
+            ImageDraw.Draw(generated_images["on_frame"]).rectangle(
+                scaled_rect,
+                fill=(255, 255, 255),
+            )
+            before_pixels = list(
+                generated_images["before_frame"].get_flattened_data()
+            )
+            on_pixels = list(generated_images["on_frame"].get_flattened_data())
+            on_difference = sum(
+                abs((299 * left[0] + 587 * left[1] + 114 * left[2]) / 1000 -
+                    (299 * right[0] + 587 * right[1] + 114 * right[2]) / 1000)
+                for left, right in zip(before_pixels, on_pixels)
+            ) / len(before_pixels)
+            bound_fields.update(
+                {
+                    "before_difference_yavg": 0.0,
+                    "on_difference_yavg": on_difference,
+                    "formula_overlap_pixels": 0,
+                    "subtitle_overlap_pixels": 0,
+                    "active_object_overlap_pixels": 0,
+                    "pixel_difference_threshold": 18,
+                    "frame_timestamps": {
+                        "before_reference": max(
+                            0.0, float(bound_fields["frame_window"][0]) - 2 / 30
+                        ),
+                        "before": max(
+                            0.0, float(bound_fields["frame_window"][0]) - 1 / 30
+                        ),
+                        "on": (
+                            float(bound_fields["frame_window"][0])
+                            + float(bound_fields["frame_window"][1])
+                        )
+                        / 2,
+                    },
+                }
+            )
+        else:
+            generated_images["review_frame"] = Image.new("RGB", image_size, 0)
+        for role in artifact_roles:
+            artifact_path = path.with_name(f"{path.stem}_{role}.png")
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            generated_images[role].save(artifact_path, format="PNG")
+            measurement_artifacts.append(
+                {
+                    "role": role,
+                    "path": pipeline.relative_or_absolute(artifact_path, self.root),
+                    "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                }
+            )
+        self.write_json(
+            path,
+            {
+                "schema": "lecture-animation-finalization-qc-evidence-v1",
+                "evidence_kind": evidence_kind,
+                "label": label,
+                "status": "pass",
+                "measurement_tool": (
+                    "pipeline_v2.sprite-pixel-audit-v1"
+                    if evidence_kind == "sprite_pixel_qc"
+                    else "fixture-review-audit-v1"
+                ),
+                "measurement_artifacts": measurement_artifacts,
+                **bound_fields,
+            },
+        )
+        result: dict[str, object] = {
+            "evidence_path": pipeline.relative_or_absolute(path, self.root),
+            "evidence_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        if evidence_kind == "sprite_pixel_qc":
+            result.update(
+                {
+                    field: bound_fields[field]
+                    for field in (
+                        "before_difference_yavg",
+                        "on_difference_yavg",
+                        "formula_overlap_pixels",
+                        "subtitle_overlap_pixels",
+                        "active_object_overlap_pixels",
+                    )
+                }
+            )
+        return result
 
     @staticmethod
     def narration_style_contract() -> dict[str, object]:
@@ -9989,6 +10541,17 @@ class PipelineV2Tests(unittest.TestCase):
             )
         exhaustion["coverage_complete"] = True
         exhaustion["reviewer_statement"] = "Every open symptom is assigned to one root cause, and sibling code paths plus all four gate layers were checked."
+        exhaustion["finding_classifications"] = [
+            {
+                "finding_id": finding["finding_id"],
+                "origin_class": "pre_existing_review_miss",
+                "detectable_in_prior_artifact": True,
+                "prior_manifest_hash": "prior-manifest-hash-0001",
+                "reason": "The unchanged trigger ordering and decoded evidence were available to the prior full review.",
+            }
+        ]
+        exhaustion["unreviewed_surfaces"] = []
+        exhaustion["reviewer_miss_count"] = 1
         exhaustion["verdict"] = "exhaustive_for_repair"
         exhaustion["exhaustion_hash"] = pipeline.object_hash(exhaustion)
         review["review_exhaustion"] = exhaustion
@@ -12416,6 +12979,32 @@ class PipelineV2Tests(unittest.TestCase):
         )
         self.assertEqual(strategy["full_reviews_for_scene"], 0)
         self.assertFalse(strategy["root_cause_escalation_required"])
+
+        governance_attempts = [
+            {
+                "scene_slug": "g002c_riemann_sum_limit",
+                "revision_kind": "infra",
+                "actual_execution": False,
+                "result": "revise",
+            }
+            for _ in range(4)
+        ]
+        governance = pipeline.review_iteration_governance_data(
+            "g002c_riemann_sum_limit", governance_attempts
+        )
+        self.assertTrue(governance["root_cause_reset_required"])
+        self.assertFalse(governance["new_micro_revision_allowed"])
+        self.assertIn("contract_or_infra_revision_limit", governance["triggers"])
+        strategy = pipeline.review_strategy_data(
+            previous_manifest,
+            material_manifest,
+            previous_review,
+            session,
+            governance_attempts,
+        )
+        self.assertTrue(strategy["root_cause_escalation_required"])
+        self.assertFalse(strategy["micro_patch_allowed"])
+        self.assertTrue(strategy["repair_requires_exhaustive_finding_bundle"])
 
     def test_progressive_planning_chain_is_hash_bound(self) -> None:
         with self.assertRaisesRegex(pipeline.PipelineError, "dedicated direct child worktree"):
