@@ -137,7 +137,7 @@ subagent 复审通过后，动画仍然不能直接提交。必须先把 review 
 - `vault/` 是独立 Git 仓库/submodule。Obsidian Git 只在 `vault/` 内提交和推送课程笔记；外层项目 Git 只记录 `vault` 指向的 commit。需要固定“项目代码 + 文案版本”时，先在 `vault/` 内 commit/push，再在外层仓库 stage 并 commit `vault` 的 submodule 指针。
 ## 外部同步（myLectures-agents）
 
-`AGENTS.md`、规范入口 `.agents/skills/lecture-animation-pipeline/` 和旧版备份 `.agents/skills/lecture-animation-pipeline-legacy/` 会同步到独立的公开 GitHub 仓库 [Vioano/myLectures-agents](https://github.com/Vioano/myLectures-agents)。同步清单在 `scripts/sync-agents-manifest.txt`，同步脚本在 `scripts/sync-agents.sh`。
+`AGENTS.md`、规范入口 `.agents/skills/lecture-animation-pipeline/`、状态控制入口 `.agents/skills/lecture-state-supervision/` 和旧版备份 `.agents/skills/lecture-animation-pipeline-legacy/` 会同步到独立的公开 GitHub 仓库 [Vioano/myLectures-agents](https://github.com/Vioano/myLectures-agents)。同步清单在 `scripts/sync-agents-manifest.txt`，同步脚本在 `scripts/sync-agents.sh`。
 
 - agent 修改了清单中列出的文件后，应提醒用户运行 `scripts/sync-agents.sh` 同步到外部仓库。
 - agent 不要自动执行同步脚本，同步操作由用户决定。

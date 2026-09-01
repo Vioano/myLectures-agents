@@ -59,57 +59,38 @@ users invoke this Skill without a version suffix.
   executions, two author-detectable misses, or two reviewer misses trigger
   `ROOT_CAUSE_RESET_REQUIRED`; no further micro-revision is allowed until an
   exhaustive blocker set and shared-executor replan are sealed.
+- Start one episode-local `scripts/progress_guard.py` state for every bounded
+  task. It is separate from approval state, grants no gate authority, and its
+  `reflection_required` result is a hard stop until reflection and replan.
+
+## Task Progress And Reflection Guard
+
+Initialize the guard with a wall budget, idle budget, current gate, and the
+smallest falsifiable next action. Run `status` at each user-update interval,
+before another costly attempt, and before handoff/completion. Timeout,
+hash-stagnation, repeated revise/regression, gate-free churn, missed commitment,
+stale dependency, or scope expansion must stop and replan; file churn is not
+progress. Follow `references/progress-and-reflection-guard.md` and never
+hand-edit its receipt.
 
 ## Consolidate Git State
 
-Treat the exact user phrase `整理 Git 状态` as authority for one standard,
-local, task-scoped consolidation pass. The scope is the current episode or
-task and its worktrees; it expands to the whole repository only when the user
-explicitly says so. The phrase means all of the following, in order:
+The exact phrase `整理 Git 状态` authorizes one local, task-scoped pass:
+inventory canonical/worktree truth -> identify approved source and protected
+media/evidence -> hash-promote ignored assets into `/Volumes/bocchi/myLectures`
+-> merge approved tracked control to local `main` -> clean AppleDouble and pass
+hash/`ffprobe`/`audit-portability --require-clean` gates -> prove every remaining
+worktree file is a
+duplicate, obsolete intermediate, or preserved archive -> remove only those
+task worktrees while retaining their branches. Preserve unrelated dirty work
+and stop on conflict or ambiguous overlap. Only after those gates may it
+remove the current task's producer and integration worktrees.
 
-1. Inventory the canonical checkout, current branch and commit, upstream,
-   tracked/untracked/ignored changes, submodule state when applicable, and the
-   exact task worktree list. Preserve unrelated dirty work instead of stashing,
-   resetting, force-checking out, or cleaning it.
-2. Resolve the accepted source/control branch and classify generated assets.
-   Protected assets include the approved final MP4, native final segments,
-   final mixed and voice-only WAVs, every approved scene WAV, reader/word
-   subtitles and alignment, approved inputs/review packages, final manifest,
-   QC/contact sheet, completion receipt, portability evidence, the canonical
-   phase/outcome/review/repair ledgers, supervisor session, task capsules, and
-   all human/accepted-agent feedback plus issue records needed for a truthful
-   retrospective.
-3. Promote the protected ignored/generated assets by exact hash into the
-   canonical filesystem checkout at `/Volumes/bocchi/myLectures`. A temporary
-   worktree checked out on `main` may be used to perform a safe merge, but it
-   is not a substitute for the canonical directory and must not be reported as
-   one. Promotion is copy-and-verify first; worktree removal supplies the later
-   deletion half of a move.
-4. Merge only already approved tracked source/control and retrospective
-   evidence into local `main`, preferring fast-forward when possible. A merge
-   conflict or ambiguous dirty overlap stops the merge and is reported rather
-   than resolved by discarding bytes.
-5. Run scoped AppleDouble cleanup, SHA-256 comparison, `ffprobe` on the final
-   video, and `audit-portability --require-clean` from the canonical directory.
-   A Git merge alone is never evidence that ignored audio or video survived.
-6. After the canonical audit passes and a read-only unique-file inventory
-   proves that every remaining task-worktree file is either hash-duplicated,
-   obsolete intermediate output, or intentionally preserved elsewhere,
-   remove the current task's producer and integration worktrees. This trigger
-   authorizes that bounded worktree removal and deletion of the obsolete
-   intermediate bytes inside those worktrees. It does not authorize deleting
-   worktrees belonging to another episode or task.
-7. Leave local branches in place unless branch deletion was separately
-   requested. Report the resulting `main` commit, canonical checkout state,
-   protected asset paths and hashes, removed worktree paths, retained branches,
-   and any unresolved dirty state.
-
-`整理 Git 状态` never authorizes push, upload, external Skill sync, deletion
-of protected media/evidence, rewriting approved episode content, `git clean`,
-`git reset --hard`, or deletion of unrelated work. If the user adds
-`合并到主分支`, that restates the local merge step; it still does not grant a
-push. See `references/preflight-portability-and-handoffs.md` for the promotion
-and cleanup audit.
+`整理 Git 状态` does not authorize push, upload, external Skill sync,
+protected deletion, content rewrites, `git clean`, `git reset --hard`,
+unrelated cleanup, or branch
+deletion. The complete protected-asset list, receipts, audit, and removal
+contract is normative in `references/preflight-portability-and-handoffs.md`.
 
 ## Load Only The Active Phase
 
@@ -117,6 +98,9 @@ This file is the mandatory entrypoint. Read it completely, then load only the
 references named for the current phase. Do not replay the whole production
 history or read every reference as a ritual. A task capsule points to durable
 artifacts by path and hash; it does not paste those artifacts into the prompt.
+
+For every bounded task in the table below, additionally load
+`references/progress-and-reflection-guard.md` and operate its executable guard.
 
 | Current work | Required references |
 |---|---|
@@ -378,6 +362,8 @@ does not authorize push, upload, protected-media deletion, or worktree removal.
 - `references/rules.json`: structured rule registry.
 - `references/failure_pattern_library.json`: rejected visual patterns.
 - `scripts/pipeline_v2.py`: canonical CLI entrypoint.
+- `scripts/progress_guard.py`: timeout, stagnation, regression, and forced-
+  reflection state machine for one bounded task.
 - `scripts/render_scene.py`: native/proxy rendering helper.
 - `scripts/render_native_review.py`: native-fidelity review render helper.
 - `scripts/runtime_qc.py`: runtime telemetry helper.
