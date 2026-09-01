@@ -1,0 +1,19 @@
+{
+  "schema": "lecture-state-supervision-bundle-v1",
+  "version": "pre13-2026-09-01.2",
+  "runtime": "python>=3.10, standard-library only",
+  "entrypoints": {
+    "agent_cli": "scripts/runtime/supervise.py",
+    "human_ui": "scripts/runtime/serve.py",
+    "demo_seed": "scripts/runtime/seed_demo.py",
+    "self_test": "scripts/verify.sh"
+  },
+  "components": [
+    "SKILL.md",
+    "scripts/runtime",
+    "scripts/evaluation",
+    "references"
+  ],
+  "generated_results_included": false,
+  "installation_unit": "the lecture-state-supervision skill folder only"
+}

@@ -10,8 +10,8 @@ ownership, evidence lineage, scheduling and recovery. Human UI actions and Main
 Agent commands are equivalent projections onto this backend; neither frontend
 nor chat history is authoritative.
 
-Read [the public operator guide](../../../state-supervision/OPERATOR_GUIDE.md)
-before the first command in a Session. Do not read service source or internal
+Read [the public operator guide](references/operator-guide.md) before the first
+command in a Session. Do not read service source or internal
 architecture merely to operate it.
 
 For Episode 13, read [the shadow-run playbook](references/episode13-shadow-run.md)
@@ -19,13 +19,16 @@ at initialization and closeout. Read [the telemetry contract](references/telemet
 only when configuring instrumentation, freezing evidence or writing the
 retrospective.
 
-Before relying on a newly cloned or updated bundle, run
-`./scripts/verify-state-supervision-bundle.sh` from its root. A portable release
-is valid only when that clean-install check proves the Agent CLI, persistent
-backend, Human UI and evaluation tools together. To place the complete system
-in another checkout, run
-`./scripts/install-state-supervision.sh /absolute/path/to/project`; copying this
-Markdown Skill alone is not an installation.
+This folder is the complete installation unit. Before relying on a newly cloned
+or updated copy, run `scripts/verify.sh` from this Skill root. The verification
+must prove that copying only this folder provides the Agent CLI, persistent
+backend, Human UI, tests and evaluation tools. A GitHub checkout can install
+the Skill into a project with `scripts/install.sh /absolute/path/to/project`.
+Do not depend on sibling repository code.
+
+The public entrypoints are `scripts/runtime/supervise.py` for Agents and
+`scripts/runtime/serve.py` for the Human UI. Resolve both from this Skill root
+and pass the production checkout explicitly through `--repo-root`.
 
 This Skill is the control plane. When a task capsule requests storyboard,
 Manim, Remotion, rendering, review or finalization work, also use the canonical
@@ -78,6 +81,7 @@ animation Skill into unrelated state operations.
 ## Episode closeout
 
 Export the immutable state bundle, complete the long-run pack, and validate it
-with `check_run_pack.py --ready`. Preserve missing measurements as `unknown`.
+with `scripts/evaluation/check_run_pack.py --ready`. Preserve missing
+measurements as `unknown`.
 The Episode production Session records evidence but does not patch the Harness;
 diagnosis and optimization belong to the later evaluation Session.

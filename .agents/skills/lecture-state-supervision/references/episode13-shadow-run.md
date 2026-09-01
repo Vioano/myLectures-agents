@@ -4,7 +4,7 @@
 
 1. Record the exact Git commit or PRE13 tag as `system_version`.
 2. Initialize the run pack with
-   `state-supervision-evaluation/scripts/init_episode_run.py`.
+   `scripts/evaluation/init_episode_run.py` from this Skill.
 3. Create the episode state from the approved Episode 13 plan. Do not preload
    imagined pressure changes; later changes must enter through normal commands.
 4. Register stable Agent identities, roles and capabilities. Keep author and

@@ -2,15 +2,15 @@
 
 This repository is the portable Agent/Human control bundle for
 [myLectures](https://github.com/Vioano/myLectures). It contains both the Agent
-Skills and the runnable lecture-state-supervision backend—Python service, Agent
-CLI, Human UI, tests and Episode evaluation tooling.
+Skills. `lecture-state-supervision` is self-contained: its own folder includes
+the Python service, Agent CLI, Human UI, tests and Episode evaluation tooling.
 
 ## Clone and verify
 
 ```bash
 git clone https://github.com/Vioano/myLectures-agents.git
 cd myLectures-agents
-./scripts/verify-state-supervision-bundle.sh
+./.agents/skills/lecture-state-supervision/scripts/verify.sh
 ```
 
 The runtime uses Python 3.10+ and the standard library only. The verifier runs
@@ -26,12 +26,12 @@ itself can remain read-only.
 ```bash
 export LECTURE_PROJECT=/absolute/path/to/myLectures
 
-python3 state-supervision/supervise.py \
+python3 .agents/skills/lecture-state-supervision/scripts/runtime/supervise.py \
   --repo-root "$LECTURE_PROJECT" \
   --data-root "$LECTURE_PROJECT/.lecture-state" \
   --help
 
-python3 state-supervision/serve.py \
+python3 .agents/skills/lecture-state-supervision/scripts/runtime/serve.py \
   --repo-root "$LECTURE_PROJECT" \
   --data-root "$LECTURE_PROJECT/.lecture-state"
 ```
@@ -42,23 +42,22 @@ the backend or lose state; SQLite/WAL under `.lecture-state/` is authoritative.
 ## Install into an existing project
 
 ```bash
-./scripts/install-state-supervision.sh /absolute/path/to/myLectures
+./.agents/skills/lecture-state-supervision/scripts/install.sh /absolute/path/to/myLectures
 cd /absolute/path/to/myLectures
-python3 state-supervision/supervise.py --help
-python3 state-supervision/serve.py
+python3 .agents/skills/lecture-state-supervision/scripts/runtime/supervise.py --help
+python3 .agents/skills/lecture-state-supervision/scripts/runtime/serve.py
 ```
 
-The installer copies only these components and adds `.lecture-state/` to the
-target `.gitignore`:
+The installer copies exactly one component and adds runtime/evaluation ignores
+to the target `.gitignore`:
 
 | Path | Purpose |
 |---|---|
-| `.agents/skills/lecture-state-supervision/` | Project-level operating Skill |
-| `state-supervision/` | Persistent backend, Agent CLI, Human UI and tests |
-| `state-supervision-evaluation/` | PRE13/EP13 telemetry, stress and retrospective tools |
+| `.agents/skills/lecture-state-supervision/` | Complete Skill: instructions, runtime, UI, tests and evaluation tools |
 
-Generated runtime databases and previous test-result directories are not
-published in the bundle.
+No sibling runtime directory is required. Generated databases and project test
+evidence stay outside the Skill under `.lecture-state/` and
+`review/state-supervision/`.
 
 ## Other project Skills
 

@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lecture State Supervision</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">LS</div>
+        <div>
+          <strong>Lecture Supervision</strong>
+          <span>STATE · EVIDENCE · ATTENTION</span>
+        </div>
+      </div>
+      <details id="viewSwitcher" class="view-switcher">
+        <summary aria-label="切换监督页面"><span>当前页面</span><strong id="currentViewLabel">生产首页</strong></summary>
+        <div class="view-switcher-menu" role="menu" aria-label="监督页面">
+          <button class="view-tab active" data-view="production" data-label="生产首页" type="button">生产首页<small>平时只看这里</small></button>
+          <button class="view-tab" data-view="flow" data-label="流程监控" type="button">流程监控<small>释放、调度与任务流</small></button>
+          <button class="view-tab" data-view="structure" data-label="结构地图" type="button">结构地图<small>内容尺度与交付物流</small></button>
+          <button class="view-tab" data-view="workstations" data-label="Agent 工位" type="button">Agent 工位<small>并行工位与租约</small></button>
+          <button class="view-tab" data-view="risk" data-label="风险与恢复" type="button">风险与恢复<small>异常、隔离与局部修复 <span id="riskBadge">0</span></small></button>
+          <div class="view-switcher-separator"></div>
+          <button class="view-tab" data-view="events" data-label="增量事件" type="button">增量事件<small>只读 cursor 之后的变化</small></button>
+          <button class="view-tab" data-view="topology" data-label="Agent 数据" type="button">Agent 数据<small>坐标无关的机器入口</small></button>
+        </div>
+      </details>
+      <div class="episode-switcher">
+        <label for="episodeSelect">当前分集</label>
+        <select id="episodeSelect" aria-label="选择分集"></select>
+      </div>
+      <div class="header-status">
+        <div id="streamStatus" class="live-state offline"><i></i><span>连接</span><b id="systemHealth" class="hidden">系统状态未知</b></div>
+        <button id="attentionButton" class="attention-button" type="button" aria-live="polite" aria-label="返回生产首页查看待处理事项">
+          <span id="attentionLabel">初始化</span><small id="attentionProgress">0/0</small><b id="attentionCount" class="hidden">0</b>
+        </button>
+        <details id="headerTools" class="header-tools">
+          <summary>工具</summary>
+          <div class="header-tools-menu">
+            <div class="cursor-readout">EVENT <b id="cursorValue">0</b></div>
+            <button id="scopeButton" class="quiet-button" type="button" aria-expanded="false" aria-controls="hierarchyPanel">查看分集范围</button>
+            <button id="refreshButton" class="quiet-button" type="button">刷新界面</button>
+          </div>
+        </details>
+      </div>
+    </header>
+
+    <section id="frontendFaultBanner" class="frontend-fault-banner hidden" role="status" aria-live="polite">
+      <div><span id="frontendFaultLabel">INTERFACE DEGRADED</span><strong id="frontendFaultSummary">部分界面未能更新。</strong></div>
+      <button id="frontendRecoverButton" class="quiet-button" type="button">重载界面</button>
+    </section>
+
+    <div id="emptyState" class="empty-state hidden">
+      <div>
+        <span class="eyebrow">NO EPISODE</span>
+        <h1>还没有监督中的分集</h1>
+        <p>先用 Agent CLI 创建分集和任务；网页会通过同一后端立即出现。</p>
+        <code>python3 .agents/skills/lecture-state-supervision/scripts/runtime/supervise.py init EPISODE --title … --mission …</code>
+      </div>
+    </div>
+
+    <div id="workspace" class="workspace hidden">
+      <aside id="hierarchyPanel" class="hierarchy-panel" aria-label="分集结构">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">SCOPE</span>
+            <h2>分集结构</h2>
+          </div>
+          <div class="panel-actions">
+            <button id="collapseAll" class="icon-button" type="button" title="折叠全部">−</button>
+            <button id="closeHierarchy" class="icon-button" type="button" title="关闭结构">×</button>
+          </div>
+        </div>
+        <details class="mission-disclosure">
+          <summary>本集目标</summary>
+          <div id="episodeMission" class="mission"></div>
+        </details>
+        <div class="axis-switch" aria-label="结构浏览轴">
+          <button id="axisContent" class="axis-button active" type="button">内容尺度</button>
+          <button id="axisDeliverable" class="axis-button" type="button">交付物流</button>
+        </div>
+        <div id="hierarchyNote" class="hierarchy-note">内容树只表示对象包含关系，不表示先后。</div>
+        <div id="hierarchyTree" class="hierarchy-tree"></div>
+      </aside>
+
+    <main class="main-stage production-mode">
+        <section id="productionView" class="view active">
+          <section id="nextAction" class="next-action hidden" aria-live="polite"></section>
+
+          <section class="home-flow-section" aria-labelledby="homeFlowTitle">
+            <div class="home-flow-heading">
+              <h2 id="homeFlowTitle" class="sr-only">生产图</h2>
+              <p id="homeFlowDescription">当前释放视野</p>
+            </div>
+            <section class="execution-preview" aria-labelledby="executionPreviewTitle">
+              <span id="executionPreviewTitle" class="sr-only">当前释放视野</span>
+              <div class="execution-preview-body">
+                <div class="execution-map-shell">
+                  <div id="executionMapFrame" class="execution-map-frame">
+                    <div id="executionMap" class="execution-map" tabindex="0" aria-label="可平移缩放的非线性任务依赖释放图"></div>
+                    <details class="canvas-hud policy-hud">
+                      <summary><span>调度承诺</span><small>容量与闲置合法性</small></summary>
+                      <div id="dispatchPolicy" class="dispatch-policy"></div>
+                    </details>
+                    <details class="canvas-hud dispatch-hud">
+                      <summary><span>流动领取</span><small>事件驱动，不设阶段栅栏</small></summary>
+                      <div id="dispatchLoop" class="dispatch-loop" aria-label="流动任务领取机制"></div>
+                    </details>
+                    <div class="graph-camera-controls" role="group" aria-label="实时生产地图控制">
+                      <button id="forecastZoomIn" type="button" title="放大" aria-label="放大">＋</button>
+                      <button id="forecastZoomOut" type="button" title="缩小" aria-label="缩小">−</button>
+                      <button id="forecastZoomLevel" type="button" title="恢复到 100%" aria-label="当前缩放 120%，点击重置">120%</button>
+                      <button id="forecastFit" type="button" title="适合画布" aria-label="适合画布">⌗</button>
+                      <button id="forecastFullscreen" type="button" title="切换全屏" aria-label="切换实时生产地图全屏">⛶</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </section>
+
+          <section id="metricStrip" class="metric-strip"></section>
+
+          <details class="home-list-drawer">
+            <summary><b>文字工作列表</b></summary>
+            <section class="board-section">
+              <div id="taskBoard" class="task-board"></div>
+            </section>
+          </details>
+        </section>
+
+        <section id="structureView" class="view graph-view structure-page">
+          <div class="structure-page-heading">
+            <div><span class="eyebrow">MULTISCALE STRUCTURE</span><h1 id="structurePageTitle">结构地图</h1></div>
+            <p id="structurePageDescription">内容尺度与交付物流的双轴投影；归属不构成执行栅栏。</p>
+          </div>
+          <div id="structureGraphHost" class="structure-graph-host"></div>
+        </section>
+
+        <section id="flowView" class="view graph-view flow-page">
+          <div class="section-heading large graph-heading">
+            <div>
+              <span class="eyebrow">PROGRESSIVE TOPOLOGY</span>
+              <h1>生产流程</h1>
+            </div>
+            <div class="graph-toolbar" aria-label="流程图控制">
+              <button id="flowTaskMode" class="secondary-button" type="button">任务地图</button>
+              <button id="flowMicroMode" class="secondary-button" type="button">单任务图</button>
+              <span class="toolbar-divider"></span>
+              <button id="flowShowFocus" class="secondary-button active" type="button">分层监控</button>
+              <details class="graph-more">
+                <summary>显示</summary>
+                <div class="graph-more-menu">
+                  <button id="flowScopeButton" class="secondary-button" type="button">结构范围</button>
+                  <button id="flowShowAll" class="secondary-button" type="button">完整总览</button>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div class="flow-context">
+            <div><strong id="flowContextTitle">分层监控</strong><span id="flowContextDetail">默认只展开当前释放视野；完整拓扑按需查看。</span></div>
+            <details class="flow-help">
+              <summary>图例与操作</summary>
+              <div class="flow-help-body">
+                <p>显式依赖决定执行顺序，分组只表示归属。拖拽或双指滑动平移，捏合缩放；单击节点查看详情，双击展开或收起后续节点。</p>
+                <div class="flow-legend" aria-label="状态图例">
+                  <span><i class="ready"></i>可执行</span>
+                  <span><i class="working"></i>执行中</span>
+                  <span><i class="review"></i>审查</span>
+                  <span><i class="approved"></i>已批准</span>
+                  <span><i class="blocked"></i>阻塞</span>
+                  <span><i class="route"></i>路线替换</span>
+                </div>
+              </div>
+            </details>
+          </div>
+          <details class="flow-hud-drawer time-hud-drawer">
+            <summary><span><b>生产时间流</b><small>最近事件、当前游标与下一释放</small></span><em>展开</em></summary>
+            <section id="flowTimeRibbon" class="flow-time-ribbon" aria-label="生产时间流"></section>
+          </details>
+          <div id="flowGraphHost"><details id="topologyDisclosure" class="topology-disclosure">
+            <summary>
+              <span><b id="topologyDisclosureTitle">结构层</b><small id="topologyDisclosureDetail">按需展开完整结构与任务关系</small></span>
+              <em>展开画布</em>
+            </summary>
+            <div id="flowViewport" class="flow-viewport" tabindex="0" aria-label="可平移缩放的课程生产流程图">
+              <svg id="flowSvg" role="img" aria-label="分层任务依赖拓扑"></svg>
+              <div id="flowMinimap" class="flow-minimap" role="navigation" tabindex="0" aria-label="流程图全局导航小地图" title="点击或拖动以移动主画布"></div>
+              <div class="graph-camera-controls" role="group" aria-label="流程拓扑画布控制">
+                <button id="flowZoomIn" type="button" title="放大" aria-label="放大">＋</button>
+                <button id="flowZoomOut" type="button" title="缩小" aria-label="缩小">−</button>
+                <button id="flowFit" type="button" title="适合画布" aria-label="适合画布">⌗</button>
+                <button id="flowFullscreen" type="button" title="切换全屏" aria-label="切换流程拓扑全屏">⛶</button>
+              </div>
+              <div id="flowEmpty" class="flow-empty hidden">当前分集没有可绘制的任务。</div>
+            </div>
+          </details></div>
+        </section>
+
+        <section id="workstationsView" class="view">
+          <div class="section-heading large">
+            <div>
+              <span class="eyebrow">WHO · WHAT · EVIDENCE · BLOCKER</span>
+              <h1>Agent 工位</h1>
+            </div>
+            <p>由租约与事件事实派生，不依赖 Agent 自报进度。</p>
+          </div>
+          <p class="view-intro">每个工位只展示当前任务、上下文签发、租约、最近证据和下一道门。点击工位进入任务检查器；空闲队列、独立审查台和人工审片台单独呈现。</p>
+          <div id="workstationSummary" class="workstation-summary"></div>
+          <div id="workstationGrid" class="workstation-grid"></div>
+        </section>
+
+        <section id="riskView" class="view">
+          <div class="section-heading large">
+            <div>
+              <span class="eyebrow">OBSERVE → PREVIEW → APPLY</span>
+              <h1>风险与局部恢复</h1>
+            </div>
+            <div class="button-row">
+              <button id="riskReturnButton" class="quiet-button" type="button">← 返回生产首页</button>
+              <button id="scanButton" class="secondary-button" type="button">① 快速扫描</button>
+              <button id="deepScanButton" class="secondary-button" type="button">完整制品核验</button>
+              <button id="repairButton" class="danger-button" type="button">② 预览修复方案</button>
+            </div>
+          </div>
+          <p class="view-intro">这是维护页，不是日常监控页。扫描和核验都只读；只有在预览窗口再次确认，才会修改当前状态。事件历史永远保留。</p>
+          <div class="recovery-guide" aria-label="局部恢复使用顺序">
+            <div><b>1</b><span><strong>观察</strong>先扫描当前状态；完整核验会额外读取文件并比对哈希。</span></div>
+            <i>→</i>
+            <div><b>2</b><span><strong>预览</strong>只看当前链路、影响范围和将要发生的变化。</span></div>
+            <i>→</i>
+            <div><b>3</b><span><strong>应用</strong>仅修复预览中的局部状态，不重置任务和事件历史。</span></div>
+          </div>
+          <div id="riskSummary" class="risk-summary"></div>
+          <div id="anomalyList" class="anomaly-list"></div>
+        </section>
+
+        <section id="eventsView" class="view">
+          <div class="section-heading large">
+            <div>
+              <span class="eyebrow">DELTA STREAM</span>
+              <h1>增量事件</h1>
+            </div>
+            <p>只读取上次 cursor 之后的变化。</p>
+          </div>
+          <div id="eventTimeline" class="event-timeline"></div>
+        </section>
+
+        <section id="topologyView" class="view">
+          <div class="section-heading large">
+            <div>
+              <span class="eyebrow">COORDINATE-FREE READ MODEL</span>
+              <h1>Agent 数据入口</h1>
+            </div>
+            <button id="copyTopology" class="secondary-button" type="button">复制 JSON</button>
+          </div>
+          <div class="agent-data-controls" aria-label="Agent 数据读取范围">
+            <button id="agentDataNext" class="agent-data-button active" type="button">下一动作</button>
+            <button id="agentDataFocus" class="agent-data-button" type="button">选中对象上下游</button>
+            <button id="agentDataDelta" class="agent-data-button" type="button">仅增量</button>
+            <button id="agentDataFull" class="agent-data-button" type="button">全量诊断</button>
+          </div>
+          <p id="agentDataIntro" class="view-intro">默认只给一个动作、必要原因和增量 cursor；没有任何排版坐标。完整拓扑只用于监督诊断。</p>
+          <pre id="topologyPre" class="topology-pre"></pre>
+        </section>
+      </main>
+
+      <aside id="inspectorPanel" class="inspector-panel" aria-label="任务检查器">
+        <div class="panel-heading">
+          <div>
+            <span class="eyebrow">TASK DETAIL</span>
+            <h2>任务详情</h2>
+          </div>
+          <div class="panel-actions">
+            <button id="inspectorDetailModeToggle" class="detail-mode-switch" data-detail-mode-toggle type="button" aria-label="切换任务详情显示方式"></button>
+            <button id="closeInspector" class="icon-button" type="button" title="清空选择">×</button>
+          </div>
+        </div>
+        <div id="inspectorBody" class="inspector-body">
+          <div class="inspector-empty">
+            <div class="selection-glyph">↗</div>
+            <h3>选择一个任务</h3>
+            <p>查看它为什么处于当前状态、消费了哪些上下文、允许执行哪些动作。</p>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <button id="drawerScrim" class="drawer-scrim" type="button" aria-label="关闭侧栏"></button>
+
+    <aside id="taskPeek" class="task-peek hidden" role="dialog" aria-modal="false" aria-labelledby="taskPeekTitle"></aside>
+
+    <dialog id="repairPreviewDialog" class="repair-preview-dialog" aria-labelledby="repairPreviewTitle">
+      <div class="repair-preview-shell">
+        <header>
+          <div><span class="eyebrow">SAFE LOCAL RECOVERY</span><h2 id="repairPreviewTitle">确认将要修复的内容</h2></div>
+          <button id="repairPreviewClose" class="icon-button" type="button" aria-label="关闭修复预览">×</button>
+        </header>
+        <p>下面列出的才会改变状态；历史事件、已完成制品和其他任务不会被重置。</p>
+        <div id="repairPreviewList" class="repair-preview-list"></div>
+        <footer>
+          <button id="repairPreviewCancel" class="secondary-button" type="button">只看不修</button>
+          <button id="repairPreviewApply" class="danger-button" type="button">③ 应用以上局部修复</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -3,11 +3,14 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Local supervision state and generated evaluation output
+# Local supervision state and generated project evidence
 .lecture-state/
-state-supervision-evaluation/runs/*/
-state-supervision-evaluation/short-tests/results/
-state-supervision-evaluation/simulation-game/results/
+review/state-supervision/runs/*/
+review/state-supervision/short-tests/results/**/*workspaces/
+review/state-supervision/short-tests/results/**/*oracle.json
+review/state-supervision/simulation-game/results/**/*workspaces/
+review/state-supervision/simulation-game/results/**/*oracle.json
+review/state-supervision/simulation-game/results/**/*frozen-evidence/
 
 # macOS
 .DS_Store
