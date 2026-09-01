@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mylectures.local/schemas/state-supervision-observation-v1.json",
+  "title": "State supervision production observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "observation_id",
+    "recorded_at",
+    "run_id",
+    "episode_id",
+    "reporter",
+    "surface",
+    "category",
+    "severity",
+    "summary",
+    "expected",
+    "observed",
+    "evidence_refs",
+    "impact",
+    "recovery",
+    "status"
+  ],
+  "properties": {
+    "schema": {
+      "const": "state-supervision-observation-v1"
+    },
+    "observation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "episode_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reporter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "enum": ["human", "agent", "system", "reviewer"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_ref": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "task_id": {
+      "type": ["string", "null"]
+    },
+    "aggregate_refs": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "surface": {
+      "enum": [
+        "human_interface",
+        "agent_interface",
+        "action_gateway",
+        "orchestrator",
+        "context_capsule",
+        "artifact_lineage",
+        "time_supervision",
+        "change_impact",
+        "state_projection",
+        "deferred_return",
+        "route_switch",
+        "extension_governor",
+        "recovery",
+        "control_plane",
+        "other"
+      ]
+    },
+    "category": {
+      "enum": [
+        "discoverability",
+        "ambiguity",
+        "context_missing",
+        "context_excess",
+        "context_stale",
+        "context_leakage",
+        "invalid_transition",
+        "permission",
+        "conflict",
+        "determinism",
+        "lineage",
+        "stale_runtime",
+        "partial_invalidation",
+        "false_stage_barrier",
+        "schema_invention_pressure",
+        "return_delivery",
+        "route_replacement",
+        "progress_time_budget",
+        "latency_disconnect",
+        "recovery",
+        "handoff",
+        "side_effect",
+        "telemetry_gap",
+        "other"
+      ]
+    },
+    "severity": {
+      "enum": ["note", "minor", "major", "critical", "blocker"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observed": {
+      "type": "string",
+      "minLength": 1
+    },
+    "state_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "seq": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "topology_hash": {
+          "type": ["string", "null"]
+        },
+        "aggregate_versions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["integer", "string"]
+          }
+        },
+        "artifact_hashes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["production_effect", "human_intervention"],
+      "properties": {
+        "production_effect": {
+          "enum": ["none", "delay", "rework", "quality_risk", "blocked", "unknown"]
+        },
+        "blocked_minutes": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "extra_commands": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "token_cost": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "human_intervention": {
+          "type": "boolean"
+        },
+        "blast_radius": {
+          "enum": ["none", "task", "scene", "branch", "wave", "episode", "global", "unknown"]
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route", "attempts", "outcome", "system_change_applied"],
+      "properties": {
+        "route": {
+          "type": ["string", "null"]
+        },
+        "attempts": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "outcome": {
+          "enum": ["not_needed", "recovered", "workaround", "degraded", "unresolved", "unknown"]
+        },
+        "workaround": {
+          "type": ["string", "null"]
+        },
+        "system_change_applied": {
+          "type": "boolean"
+        },
+        "authorized_by": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "confidence": {
+      "enum": ["low", "medium", "high"]
+    },
+    "status": {
+      "enum": ["open", "observed", "recovered", "superseded"]
+    },
+    "supersedes": {
+      "type": ["string", "null"]
+    },
+    "notes": {
+      "type": ["string", "null"]
+    }
+  }
+}

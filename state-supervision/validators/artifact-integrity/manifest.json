@@ -1,0 +1,15 @@
+{
+  "schema": "lecture-supervision-validator-v1",
+  "validator_id": "artifact-integrity",
+  "version": "1.0.0",
+  "status": "active",
+  "description": "Verify that every candidate artifact exists and still matches its pinned SHA-256 and byte count.",
+  "runner": {
+    "command": ["python3", "run.py"],
+    "timeout_seconds": 30
+  },
+  "capabilities": {
+    "network": false,
+    "writes": false
+  }
+}

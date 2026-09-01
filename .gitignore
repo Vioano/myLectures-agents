@@ -3,6 +3,12 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Local supervision state and generated evaluation output
+.lecture-state/
+state-supervision-evaluation/runs/*/
+state-supervision-evaluation/short-tests/results/
+state-supervision-evaluation/simulation-game/results/
+
 # macOS
 .DS_Store
 ._*

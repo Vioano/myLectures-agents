@@ -1,0 +1,16 @@
+{
+  "schema": "lecture-state-supervision-bundle-v1",
+  "version": "pre13-2026-09-01.1",
+  "runtime": "python>=3.10, standard-library only",
+  "entrypoints": {
+    "agent_cli": "state-supervision/supervise.py",
+    "human_ui": "state-supervision/serve.py",
+    "demo_seed": "state-supervision/seed_demo.py"
+  },
+  "components": [
+    ".agents/skills/lecture-state-supervision",
+    "state-supervision",
+    "state-supervision-evaluation"
+  ],
+  "generated_results_included": false
+}

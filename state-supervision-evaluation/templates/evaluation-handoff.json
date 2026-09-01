@@ -1,0 +1,44 @@
+{
+  "schema": "state-supervision-evaluation-handoff-v1",
+  "run_id": "__RUN_ID__",
+  "episode_id": "__EPISODE_ID__",
+  "status": "draft",
+  "prepared_at": null,
+  "prepared_by_session": "__SESSION_REF__",
+  "production_outcome": {
+    "status": "in_progress",
+    "final_artifact_refs": [],
+    "user_authority_state": "not_recorded"
+  },
+  "pack": {
+    "run_manifest": "run-manifest.json",
+    "observations": "observations.jsonl",
+    "retrospective": "retrospective.md",
+    "evidence_index": "evidence-index.json",
+    "frozen_state_bundle": "frozen-evidence/manifest.json",
+    "derived_metrics": "frozen-evidence/metrics.json"
+  },
+  "system_optimization_applied_by_production_session": false,
+  "emergency_system_changes": [],
+  "confounds": [],
+  "telemetry_gaps": [],
+  "unresolved_observation_ids": [],
+  "requested_evaluation_scope": [
+    "friendliness",
+    "context_precision",
+    "determinism",
+    "isolation",
+    "recovery",
+    "time_and_efficiency",
+    "parallel_capacity_and_utilization",
+    "human_feedback_delivery",
+    "human_effort_and_decision_latency",
+    "quality_and_rework",
+    "attention_efficiency",
+    "change_cost_and_goal_distance",
+    "multiscale_projection",
+    "deferred_returns",
+    "route_flexibility"
+  ],
+  "notes": null
+}

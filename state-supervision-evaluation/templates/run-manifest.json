@@ -1,0 +1,56 @@
+{
+  "schema": "state-supervision-episode-run-manifest-v1",
+  "run_id": "__RUN_ID__",
+  "episode_id": "__EPISODE_ID__",
+  "episode_slug": "__EPISODE_SLUG__",
+  "episode_path": "__EPISODE_PATH__",
+  "production_session_refs": [
+    "__SESSION_REF__"
+  ],
+  "started_at": "__STARTED_AT__",
+  "ended_at": null,
+  "primary_goal": "Deliver the real episode through all existing quality and user gates.",
+  "secondary_goal": "Observe long-run efficiency, stability, friendliness and recovery without deliberately risking production.",
+  "test_mode": "real_production_shadow_run_no_fault_injection",
+  "state_system": {
+    "version": "__SYSTEM_VERSION__",
+    "event_schema_version": null,
+    "cli_version": null,
+    "web_version": null,
+    "initial_seq": null,
+    "initial_topology_hash": null
+  },
+  "instrumentation": {
+    "state_export_dir": "frozen-evidence",
+    "event_log": "frozen-evidence/events.jsonl",
+    "command_log": "frozen-evidence/commands.jsonl",
+    "capsule_manifest_log": "frozen-evidence/capsules.jsonl",
+    "aggregate_projection": "frozen-evidence/aggregates.json",
+    "derived_metrics": "frozen-evidence/metrics.json",
+    "integrity_receipt": "frozen-evidence/integrity.json",
+    "clock_budget_log": "frozen-evidence/aggregates.json",
+    "artifact_lineage_log": "frozen-evidence/aggregates.json",
+    "agent_roster_and_presence_log": "frozen-evidence/aggregates.json",
+    "dispatch_reservation_log": "frozen-evidence/events.jsonl",
+    "review_decision_log": "frozen-evidence/events.jsonl",
+    "annotation_delivery_log": "frozen-evidence/capsules.jsonl",
+    "token_usage_source": "frozen-evidence/aggregates.json",
+    "human_intervention_log": "observations.jsonl",
+    "human_intent_decision_log": "frozen-evidence/events.jsonl",
+    "human_ui_interaction_log": null,
+    "media_playback_performance_log": null,
+    "host_model_runtime_log": null
+  },
+  "expected_deliverables": [],
+  "evaluation_policy": {
+    "production_outcome_first": true,
+    "deliberate_fault_injection": false,
+    "system_optimization_by_production_session": false,
+    "unknown_telemetry_is_not_zero": true,
+    "raw_evidence_is_append_only_at_handoff": true,
+    "collect_hidden_chain_of_thought": false,
+    "collect_unrelated_screen_or_keystroke_history": false
+  },
+  "confounds": [],
+  "notes": null
+}

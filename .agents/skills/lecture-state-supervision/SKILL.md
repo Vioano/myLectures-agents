@@ -19,6 +19,14 @@ at initialization and closeout. Read [the telemetry contract](references/telemet
 only when configuring instrumentation, freezing evidence or writing the
 retrospective.
 
+Before relying on a newly cloned or updated bundle, run
+`./scripts/verify-state-supervision-bundle.sh` from its root. A portable release
+is valid only when that clean-install check proves the Agent CLI, persistent
+backend, Human UI and evaluation tools together. To place the complete system
+in another checkout, run
+`./scripts/install-state-supervision.sh /absolute/path/to/project`; copying this
+Markdown Skill alone is not an installation.
+
 This Skill is the control plane. When a task capsule requests storyboard,
 Manim, Remotion, rendering, review or finalization work, also use the canonical
 `lecture-animation-pipeline` Skill for that bounded task. Do not paste the whole
